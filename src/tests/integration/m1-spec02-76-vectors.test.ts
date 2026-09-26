@@ -16,6 +16,28 @@ import { EpistemicPersistenceService } from '../../persistence/relational/servic
 import { MeasurementPersistenceService } from '../../persistence/relational/services/measurement-persistence-service.js';
 import { DecisionPersistenceService } from '../../persistence/relational/services/decision-persistence-service.js';
 import { claimObjectForGC } from '../../persistence/relational/services/object-registry-service.js';
+import {
+  RegistryValidationError,
+  validateSupersession,
+  validateGenericReference,
+  validateKnowledgeGapClosure,
+  validateEvidenceOrigin,
+  validateApplicabilityAssessment,
+  validateSnapshotTemporalCutoff,
+  validateEvaluatorRunConfigMembership,
+  validateSnapshotTransitiveTenant,
+  validateSnapshotInputTemporalClosure,
+  validatePolicyResultSetCompleteness,
+  validatePolicyConflictResolution,
+  validatePolicyOverrideSnapshot,
+  validatePackageStrategy,
+  validatePackageRightsChecks,
+  validateMeasurementCorrection,
+  validateStageExecutionFencing,
+  validateCycleCancellation,
+  validateReplayabilityStatus,
+  validateDeletionTombstone,
+} from '../../domain/services/registry-validator.js';
 
 function assertTestDatabase(url: string): void {
   const parsed = new URL(url);
@@ -61,6 +83,10 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
   const rkdId = uid('rkd-76');
   const govId = uid('gov-76');
   const policyId = uid('pol-76');
+  const audStateId = uid('aud-76');
+  const stratHypId = uid('strat-76');
+  const stratHypId2 = uid('strat-76-2');
+  const archId = uid('arch-76');
 
   beforeAll(async () => {
     assertTestDatabase(DB_URL);
@@ -92,7 +118,11 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
         ('BaselineKnowledgeSnapshot', ${bksId}, ${tenantA}),
         ('RunKnowledgeDelta', ${rkdId}, ${tenantA}),
         ('GovernanceSnapshot', ${govId}, ${tenantA}),
-        ('RightsPolicy', ${policyId}, ${tenantA})
+        ('RightsPolicy', ${policyId}, ${tenantA}),
+        ('AudienceState', ${audStateId}, ${tenantA}),
+        ('StrategyHypothesis', ${stratHypId}, ${tenantA}),
+        ('StrategyHypothesis', ${stratHypId2}, ${tenantA}),
+        ('ContentArchitecture', ${archId}, ${tenantA})
       ON CONFLICT DO NOTHING
     `;
 
@@ -180,6 +210,35 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
         'None', now()
       ) ON CONFLICT DO NOTHING
     `;
+
+    await sql`
+      INSERT INTO audience_states (
+        audience_state_id, tenant_id, task_revision_id, state_stage, context, knowledge_state,
+        problem_state, solution_state, product_state, brand_state, intent_state, desired_outcome,
+        objections, decision_criteria, prior_exposure, origin, uncertainty
+      ) VALUES (
+        ${audStateId}, ${tenantA}, ${taskRev1}, 'FINAL_FOR_DECISION', 'c', 'k', 'p', 's', 'pr', 'b', 'i', 'd', 'o', 'dc', 'pe', 'ANALYTICAL', 'u'
+      ) ON CONFLICT DO NOTHING
+    `;
+
+    await sql`
+      INSERT INTO strategy_hypotheses (
+        strategy_id, tenant_id, task_revision_id, audience_state_id, core_message,
+        behavioral_objective, proof_strategy, assumptions, unknowns, failure_modes,
+        risk_hypotheses, persuasion_mechanism
+      ) VALUES 
+        (${stratHypId}, ${tenantA}, ${taskRev1}, ${audStateId}, 'Core Msg 1', 'Learn', 'Proof', '[]', '[]', '[]', '[]', 'Rational'),
+        (${stratHypId2}, ${tenantA}, ${taskRev1}, ${audStateId}, 'Core Msg 2', 'Act', 'Proof', '[]', '[]', '[]', '[]', 'Emotional')
+      ON CONFLICT DO NOTHING
+    `;
+
+    await sql`
+      INSERT INTO content_architectures (
+        architecture_id, tenant_id, task_revision_id, strategy_id
+      ) VALUES (
+        ${archId}, ${tenantA}, ${taskRev1}, ${stratHypId}
+      ) ON CONFLICT DO NOTHING
+    `;
   });
 
   afterAll(async () => {
@@ -260,22 +319,20 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
 
   it('Vector 05: revision supersedes different stable ID', async () => {
     expect(() => {
-      const stableA = 'task-stable-a';
-      const stableB = 'task-stable-b';
-      if (stableA !== stableB) {
-        throw new Error('SUPERSESSION_STABLE_ID_MISMATCH');
-      }
-    }).toThrow('SUPERSESSION_STABLE_ID_MISMATCH');
+      validateSupersession(
+        { entity_type: 'TaskContractRevision', stable_id: 'task-stable-a', revision_id: 'task-rev-1' },
+        { entity_type: 'TaskContractRevision', stable_id: 'task-stable-b', revision_id: 'task-rev-2', supersedes_revision_id: 'task-rev-1' },
+      );
+    }).toThrowError(RegistryValidationError);
   });
 
   it('Vector 06: revision self-supersession', async () => {
     expect(() => {
-      const rev = 'rev-123';
-      const supersedes = 'rev-123';
-      if (rev === supersedes) {
-        throw new Error('REVISION_SELF_SUPERSESSION_FORBIDDEN');
-      }
-    }).toThrow('REVISION_SELF_SUPERSESSION_FORBIDDEN');
+      validateSupersession(
+        { entity_type: 'TaskContractRevision', stable_id: 'task-stable-a', revision_id: 'rev-123' },
+        { entity_type: 'TaskContractRevision', stable_id: 'task-stable-a', revision_id: 'rev-123', supersedes_revision_id: 'rev-123' },
+      );
+    }).toThrowError(RegistryValidationError);
   });
 
   it('Vector 07: cross-tenant private FK', async () => {
@@ -312,14 +369,11 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
 
   it('Vector 09: generic ref with both entity and revision branches populated', async () => {
     expect(() => {
-      const payload = {
+      validateGenericReference({
         entity_id: 'ent-1',
         revision_id: 'rev-1',
-      };
-      if (payload.entity_id && payload.revision_id) {
-        throw new Error('GENERIC_REF_BRANCH_CONFLICT: Cannot populate both entity_id and revision_id');
-      }
-    }).toThrow('GENERIC_REF_BRANCH_CONFLICT');
+      });
+    }).toThrowError(RegistryValidationError);
   });
 
   it('Vector 10: canonical ID collection hidden only in JSON', async () => {
@@ -536,61 +590,85 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
 
   it('Vector 15: blocking KnowledgeGap silently removed', async () => {
     expect(() => {
-      const gap = { status: 'BLOCKING' };
-      if (gap.status === 'BLOCKING') {
-        throw new Error('BLOCKING_KNOWLEDGE_GAP_SILENT_REMOVAL_FORBIDDEN');
-      }
-    }).toThrow('BLOCKING_KNOWLEDGE_GAP_SILENT_REMOVAL_FORBIDDEN');
+      validateKnowledgeGapClosure([
+        {
+          gap_id: uid('gap-15'),
+          blocking: true,
+          status: 'UNRESOLVED_REMOVED',
+        },
+      ]);
+    }).toThrowError(RegistryValidationError);
   });
 
   it('Vector 16: EvidenceItem origin discriminator mismatch', async () => {
-    expect(() => {
-      const origin = 'HUMAN_FEEDBACK';
-      const source = 'AUTOMATED_BENCHMARK';
-      if (origin === 'HUMAN_FEEDBACK' && source.includes('AUTOMATED')) {
-        throw new Error('EVIDENCE_DISCRIMINATOR_MISMATCH');
-      }
-    }).toThrow('EVIDENCE_DISCRIMINATOR_MISMATCH');
+    const evId = uid('ev-16');
+    await sql`
+      INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id)
+      VALUES ('EvidenceItem', ${evId}, ${tenantA})
+    `;
+    let err: any;
+    try {
+      await sql`
+        INSERT INTO evidence_items (
+          evidence_id, tenant_id, origin_type, origin_id, evidence_domain,
+          statement, statement_type, assertion_method, study_design,
+          causal_identification, mechanism_support, limitations, valid_from
+        ) VALUES (
+          ${evId}, ${tenantA}, 'INVALID_ORIGIN_DISCRIMINATOR', 'source-1',
+          'PRODUCT_DOCUMENTATION', 'Statement', 'FACTUAL', 'DIRECT_EXTRACTION',
+          'OBSERVATIONAL', 'CORRELATIONAL', 'DIRECT', 'None', now()
+        )
+      `;
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeDefined();
+    expect(err.code).toBe('23514'); // ck_evidence_item_origin_type
   });
 
   it('Vector 17: performance EvidenceItem points to SourceArtifact', async () => {
     expect(() => {
-      const evidenceType = 'PERFORMANCE_METRIC';
-      const targetArtifactType = 'SourceArtifact';
-      if (evidenceType === 'PERFORMANCE_METRIC' && targetArtifactType === 'SourceArtifact') {
-        throw new Error('PERFORMANCE_EVIDENCE_SOURCE_ARTIFACT_FORBIDDEN');
-      }
-    }).toThrow('PERFORMANCE_EVIDENCE_SOURCE_ARTIFACT_FORBIDDEN');
+      validateEvidenceOrigin({
+        origin_type: 'PERFORMANCE_OBSERVATION',
+        origin_id: uid('sa-17'),
+        referenced_entity_type: 'SourceArtifact',
+      });
+    }).toThrowError(RegistryValidationError);
   });
 
   it('Vector 18: Applicability subject_type/subject_revision mismatch', async () => {
     expect(() => {
-      const subjectType = 'PolicyRevision';
-      const subjectRevisionId = 'task-rev-1';
-      if (subjectType === 'PolicyRevision' && subjectRevisionId.startsWith('task-')) {
-        throw new Error('APPLICABILITY_SUBJECT_TYPE_MISMATCH');
-      }
-    }).toThrow('APPLICABILITY_SUBJECT_TYPE_MISMATCH');
+      validateApplicabilityAssessment({
+        assessment_id: uid('app-18'),
+        subject_type: 'PolicyRevision',
+        subject_revision_id: 'task-rev-1',
+        actual_entity_type: 'TaskContractRevision',
+      });
+    }).toThrowError(RegistryValidationError);
   });
 
   it('Vector 19: Applicability cutoff after DecisionSnapshot.frozen_at', async () => {
     const frozenAt = new Date('2026-06-01T00:00:00Z');
     const cutoffAfter = new Date('2026-06-02T00:00:00Z');
     expect(() => {
-      if (cutoffAfter > frozenAt) {
-        throw new Error('APPLICABILITY_CUTOFF_AFTER_SNAPSHOT_FROZEN_AT');
-      }
-    }).toThrow('APPLICABILITY_CUTOFF_AFTER_SNAPSHOT_FROZEN_AT');
+      validateSnapshotTemporalCutoff({
+        snapshot_frozen_at: frozenAt,
+        cutoff_time: cutoffAfter,
+        field_name: 'applicability',
+      });
+    }).toThrowError(RegistryValidationError);
   });
 
   it('Vector 20: RightsCheck cutoff after DecisionSnapshot.frozen_at', async () => {
     const frozenAt = new Date('2026-06-01T00:00:00Z');
     const rcCutoff = new Date('2026-06-02T00:00:00Z');
     expect(() => {
-      if (rcCutoff > frozenAt) {
-        throw new Error('RIGHTS_CHECK_CUTOFF_AFTER_SNAPSHOT_FROZEN_AT');
-      }
-    }).toThrow('RIGHTS_CHECK_CUTOFF_AFTER_SNAPSHOT_FROZEN_AT');
+      validateSnapshotTemporalCutoff({
+        snapshot_frozen_at: frozenAt,
+        cutoff_time: rcCutoff,
+        field_name: 'rights_check',
+      });
+    }).toThrowError(RegistryValidationError);
   });
 
   // 21-30: Decision & Governance Invariants
@@ -607,7 +685,7 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
           candidate_id, tenant_id, task_revision_id, strategy_id, architecture_id,
           content_payload, run_config_id
         ) VALUES (
-          ${candId}, ${tenantA}, ${taskRev1}, 'strat-none', 'arch-none',
+          ${candId}, ${tenantA}, ${taskRev1}, ${stratHypId}, ${archId},
           '{}', 'rc-non-existent'
         )
       `;
@@ -620,12 +698,8 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
 
   it('Vector 22: evaluator revision absent from RunConfig', async () => {
     expect(() => {
-      const runConfigEvaluators = ['eval-rev-1'];
-      const candidateEvaluator = 'eval-rev-unlisted';
-      if (!runConfigEvaluators.includes(candidateEvaluator)) {
-        throw new Error('EVALUATOR_ABSENT_FROM_RUN_CONFIG');
-      }
-    }).toThrow('EVALUATOR_ABSENT_FROM_RUN_CONFIG');
+      validateEvaluatorRunConfigMembership(['eval-rev-1'], 'eval-rev-unlisted');
+    }).toThrowError(RegistryValidationError);
   });
 
   it('Vector 23: snapshot dangling direct ref', async () => {
@@ -654,32 +728,26 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
 
   it('Vector 24: snapshot transitive mismatch', async () => {
     expect(() => {
-      const snapshotTenant = 'tenant-a';
-      const baselineSnapshotTenant = 'tenant-b';
-      if (snapshotTenant !== baselineSnapshotTenant) {
-        throw new Error('SNAPSHOT_TRANSITIVE_TENANT_MISMATCH');
-      }
-    }).toThrow('SNAPSHOT_TRANSITIVE_TENANT_MISMATCH');
+      validateSnapshotTransitiveTenant('tenant-a', [
+        { input_id: 'bks-1', tenant_id: 'tenant-b' },
+      ]);
+    }).toThrowError(RegistryValidationError);
   });
 
   it('Vector 25: snapshot input created after frozen_at', async () => {
     const frozenAt = new Date('2026-01-01T00:00:00Z');
     const inputCreated = new Date('2026-01-02T00:00:00Z');
     expect(() => {
-      if (inputCreated > frozenAt) {
-        throw new Error('SNAPSHOT_INPUT_CREATED_AFTER_FROZEN_AT');
-      }
-    }).toThrow('SNAPSHOT_INPUT_CREATED_AFTER_FROZEN_AT');
+      validateSnapshotInputTemporalClosure(frozenAt, [
+        { input_id: 'inp-25', created_at: inputCreated },
+      ]);
+    }).toThrowError(RegistryValidationError);
   });
 
   it('Vector 26: partial PolicyResult set treated complete', async () => {
     expect(() => {
-      const requiredPolicies = ['pol-1', 'pol-2'];
-      const evaluatedPolicies = ['pol-1'];
-      if (requiredPolicies.length !== evaluatedPolicies.length) {
-        throw new Error('PARTIAL_POLICY_RESULT_SET_INCOMPLETE');
-      }
-    }).toThrow('PARTIAL_POLICY_RESULT_SET_INCOMPLETE');
+      validatePolicyResultSetCompleteness(['pol-1', 'pol-2'], ['pol-1']);
+    }).toThrowError(RegistryValidationError);
   });
 
   it('Vector 27: duplicate PolicyResult for snapshot/policy', async () => {
@@ -811,64 +879,314 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
 
   it('Vector 29: AUTHORIZED_OVERRIDE without PolicyOverride', async () => {
     expect(() => {
-      const decisionAction = 'AUTHORIZED_OVERRIDE';
-      const overrideRecord = null;
-      if (decisionAction === 'AUTHORIZED_OVERRIDE' && !overrideRecord) {
-        throw new Error('OVERRIDE_RECORD_REQUIRED_FOR_AUTHORIZED_OVERRIDE');
-      }
-    }).toThrow('OVERRIDE_RECORD_REQUIRED_FOR_AUTHORIZED_OVERRIDE');
+      validatePolicyConflictResolution({
+        resolution_type: 'AUTHORIZED_OVERRIDE',
+        override_id: null,
+      });
+    }).toThrowError(RegistryValidationError);
   });
 
   it('Vector 30: PolicyOverride crosses snapshots', async () => {
     expect(() => {
-      const snapshotA = 'snap-a';
-      const overrideSnapshot = 'snap-b';
-      if (snapshotA !== overrideSnapshot) {
-        throw new Error('POLICY_OVERRIDE_SNAPSHOT_MISMATCH');
-      }
-    }).toThrow('POLICY_OVERRIDE_SNAPSHOT_MISMATCH');
+      validatePolicyOverrideSnapshot('snap-a', 'snap-b');
+    }).toThrowError(RegistryValidationError);
   });
 
   // 31-40: Publication & Packaging Invariants
   it('Vector 31: DecisionRecord selected candidate outside snapshot', async () => {
-    expect(() => {
-      const snapshotCandidates = ['cand-1', 'cand-2'];
-      const selectedCandidate = 'cand-external';
-      if (!snapshotCandidates.includes(selectedCandidate)) {
-        throw new Error('SELECTED_CANDIDATE_OUTSIDE_SNAPSHOT');
-      }
-    }).toThrow('SELECTED_CANDIDATE_OUTSIDE_SNAPSHOT');
+    const snap31 = uid('snap-31');
+    const cand31 = uid('cand-31');
+    const aud31 = uid('aud-31');
+
+    await sql`
+      INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id)
+      VALUES 
+        ('AudienceState', ${aud31}, ${tenantA}),
+        ('ContentCandidate', ${cand31}, ${tenantA})
+      ON CONFLICT DO NOTHING
+    `;
+    await sql`
+      INSERT INTO audience_states (
+        audience_state_id, tenant_id, task_revision_id, state_stage, context, knowledge_state,
+        problem_state, solution_state, product_state, brand_state, intent_state, desired_outcome,
+        objections, decision_criteria, prior_exposure, origin, uncertainty
+      ) VALUES (
+        ${aud31}, ${tenantA}, ${taskRev1}, 'FINAL_FOR_DECISION', 'c', 'k', 'p', 's', 'pr', 'b', 'i', 'd', 'o', 'dc', 'pe', 'ANALYTICAL', 'u'
+      ) ON CONFLICT DO NOTHING
+    `;
+    await sql`
+      INSERT INTO content_candidates (
+        candidate_id, tenant_id, task_revision_id, strategy_id, architecture_id,
+        content_payload, run_config_id
+      ) VALUES (
+        ${cand31}, ${tenantA}, ${taskRev1}, ${stratHypId}, ${archId},
+        '{}', ${rcId}
+      ) ON CONFLICT DO NOTHING
+    `;
+    await decService.freezeDecisionSnapshot({
+      snapshotId: snap31,
+      baselineKnowledgeSnapshotId: bksId,
+      runKnowledgeDeltaId: rkdId,
+      governanceSnapshotId: govId,
+      runConfigId: rcId,
+      taskRevisionId: taskRev1,
+      audienceStateId: aud31,
+      candidateIds: [cand31],
+      frozenAt: new Date(),
+      tenantId: tenantA,
+    });
+
+    let err: any;
+    try {
+      await decService.recordDecision({
+        decisionId: uid('dec-31'),
+        decisionType: 'CONTENT_RELEASE',
+        taskRevisionId: taskRev1,
+        snapshotId: snap31,
+        reasonCodes: 'APPROVED',
+        selectedAction: 'PUBLISH',
+        selectedCandidateId: 'cand-external-outside-snapshot',
+        releaseStatus: 'READY',
+        policyResultIds: [],
+        tenantId: tenantA,
+      });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeDefined();
+    expect(err.code).toBe('SELECTED_CANDIDATE_NOT_IN_SNAPSHOT');
   });
 
   it('Vector 32: FinalContentPackage candidate differs from DecisionRecord', async () => {
-    expect(() => {
-      const decisionCandidate = 'cand-1';
-      const packageCandidate = 'cand-2';
-      if (decisionCandidate !== packageCandidate) {
-        throw new Error('PACKAGE_CANDIDATE_MISMATCH_WITH_DECISION');
-      }
-    }).toThrow('PACKAGE_CANDIDATE_MISMATCH_WITH_DECISION');
+    const snap32 = uid('snap-32');
+    const cand32A = uid('cand-32-a');
+    const cand32B = uid('cand-32-b');
+    const aud32 = uid('aud-32');
+    const dec32 = uid('dec-32');
+
+    await sql`
+      INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id)
+      VALUES 
+        ('AudienceState', ${aud32}, ${tenantA}),
+        ('ContentCandidate', ${cand32A}, ${tenantA}),
+        ('ContentCandidate', ${cand32B}, ${tenantA})
+      ON CONFLICT DO NOTHING
+    `;
+    await sql`
+      INSERT INTO audience_states (
+        audience_state_id, tenant_id, task_revision_id, state_stage, context, knowledge_state,
+        problem_state, solution_state, product_state, brand_state, intent_state, desired_outcome,
+        objections, decision_criteria, prior_exposure, origin, uncertainty
+      ) VALUES (
+        ${aud32}, ${tenantA}, ${taskRev1}, 'FINAL_FOR_DECISION', 'c', 'k', 'p', 's', 'pr', 'b', 'i', 'd', 'o', 'dc', 'pe', 'ANALYTICAL', 'u'
+      ) ON CONFLICT DO NOTHING
+    `;
+    await sql`
+      INSERT INTO content_candidates (
+        candidate_id, tenant_id, task_revision_id, strategy_id, architecture_id,
+        content_payload, run_config_id
+      ) VALUES 
+        (${cand32A}, ${tenantA}, ${taskRev1}, ${stratHypId}, ${archId}, '{}', ${rcId}),
+        (${cand32B}, ${tenantA}, ${taskRev1}, ${stratHypId}, ${archId}, '{}', ${rcId})
+      ON CONFLICT DO NOTHING
+    `;
+    await decService.freezeDecisionSnapshot({
+      snapshotId: snap32,
+      baselineKnowledgeSnapshotId: bksId,
+      runKnowledgeDeltaId: rkdId,
+      governanceSnapshotId: govId,
+      runConfigId: rcId,
+      taskRevisionId: taskRev1,
+      audienceStateId: aud32,
+      candidateIds: [cand32A, cand32B],
+      frozenAt: new Date(),
+      tenantId: tenantA,
+    });
+    await decService.recordDecision({
+      decisionId: dec32,
+      decisionType: 'CONTENT_RELEASE',
+      taskRevisionId: taskRev1,
+      snapshotId: snap32,
+      reasonCodes: 'APPROVED',
+      selectedAction: 'PUBLISH',
+      selectedCandidateId: cand32A,
+      releaseStatus: 'READY',
+      policyResultIds: [],
+      tenantId: tenantA,
+    });
+
+    let err: any;
+    try {
+      await decService.createFinalContentPackage({
+        packageId: uid('pkg-32'),
+        taskRevisionId: taskRev1,
+        decisionId: dec32,
+        decisionSnapshotId: snap32,
+        selectedCandidateId: cand32B, // Mismatches DecisionRecord selectedCandidateId (cand32A)
+        strategyId: stratHypId,
+        architectureId: archId,
+        audienceStateId: aud32,
+        warnings: 'none',
+        tenantId: tenantA,
+      });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeDefined();
+    expect(err.code).toBe('PACKAGE_CANDIDATE_MISMATCH');
   });
 
   it('Vector 33: FinalContentPackage strategy mismatch', async () => {
-    expect(() => {
-      const candidateStrategy = 'strat-a';
-      const packageStrategy = 'strat-b';
-      if (candidateStrategy !== packageStrategy) {
-        throw new Error('FINAL_PACKAGE_STRATEGY_MISMATCH');
-      }
-    }).toThrow('FINAL_PACKAGE_STRATEGY_MISMATCH');
+    const snap33 = uid('snap-33');
+    const cand33 = uid('cand-33');
+    const aud33 = uid('aud-33');
+    const dec33 = uid('dec-33');
+
+    await sql`
+      INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id)
+      VALUES 
+        ('AudienceState', ${aud33}, ${tenantA}),
+        ('ContentCandidate', ${cand33}, ${tenantA})
+      ON CONFLICT DO NOTHING
+    `;
+    await sql`
+      INSERT INTO audience_states (
+        audience_state_id, tenant_id, task_revision_id, state_stage, context, knowledge_state,
+        problem_state, solution_state, product_state, brand_state, intent_state, desired_outcome,
+        objections, decision_criteria, prior_exposure, origin, uncertainty
+      ) VALUES (
+        ${aud33}, ${tenantA}, ${taskRev1}, 'FINAL_FOR_DECISION', 'c', 'k', 'p', 's', 'pr', 'b', 'i', 'd', 'o', 'dc', 'pe', 'ANALYTICAL', 'u'
+      ) ON CONFLICT DO NOTHING
+    `;
+    await sql`
+      INSERT INTO content_candidates (
+        candidate_id, tenant_id, task_revision_id, strategy_id, architecture_id,
+        content_payload, run_config_id
+      ) VALUES (
+        ${cand33}, ${tenantA}, ${taskRev1}, ${stratHypId}, ${archId}, '{}', ${rcId}
+      ) ON CONFLICT DO NOTHING
+    `;
+    await decService.freezeDecisionSnapshot({
+      snapshotId: snap33,
+      baselineKnowledgeSnapshotId: bksId,
+      runKnowledgeDeltaId: rkdId,
+      governanceSnapshotId: govId,
+      runConfigId: rcId,
+      taskRevisionId: taskRev1,
+      audienceStateId: aud33,
+      candidateIds: [cand33],
+      frozenAt: new Date(),
+      tenantId: tenantA,
+    });
+    await decService.recordDecision({
+      decisionId: dec33,
+      decisionType: 'CONTENT_RELEASE',
+      taskRevisionId: taskRev1,
+      snapshotId: snap33,
+      reasonCodes: 'APPROVED',
+      selectedAction: 'PUBLISH',
+      selectedCandidateId: cand33,
+      releaseStatus: 'READY',
+      policyResultIds: [],
+      tenantId: tenantA,
+    });
+
+    let err: any;
+    try {
+      await decService.createFinalContentPackage({
+        packageId: uid('pkg-33'),
+        taskRevisionId: taskRev1,
+        decisionId: dec33,
+        decisionSnapshotId: snap33,
+        selectedCandidateId: cand33,
+        strategyId: stratHypId2, // Mismatches Candidate strategy (stratHypId)
+        architectureId: archId,
+        audienceStateId: aud33,
+        warnings: 'none',
+        tenantId: tenantA,
+      });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeDefined();
+    expect(err.code).toBe('FINAL_PACKAGE_STRATEGY_MISMATCH');
   });
 
   it('Vector 34: FinalContentPackage injects post-decision RightsCheck', async () => {
-    expect(() => {
-      const snapshotRightsChecks = ['rc-1'];
-      const packageRightsChecks = ['rc-1', 'rc-injected-post-decision'];
-      const injected = packageRightsChecks.filter(r => !snapshotRightsChecks.includes(r));
-      if (injected.length > 0) {
-        throw new Error('POST_DECISION_RIGHTS_CHECK_INJECTION_FORBIDDEN');
-      }
-    }).toThrow('POST_DECISION_RIGHTS_CHECK_INJECTION_FORBIDDEN');
+    const snap34 = uid('snap-34');
+    const cand34 = uid('cand-34');
+    const aud34 = uid('aud-34');
+    const dec34 = uid('dec-34');
+
+    await sql`
+      INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id)
+      VALUES 
+        ('AudienceState', ${aud34}, ${tenantA}),
+        ('ContentCandidate', ${cand34}, ${tenantA})
+      ON CONFLICT DO NOTHING
+    `;
+    await sql`
+      INSERT INTO audience_states (
+        audience_state_id, tenant_id, task_revision_id, state_stage, context, knowledge_state,
+        problem_state, solution_state, product_state, brand_state, intent_state, desired_outcome,
+        objections, decision_criteria, prior_exposure, origin, uncertainty
+      ) VALUES (
+        ${aud34}, ${tenantA}, ${taskRev1}, 'FINAL_FOR_DECISION', 'c', 'k', 'p', 's', 'pr', 'b', 'i', 'd', 'o', 'dc', 'pe', 'ANALYTICAL', 'u'
+      ) ON CONFLICT DO NOTHING
+    `;
+    await sql`
+      INSERT INTO content_candidates (
+        candidate_id, tenant_id, task_revision_id, strategy_id, architecture_id,
+        content_payload, run_config_id
+      ) VALUES (
+        ${cand34}, ${tenantA}, ${taskRev1}, ${stratHypId}, ${archId}, '{}', ${rcId}
+      ) ON CONFLICT DO NOTHING
+    `;
+    await decService.freezeDecisionSnapshot({
+      snapshotId: snap34,
+      baselineKnowledgeSnapshotId: bksId,
+      runKnowledgeDeltaId: rkdId,
+      governanceSnapshotId: govId,
+      runConfigId: rcId,
+      taskRevisionId: taskRev1,
+      audienceStateId: aud34,
+      candidateIds: [cand34],
+      frozenAt: new Date(),
+      tenantId: tenantA,
+    });
+    await decService.recordDecision({
+      decisionId: dec34,
+      decisionType: 'CONTENT_RELEASE',
+      taskRevisionId: taskRev1,
+      snapshotId: snap34,
+      reasonCodes: 'APPROVED',
+      selectedAction: 'PUBLISH',
+      selectedCandidateId: cand34,
+      releaseStatus: 'READY',
+      policyResultIds: [],
+      tenantId: tenantA,
+    });
+
+    let err: any;
+    try {
+      await decService.createFinalContentPackage({
+        packageId: uid('pkg-34'),
+        taskRevisionId: taskRev1,
+        decisionId: dec34,
+        decisionSnapshotId: snap34,
+        selectedCandidateId: cand34,
+        strategyId: stratHypId,
+        architectureId: archId,
+        audienceStateId: aud34,
+        warnings: 'none',
+        rightsCheckIds: ['rc-unapproved-post-freeze'], // Not in snapshot
+        tenantId: tenantA,
+      });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeDefined();
+    expect(err.code).toBe('POST_DECISION_RIGHTS_CHECK_INJECTION_FORBIDDEN');
   });
 
   it('Vector 35: second publication root', async () => {
@@ -1101,13 +1419,52 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
 
   // 41-50: Measurement & Execution Invariants
   it('Vector 41: MeasurementState branch', async () => {
-    expect(() => {
-      const activeBranch = 'branch-1';
-      const parallelBranch = 'branch-2';
-      if (activeBranch !== parallelBranch) {
-        throw new Error('MEASUREMENT_STATE_BRANCH_FORBIDDEN');
-      }
-    }).toThrow('MEASUREMENT_STATE_BRANCH_FORBIDDEN');
+    const msRoot = uid('ms-root-41');
+    const msSucc1 = uid('ms-succ-41-1');
+    const msSucc2 = uid('ms-succ-41-2');
+
+    await sql`
+      INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id)
+      VALUES 
+        ('MeasurementState', ${msRoot}, ${tenantA}),
+        ('MeasurementState', ${msSucc1}, ${tenantA}),
+        ('MeasurementState', ${msSucc2}, ${tenantA})
+      ON CONFLICT DO NOTHING
+    `;
+
+    await sql`
+      INSERT INTO measurement_states (
+        measurement_state_id, tenant_id, data_maturity, is_final, late_event_window,
+        missingness, known_incidents, observed_at
+      ) VALUES (
+        ${msRoot}, ${tenantA}, 'PRELIMINARY', false, '7d', 'LOW', 'NONE', now()
+      )
+    `;
+
+    await sql`
+      INSERT INTO measurement_states (
+        measurement_state_id, tenant_id, supersedes_measurement_state_id, data_maturity,
+        is_final, late_event_window, missingness, known_incidents, observed_at
+      ) VALUES (
+        ${msSucc1}, ${tenantA}, ${msRoot}, 'PARTIAL', false, '7d', 'LOW', 'NONE', now()
+      )
+    `;
+
+    let err: any;
+    try {
+      await sql`
+        INSERT INTO measurement_states (
+          measurement_state_id, tenant_id, supersedes_measurement_state_id, data_maturity,
+          is_final, late_event_window, missingness, known_incidents, observed_at
+        ) VALUES (
+          ${msSucc2}, ${tenantA}, ${msRoot}, 'PARTIAL', false, '7d', 'LOW', 'NONE', now()
+        )
+      `;
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeDefined();
+    expect(err.code).toBe('23505'); // uq_measurement_state_supersedes
   });
 
   it('Vector 42: PerformanceObservation correction branch', async () => {
@@ -1181,23 +1538,143 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
   });
 
   it('Vector 43: PerformanceObservation correction changes metric revision', async () => {
-    expect(() => {
-      const origMetric = 'metric-rev-1';
-      const corrMetric = 'metric-rev-2';
-      if (origMetric !== corrMetric) {
-        throw new Error('OBSERVATION_CORRECTION_METRIC_REVISION_MISMATCH');
-      }
-    }).toThrow('OBSERVATION_CORRECTION_METRIC_REVISION_MISMATCH');
+    const obsId = uid('obs-43');
+    const msId = uid('ms-43');
+    const artId = uid('art-43');
+    const linId = uid('lin-43');
+
+    await sql`
+      INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id)
+      VALUES ('MeasurementState', ${msId}, ${tenantA})
+      ON CONFLICT DO NOTHING
+    `;
+    await sql`
+      INSERT INTO measurement_states (
+        measurement_state_id, tenant_id, data_maturity, is_final, late_event_window,
+        missingness, known_incidents, observed_at
+      ) VALUES (${msId}, ${tenantA}, 'PRELIMINARY', false, '7d', 'LOW', 'NONE', now())
+      ON CONFLICT DO NOTHING
+    `;
+    await pubService.createLineageWithRoot({
+      lineageId: linId,
+      channel: 'TWITTER_X',
+      destination: 'dest-43',
+      artifactId: artId,
+      effectiveFrom: new Date('2026-01-01T00:00:00Z'),
+      tenantId: tenantA,
+    });
+
+    await measService.recordPerformanceObservation({
+      observationId: obsId,
+      publicationState: 'SINGLE_ARTIFACT',
+      coveredPublishedArtifactIds: [artId],
+      metricRevisionId: metricRev1,
+      value: '100',
+      measurementWindowStart: new Date('2026-02-01T00:00:00Z'),
+      measurementWindowEnd: new Date('2026-02-02T00:00:00Z'),
+      populationOrDenominator: '1000',
+      measurementStateId: msId,
+      sourceReference: 'src-43',
+      observedAt: new Date(),
+      tenantId: tenantA,
+    });
+
+    let err: any;
+    try {
+      await measService.recordPerformanceObservation({
+        observationId: uid('corr-43'),
+        supersedesObservationId: obsId,
+        publicationState: 'SINGLE_ARTIFACT',
+        coveredPublishedArtifactIds: [artId],
+        metricRevisionId: 'metric-different-rev', // Changes metric revision
+        value: '105',
+        measurementWindowStart: new Date('2026-02-01T00:00:00Z'),
+        measurementWindowEnd: new Date('2026-02-02T00:00:00Z'),
+        populationOrDenominator: '1000',
+        measurementStateId: msId,
+        sourceReference: 'src-43',
+        observedAt: new Date(),
+        tenantId: tenantA,
+      });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeDefined();
+    expect(err.code).toBe('CORRECTION_METRIC_REVISION_MISMATCH');
   });
 
   it('Vector 44: correction changes semantic measurement scope', async () => {
-    expect(() => {
-      const origScope = 'SINGLE_ARTIFACT';
-      const corrScope = 'AGGREGATE_LINEAGE';
-      if (origScope !== corrScope) {
-        throw new Error('OBSERVATION_CORRECTION_SCOPE_MISMATCH');
-      }
-    }).toThrow('OBSERVATION_CORRECTION_SCOPE_MISMATCH');
+    const obsId = uid('obs-44');
+    const msId = uid('ms-44');
+    const artId1 = uid('art-44-1');
+    const artId2 = uid('art-44-2');
+    const linId = uid('lin-44');
+
+    await sql`
+      INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id)
+      VALUES ('MeasurementState', ${msId}, ${tenantA})
+      ON CONFLICT DO NOTHING
+    `;
+    await sql`
+      INSERT INTO measurement_states (
+        measurement_state_id, tenant_id, data_maturity, is_final, late_event_window,
+        missingness, known_incidents, observed_at
+      ) VALUES (${msId}, ${tenantA}, 'PRELIMINARY', false, '7d', 'LOW', 'NONE', now())
+      ON CONFLICT DO NOTHING
+    `;
+    await pubService.createLineageWithRoot({
+      lineageId: linId,
+      channel: 'TWITTER_X',
+      destination: 'dest-44',
+      artifactId: artId1,
+      effectiveFrom: new Date('2026-01-01T00:00:00Z'),
+      tenantId: tenantA,
+    });
+    await pubService.appendSuccessor({
+      lineageId: linId,
+      supersedesPublishedArtifactId: artId1,
+      artifactId: artId2,
+      effectiveFrom: new Date('2026-01-02T00:00:00Z'),
+      tenantId: tenantA,
+    });
+
+    await measService.recordPerformanceObservation({
+      observationId: obsId,
+      publicationState: 'SINGLE_ARTIFACT',
+      coveredPublishedArtifactIds: [artId1],
+      metricRevisionId: metricRev1,
+      value: '100',
+      measurementWindowStart: new Date('2026-02-01T00:00:00Z'),
+      measurementWindowEnd: new Date('2026-02-02T00:00:00Z'),
+      populationOrDenominator: '1000',
+      measurementStateId: msId,
+      sourceReference: 'src-44',
+      observedAt: new Date(),
+      tenantId: tenantA,
+    });
+
+    let err: any;
+    try {
+      await measService.recordPerformanceObservation({
+        observationId: uid('corr-44'),
+        supersedesObservationId: obsId,
+        publicationState: 'MIXED_PUBLICATION_STATE', // Changes scope from SINGLE to MIXED
+        coveredPublishedArtifactIds: [artId1, artId2],
+        metricRevisionId: metricRev1,
+        value: '105',
+        measurementWindowStart: new Date('2026-02-01T00:00:00Z'),
+        measurementWindowEnd: new Date('2026-02-02T00:00:00Z'),
+        populationOrDenominator: '1000',
+        measurementStateId: msId,
+        sourceReference: 'src-44',
+        observedAt: new Date(),
+        tenantId: tenantA,
+      });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeDefined();
+    expect(err.code).toBe('OBSERVATION_CORRECTION_SCOPE_MISMATCH');
   });
 
   it('Vector 45: SINGLE_ARTIFACT with zero or multiple covered artifacts', async () => {
@@ -1299,13 +1776,52 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
   });
 
   it('Vector 47: SINGLE_ARTIFACT window crosses publication interval', async () => {
-    expect(() => {
-      const artPublishedAt = new Date('2026-02-01T00:00:00Z');
-      const windowStart = new Date('2026-01-01T00:00:00Z');
-      if (windowStart < artPublishedAt) {
-        throw new Error('MEASUREMENT_WINDOW_PRIOR_TO_PUBLICATION');
-      }
-    }).toThrow('MEASUREMENT_WINDOW_PRIOR_TO_PUBLICATION');
+    const artId = uid('art-47');
+    const linId = uid('lin-47');
+    const msId = uid('ms-47');
+
+    await sql`
+      INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id)
+      VALUES ('MeasurementState', ${msId}, ${tenantA})
+      ON CONFLICT DO NOTHING
+    `;
+    await sql`
+      INSERT INTO measurement_states (
+        measurement_state_id, tenant_id, data_maturity, is_final, late_event_window,
+        missingness, known_incidents, observed_at
+      ) VALUES (${msId}, ${tenantA}, 'PRELIMINARY', false, '7d', 'LOW', 'NONE', now())
+      ON CONFLICT DO NOTHING
+    `;
+    await pubService.createLineageWithRoot({
+      lineageId: linId,
+      channel: 'TWITTER_X',
+      destination: 'dest-47',
+      artifactId: artId,
+      effectiveFrom: new Date('2026-05-01T00:00:00Z'),
+      tenantId: tenantA,
+    });
+
+    let err: any;
+    try {
+      await measService.recordPerformanceObservation({
+        observationId: uid('obs-47'),
+        publicationState: 'SINGLE_ARTIFACT',
+        coveredPublishedArtifactIds: [artId],
+        metricRevisionId: metricRev1,
+        value: '100',
+        measurementWindowStart: new Date('2026-01-01T00:00:00Z'), // Prior to publication effective_from (2026-05-01)
+        measurementWindowEnd: new Date('2026-05-02T00:00:00Z'),
+        populationOrDenominator: '1000',
+        measurementStateId: msId,
+        sourceReference: 'src-47',
+        observedAt: new Date(),
+        tenantId: tenantA,
+      });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeDefined();
+    expect(err.code).toBe('MEASUREMENT_WINDOW_EXCEEDS_PUBLICATION');
   });
 
   it('Vector 48: object GC race with canonical reference creation', async () => {
@@ -1334,24 +1850,58 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
   });
 
   it('Vector 49: duplicate StageExecution idempotency key', async () => {
-    expect(() => {
-      const keys = new Set<string>();
-      const key = 'stage-idemp-key-1';
-      keys.add(key);
-      if (keys.has(key)) {
-        throw new Error('DUPLICATE_STAGE_EXECUTION_IDEMPOTENCY_KEY');
-      }
-    }).toThrow('DUPLICATE_STAGE_EXECUTION_IDEMPOTENCY_KEY');
+    const runId = uid('run-49');
+    const cycleId = uid('cycle-49');
+    const idempKey = uid('idemp-49');
+
+    await sql`
+      INSERT INTO runs (
+        run_id, tenant_id, run_correlation_key, task_revision_id, initialization_cutoff,
+        initial_run_config_id, initial_baseline_snapshot_id, status
+      ) VALUES (
+        ${runId}, ${tenantA}, ${uid('corr-49')}, ${taskRev1}, now(), ${rcId}, ${bksId}, 'ACTIVE'
+      )
+    `;
+    await decService.createDecisionCycle({
+      decisionCycleId: cycleId,
+      runId,
+      cycleNumber: 1,
+      reason: 'Stage cycle',
+      tenantId: tenantA,
+    });
+
+    await sql`
+      INSERT INTO stage_executions (
+        stage_execution_id, tenant_id, idempotency_key, run_id, decision_cycle_id,
+        stage_name, status, canonical_input_hash
+      ) VALUES (
+        ${uid('stage-49-1')}, ${tenantA}, ${idempKey}, ${runId}, ${cycleId},
+        'SYNTHESIS', 'COMPLETED', 'hash-1'
+      )
+    `;
+
+    let err: any;
+    try {
+      await sql`
+        INSERT INTO stage_executions (
+          stage_execution_id, tenant_id, idempotency_key, run_id, decision_cycle_id,
+          stage_name, status, canonical_input_hash
+        ) VALUES (
+          ${uid('stage-49-2')}, ${tenantA}, ${idempKey}, ${runId}, ${cycleId},
+          'SYNTHESIS', 'COMPLETED', 'hash-2'
+        )
+      `;
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeDefined();
+    expect(err.code).toBe('23505'); // uq_stage_exec_idempotency_key
   });
 
   it('Vector 50: stale StageExecution fencing token', async () => {
     expect(() => {
-      const currentToken = 5;
-      const incomingToken = 4;
-      if (incomingToken < currentToken) {
-        throw new Error('STALE_FENCING_TOKEN');
-      }
-    }).toThrow('STALE_FENCING_TOKEN');
+      validateStageExecutionFencing(5, 4);
+    }).toThrowError(RegistryValidationError);
   });
 
   // 51-60: Transactional, Immutability & Operational Invariants
@@ -1391,13 +1941,37 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
   });
 
   it('Vector 52: cancellation without cycle epoch bump', async () => {
+    const runId = uid('run-52');
+    const cycleId = uid('cycle-52');
+
+    await sql`
+      INSERT INTO runs (
+        run_id, tenant_id, run_correlation_key, task_revision_id, initialization_cutoff,
+        initial_run_config_id, initial_baseline_snapshot_id, status
+      ) VALUES (
+        ${runId}, ${tenantA}, ${uid('corr-52')}, ${taskRev1}, now(), ${rcId}, ${bksId}, 'ACTIVE'
+      )
+    `;
+    await decService.createDecisionCycle({
+      decisionCycleId: cycleId,
+      runId,
+      cycleNumber: 1,
+      reason: 'Cancellation cycle',
+      tenantId: tenantA,
+    });
+
+    // Domain validator rejects cancellation without epoch bump
     expect(() => {
-      const currentEpoch = 1;
-      const cancelledEpoch = 1;
-      if (cancelledEpoch <= currentEpoch) {
-        throw new Error('CANCELLATION_REQUIRES_EPOCH_BUMP');
-      }
-    }).toThrow('CANCELLATION_REQUIRES_EPOCH_BUMP');
+      validateCycleCancellation(1, 1);
+    }).toThrowError(RegistryValidationError);
+
+    // Production service cancels and atomically bumps fencing_epoch
+    const [before] = await sql`SELECT fencing_epoch FROM decision_cycles WHERE decision_cycle_id = ${cycleId}`;
+    await decService.cancelDecisionCycle(cycleId, runId);
+    const [after] = await sql`SELECT status, fencing_epoch FROM decision_cycles WHERE decision_cycle_id = ${cycleId}`;
+
+    expect(after?.['status']).toBe('CANCELLED');
+    expect(Number(after?.['fencing_epoch'])).toBe(Number(before?.['fencing_epoch']) + 1);
   });
 
   it('Vector 53: duplicate API idempotency key with different request hash', async () => {
@@ -1557,12 +2131,8 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
 
   it('Vector 59: deleted payload reported as FULL replay', async () => {
     expect(() => {
-      const payloadPruned = true;
-      const reportedStatus = 'FULL';
-      if (payloadPruned && reportedStatus === 'FULL') {
-        throw new Error('DELETED_PAYLOAD_CANNOT_BE_REPORTED_AS_FULL_REPLAY');
-      }
-    }).toThrow('DELETED_PAYLOAD_CANNOT_BE_REPORTED_AS_FULL_REPLAY');
+      validateReplayabilityStatus('DELETED', 'FULL');
+    }).toThrowError(RegistryValidationError);
   });
 
   it('Vector 60: runtime ChangeProposal directly activates revision', async () => {
@@ -1691,13 +2261,28 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
   });
 
   it('Vector 67: required deletion retains prohibited identity data only to preserve FK/replay', async () => {
+    // 1. Production database rejects tombstone with payload_retained = true
+    let err: any;
+    try {
+      await sql`
+        INSERT INTO deleted_target_tombstones (
+          entity_type, entity_id, tenant_id, deletion_reason_code, payload_retained
+        ) VALUES (
+          'ExecutionArtifact', ${uid('del-67')}, ${tenantA}, 'GDPR_FORGOTTEN', true
+        )
+      `;
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeDefined();
+    expect(err.code).toBe('23514'); // ck_tombstone_payload_false
+
+    // 2. Production domain validator rejects prohibited data retention
     expect(() => {
-      const retainsPII = false;
-      const structuralTombstoneOnly = true;
-      if (!structuralTombstoneOnly && retainsPII) {
-        throw new Error('PROHIBITED_IDENTITY_DATA_RETAINED');
-      }
-    }).not.toThrow();
+      validateDeletionTombstone({
+        payload_retained: true,
+      });
+    }).toThrowError(RegistryValidationError);
   });
 
   it('Vector 68: cross-tenant ObjectRegistry content_hash/object reference collision or existence leak', async () => {

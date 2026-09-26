@@ -125,7 +125,8 @@ export class MeasurementPersistenceService {
 
         const [pred] = await sqlTx`
           SELECT observation_id, metric_revision_id, measurement_window_start,
-                 measurement_window_end, population_or_denominator, supersedes_observation_id
+                 measurement_window_end, population_or_denominator, supersedes_observation_id,
+                 publication_state
           FROM performance_observations
           WHERE observation_id = ${supersedesObservationId}
           FOR UPDATE
@@ -142,6 +143,14 @@ export class MeasurementPersistenceService {
           throw new RegistryValidationError(
             'CORRECTION_METRIC_REVISION_MISMATCH',
             `Correction cannot change metric_revision_id from '${pred.metric_revision_id}' to '${metricRevisionId}'.`,
+          );
+        }
+
+        // Publication coverage scope must remain identical
+        if (pred.publication_state && pred.publication_state !== publicationState) {
+          throw new RegistryValidationError(
+            'OBSERVATION_CORRECTION_SCOPE_MISMATCH',
+            `Correction cannot alter semantic measurement scope from '${pred.publication_state}' to '${publicationState}'.`,
           );
         }
 

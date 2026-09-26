@@ -1459,7 +1459,8 @@ CREATE TABLE "deleted_target_tombstones" (
 	"deletion_reason_code" text NOT NULL,
 	"deleted_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"payload_retained" boolean DEFAULT false NOT NULL,
-	CONSTRAINT "deleted_target_tombstones_entity_type_entity_id_pk" PRIMARY KEY("entity_type","entity_id")
+	CONSTRAINT "deleted_target_tombstones_entity_type_entity_id_pk" PRIMARY KEY("entity_type","entity_id"),
+	CONSTRAINT "ck_tombstone_payload_false" CHECK ("payload_retained" = false)
 );
 --> statement-breakpoint
 ALTER TABLE "object_references" ADD CONSTRAINT "object_references_tenant_id_object_id_object_registry_tenant_id_object_id_fk" FOREIGN KEY ("tenant_id","object_id") REFERENCES "public"."object_registry"("tenant_id","object_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint

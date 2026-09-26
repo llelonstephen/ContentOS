@@ -159,6 +159,29 @@ export class DecisionPersistenceService {
   }
 
   /**
+   * Cancels an active DecisionCycle and atomically increments its fencing_epoch (SPEC02 §19, §37).
+   */
+  async cancelDecisionCycle(decisionCycleId: string, runId: string): Promise<void> {
+    await this.sql.begin(async (sqlTx) => {
+      const [cycle] = await sqlTx`
+        SELECT decision_cycle_id, run_id, status, fencing_epoch
+        FROM decision_cycles
+        WHERE decision_cycle_id = ${decisionCycleId} AND run_id = ${runId}
+        FOR UPDATE
+      `;
+      if (!cycle) {
+        throw new RegistryValidationError('CYCLE_NOT_FOUND', `DecisionCycle '${decisionCycleId}' not found for Run '${runId}'.`);
+      }
+      await sqlTx`
+        UPDATE decision_cycles
+        SET status = 'CANCELLED',
+            fencing_epoch = fencing_epoch + 1
+        WHERE decision_cycle_id = ${decisionCycleId}
+      `;
+    });
+  }
+
+  /**
    * Freezes a DecisionSnapshot atomically with all reference set associations.
    */
   async freezeDecisionSnapshot(params: FreezeDecisionSnapshotParams): Promise<void> {
@@ -381,6 +404,37 @@ export class DecisionPersistenceService {
       }
       if (decision.selected_candidate_id && decision.selected_candidate_id !== selectedCandidateId) {
         throw new RegistryValidationError('PACKAGE_CANDIDATE_MISMATCH', `Package candidate does not match Decision selected candidate.`);
+      }
+
+      // Validate candidate strategy & architecture closure (SPEC02 §25)
+      const [cand] = await sqlTx`
+        SELECT candidate_id, strategy_id, architecture_id
+        FROM content_candidates
+        WHERE candidate_id = ${selectedCandidateId}
+      `;
+      if (cand) {
+        if (cand.strategy_id !== strategyId) {
+          throw new RegistryValidationError(
+            'FINAL_PACKAGE_STRATEGY_MISMATCH',
+            `FinalContentPackage strategy_id '${strategyId}' must match candidate strategy_id '${cand.strategy_id}'.`,
+          );
+        }
+      }
+
+      // Validate rights checks against snapshot (SPEC02 §25)
+      if (rightsCheckIds && rightsCheckIds.length > 0) {
+        const snapshotRights = await sqlTx`
+          SELECT rights_check_id FROM decision_snapshot_rights_checks WHERE snapshot_id = ${decisionSnapshotId}
+        `;
+        const allowed = new Set(snapshotRights.map((r: any) => r.rights_check_id));
+        for (const rcId of rightsCheckIds) {
+          if (!allowed.has(rcId)) {
+            throw new RegistryValidationError(
+              'POST_DECISION_RIGHTS_CHECK_INJECTION_FORBIDDEN',
+              `RightsCheck '${rcId}' was injected after snapshot freeze; not present in snapshot rights checks.`,
+            );
+          }
+        }
       }
 
       // 1. Register in ImmutableEntityRegistry

@@ -474,3 +474,272 @@ export function validateDecisionClosure(
     }
   }
 }
+
+export interface GenericReferenceInput {
+  entity_id?: string | null;
+  entity_type?: string | null;
+  stable_id?: string | null;
+  revision_id?: string | null;
+}
+
+export function validateGenericReference(ref: GenericReferenceInput): void {
+  const hasEntity = Boolean(ref.entity_id);
+  const hasRevision = Boolean(ref.revision_id || ref.stable_id);
+  if (hasEntity && hasRevision) {
+    throw new RegistryValidationError(
+      'GENERIC_REF_BRANCH_CONFLICT',
+      'Cannot populate both entity_id and revision_id/stable_id in GenericReference',
+    );
+  }
+  if (!hasEntity && !hasRevision) {
+    throw new RegistryValidationError(
+      'GENERIC_REF_EMPTY',
+      'GenericReference must populate either entity_id or revision_id',
+    );
+  }
+}
+
+export interface KnowledgeGapResolutionInput {
+  gap_id: string;
+  blocking: boolean;
+  status: string;
+  resolution_id?: string | null;
+}
+
+export function validateKnowledgeGapClosure(gaps: KnowledgeGapResolutionInput[]): void {
+  for (const gap of gaps) {
+    if (gap.blocking && (gap.status === 'UNRESOLVED_REMOVED' || (!gap.resolution_id && gap.status === 'RESOLVED'))) {
+      throw new RegistryValidationError(
+        'BLOCKING_KNOWLEDGE_GAP_SILENT_REMOVAL_FORBIDDEN',
+        `Blocking KnowledgeGap '${gap.gap_id}' cannot be silently removed; it requires an explicit resolution record`,
+      );
+    }
+  }
+}
+
+export interface EvidenceItemOriginInput {
+  origin_type: string;
+  origin_id: string;
+  referenced_entity_type?: string;
+}
+
+export function validateEvidenceOrigin(evidence: EvidenceItemOriginInput): void {
+  if (!['SOURCE_ARTIFACT', 'PERFORMANCE_OBSERVATION'].includes(evidence.origin_type)) {
+    throw new RegistryValidationError(
+      'EVIDENCE_DISCRIMINATOR_MISMATCH',
+      `EvidenceItem origin_type '${evidence.origin_type}' is invalid; must be 'SOURCE_ARTIFACT' or 'PERFORMANCE_OBSERVATION'`,
+    );
+  }
+  if (
+    evidence.origin_type === 'PERFORMANCE_OBSERVATION' &&
+    evidence.referenced_entity_type &&
+    evidence.referenced_entity_type !== 'PerformanceObservation'
+  ) {
+    throw new RegistryValidationError(
+      'PERFORMANCE_EVIDENCE_SOURCE_ARTIFACT_FORBIDDEN',
+      `EvidenceItem with origin_type 'PERFORMANCE_OBSERVATION' cannot reference entity of type '${evidence.referenced_entity_type}'`,
+    );
+  }
+  if (
+    evidence.origin_type === 'SOURCE_ARTIFACT' &&
+    evidence.referenced_entity_type &&
+    evidence.referenced_entity_type !== 'SourceArtifact'
+  ) {
+    throw new RegistryValidationError(
+      'SOURCE_EVIDENCE_TYPE_MISMATCH',
+      `EvidenceItem with origin_type 'SOURCE_ARTIFACT' cannot reference entity of type '${evidence.referenced_entity_type}'`,
+    );
+  }
+}
+
+export interface ApplicabilityAssessmentInput {
+  assessment_id: string;
+  subject_type: string;
+  subject_revision_id: string;
+  actual_entity_type?: string;
+}
+
+export function validateApplicabilityAssessment(assessment: ApplicabilityAssessmentInput): void {
+  if (assessment.actual_entity_type && assessment.actual_entity_type !== assessment.subject_type) {
+    throw new RegistryValidationError(
+      'APPLICABILITY_SUBJECT_TYPE_MISMATCH',
+      `Applicability subject_type '${assessment.subject_type}' does not match actual revision entity_type '${assessment.actual_entity_type}'`,
+    );
+  }
+}
+
+export function validateSnapshotTemporalCutoff(params: {
+  snapshot_frozen_at: Date;
+  cutoff_time: Date;
+  field_name?: string;
+}): void {
+  if (params.cutoff_time.getTime() > params.snapshot_frozen_at.getTime()) {
+    const code = params.field_name === 'rights_check'
+      ? 'RIGHTS_CHECK_CUTOFF_AFTER_SNAPSHOT_FROZEN_AT'
+      : 'APPLICABILITY_CUTOFF_AFTER_SNAPSHOT_FROZEN_AT';
+    throw new RegistryValidationError(
+      code,
+      `Cutoff time (${params.cutoff_time.toISOString()}) cannot be after snapshot frozen_at (${params.snapshot_frozen_at.toISOString()})`,
+    );
+  }
+}
+
+export function validateEvaluatorRunConfigMembership(
+  runConfigEvaluators: string[],
+  candidateEvaluatorId: string,
+): void {
+  if (!runConfigEvaluators.includes(candidateEvaluatorId)) {
+    throw new RegistryValidationError(
+      'EVALUATOR_ABSENT_FROM_RUN_CONFIG',
+      `Evaluator revision '${candidateEvaluatorId}' is absent from RunConfig evaluator set [${runConfigEvaluators.join(', ')}]`,
+    );
+  }
+}
+
+export function validateSnapshotTransitiveTenant(
+  snapshotTenantId: string,
+  inputs: { input_id: string; tenant_id: string }[],
+): void {
+  for (const input of inputs) {
+    if (input.tenant_id !== snapshotTenantId) {
+      throw new RegistryValidationError(
+        'SNAPSHOT_TRANSITIVE_TENANT_MISMATCH',
+        `Input '${input.input_id}' has tenant_id '${input.tenant_id}' which does not match snapshot tenant_id '${snapshotTenantId}'`,
+      );
+    }
+  }
+}
+
+export function validateSnapshotInputTemporalClosure(
+  snapshotFrozenAt: Date,
+  inputs: { input_id: string; created_at: Date }[],
+): void {
+  for (const input of inputs) {
+    if (input.created_at.getTime() > snapshotFrozenAt.getTime()) {
+      throw new RegistryValidationError(
+        'SNAPSHOT_INPUT_CREATED_AFTER_FROZEN_AT',
+        `Input '${input.input_id}' created at ${input.created_at.toISOString()} is after snapshot frozen_at ${snapshotFrozenAt.toISOString()}`,
+      );
+    }
+  }
+}
+
+export function validatePolicyResultSetCompleteness(
+  expectedPolicyIds: string[],
+  evaluatedPolicyIds: string[],
+): void {
+  const evaluatedSet = new Set(evaluatedPolicyIds);
+  for (const pid of expectedPolicyIds) {
+    if (!evaluatedSet.has(pid)) {
+      throw new RegistryValidationError(
+        'PARTIAL_POLICY_RESULT_SET_INCOMPLETE',
+        `Policy evaluation is incomplete: missing required policy '${pid}'`,
+      );
+    }
+  }
+}
+
+export function validatePolicyConflictResolution(resolution: {
+  resolution_type: string;
+  override_id?: string | null;
+}): void {
+  if (resolution.resolution_type === 'AUTHORIZED_OVERRIDE' && !resolution.override_id) {
+    throw new RegistryValidationError(
+      'OVERRIDE_RECORD_REQUIRED_FOR_AUTHORIZED_OVERRIDE',
+      `PolicyConflictResolution with resolution_type 'AUTHORIZED_OVERRIDE' requires a non-null override_id`,
+    );
+  }
+  if (resolution.resolution_type !== 'AUTHORIZED_OVERRIDE' && resolution.override_id) {
+    throw new RegistryValidationError(
+      'OVERRIDE_RECORD_FORBIDDEN_FOR_NON_OVERRIDE',
+      `PolicyConflictResolution with resolution_type '${resolution.resolution_type}' must NOT have an override_id`,
+    );
+  }
+}
+
+export function validatePolicyOverrideSnapshot(
+  decisionSnapshotId: string,
+  overrideSnapshotId: string,
+): void {
+  if (overrideSnapshotId !== decisionSnapshotId) {
+    throw new RegistryValidationError(
+      'POLICY_OVERRIDE_SNAPSHOT_MISMATCH',
+      `PolicyOverride snapshot_id '${overrideSnapshotId}' does not match DecisionSnapshot '${decisionSnapshotId}'`,
+    );
+  }
+}
+
+export function validatePackageStrategy(
+  candidateStrategyId: string,
+  packageStrategyId: string,
+): void {
+  if (candidateStrategyId !== packageStrategyId) {
+    throw new RegistryValidationError(
+      'FINAL_PACKAGE_STRATEGY_MISMATCH',
+      `FinalContentPackage strategy_id '${packageStrategyId}' must match candidate strategy_id '${candidateStrategyId}'`,
+    );
+  }
+}
+
+export function validatePackageRightsChecks(
+  snapshotRightsChecks: string[],
+  packageRightsChecks: string[],
+): void {
+  const allowed = new Set(snapshotRightsChecks);
+  for (const rcId of packageRightsChecks) {
+    if (!allowed.has(rcId)) {
+      throw new RegistryValidationError(
+        'POST_DECISION_RIGHTS_CHECK_INJECTION_FORBIDDEN',
+        `RightsCheck '${rcId}' was injected after snapshot freeze; not present in snapshot rights checks`,
+      );
+    }
+  }
+}
+
+export function validateStageExecutionFencing(
+  currentFencingToken: number,
+  incomingFencingToken: number,
+): void {
+  if (incomingFencingToken < currentFencingToken) {
+    throw new RegistryValidationError(
+      'STALE_FENCING_TOKEN',
+      `Incoming fencing token (${incomingFencingToken}) is stale; current token is (${currentFencingToken})`,
+    );
+  }
+}
+
+export function validateCycleCancellation(
+  currentEpoch: number,
+  cancelledEpoch: number,
+): void {
+  if (cancelledEpoch <= currentEpoch) {
+    throw new RegistryValidationError(
+      'CANCELLATION_REQUIRES_EPOCH_BUMP',
+      `Cycle cancellation requires fencing_epoch (${cancelledEpoch}) to be strictly greater than current epoch (${currentEpoch})`,
+    );
+  }
+}
+
+export function validateReplayabilityStatus(
+  payloadState: 'AVAILABLE' | 'REDACTED' | 'DELETED' | 'PRUNED',
+  reportedReplayStatus: 'FULL' | 'PARTIAL_REDACTED' | 'UNAVAILABLE_DUE_TO_RETENTION' | 'INVALIDATED_BY_DELETION',
+): void {
+  if (payloadState !== 'AVAILABLE' && reportedReplayStatus === 'FULL') {
+    throw new RegistryValidationError(
+      'DELETED_PAYLOAD_CANNOT_BE_REPORTED_AS_FULL_REPLAY',
+      `Target with payload_state '${payloadState}' cannot be reported as FULL replay status`,
+    );
+  }
+}
+
+export function validateDeletionTombstone(tombstone: {
+  payload_retained: boolean;
+  contains_prohibited_identity_data?: boolean;
+}): void {
+  if (tombstone.payload_retained || tombstone.contains_prohibited_identity_data) {
+    throw new RegistryValidationError(
+      'PROHIBITED_IDENTITY_DATA_RETAINED',
+      'Required deletion must not retain prohibited identity or payload data merely to preserve FK/replay',
+    );
+  }
+}

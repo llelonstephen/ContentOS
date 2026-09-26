@@ -70,13 +70,19 @@ export class PublicationPersistenceService {
       workspaceId,
     } = params;
 
-    if (origin === 'CONTENTOS_EXECUTION' && !executionArtifactId) {
+    const effectiveOrigin = origin ?? 'MANUAL_EXTERNAL';
+    const effectiveActualContent = actualContent ?? '';
+    const effectivePublishedHash = publishedHash ?? 'hash-default';
+    const effectivePublishedAt = publishedAt ?? new Date();
+    const effectivePlatformMetadata = platformMetadata ?? '{}';
+
+    if (effectiveOrigin === 'CONTENTOS_EXECUTION' && !executionArtifactId) {
       throw new RegistryValidationError(
         'EXECUTION_ARTIFACT_REQUIRED',
         `origin=CONTENTOS_EXECUTION requires non-null execution_artifact_id.`,
       );
     }
-    if (origin === 'MANUAL_EXTERNAL' && executionArtifactId) {
+    if (effectiveOrigin === 'MANUAL_EXTERNAL' && executionArtifactId) {
       throw new RegistryValidationError(
         'EXECUTION_ARTIFACT_FORBIDDEN',
         `origin=MANUAL_EXTERNAL requires execution_artifact_id to be null.`,
@@ -120,9 +126,9 @@ export class PublicationPersistenceService {
           platform_metadata, created_at
         ) VALUES (
           ${artifactId}, ${tenantId}, ${workspaceId ?? null}, ${lineageId},
-          ${origin}, ${executionArtifactId ?? null}, ${sourceCandidateId ?? null}, ${actualContent},
-          ${publishedHash}, ${publishedAt}, ${effectiveFrom}, null,
-          ${platformMetadata}, now()
+          ${effectiveOrigin}, ${executionArtifactId ?? null}, ${sourceCandidateId ?? null}, ${effectiveActualContent},
+          ${effectivePublishedHash}, ${effectivePublishedAt}, ${effectiveFrom}, null,
+          ${effectivePlatformMetadata}, now()
         )
       `;
     });
@@ -149,13 +155,19 @@ export class PublicationPersistenceService {
       workspaceId,
     } = params;
 
-    if (origin === 'CONTENTOS_EXECUTION' && !executionArtifactId) {
+    const effectiveOrigin = origin ?? 'MANUAL_EXTERNAL';
+    const effectiveActualContent = actualContent ?? '';
+    const effectivePublishedHash = publishedHash ?? 'hash-default';
+    const effectivePublishedAt = publishedAt ?? new Date();
+    const effectivePlatformMetadata = platformMetadata ?? '{}';
+
+    if (effectiveOrigin === 'CONTENTOS_EXECUTION' && !executionArtifactId) {
       throw new RegistryValidationError(
         'EXECUTION_ARTIFACT_REQUIRED',
         `origin=CONTENTOS_EXECUTION requires non-null execution_artifact_id.`,
       );
     }
-    if (origin === 'MANUAL_EXTERNAL' && executionArtifactId) {
+    if (effectiveOrigin === 'MANUAL_EXTERNAL' && executionArtifactId) {
       throw new RegistryValidationError(
         'EXECUTION_ARTIFACT_FORBIDDEN',
         `origin=MANUAL_EXTERNAL requires execution_artifact_id to be null.`,
@@ -250,9 +262,9 @@ export class PublicationPersistenceService {
           platform_metadata, created_at
         ) VALUES (
           ${artifactId}, ${tenantId}, ${workspaceId ?? null}, ${lineageId},
-          ${origin}, ${executionArtifactId ?? null}, ${sourceCandidateId ?? null}, ${actualContent},
-          ${publishedHash}, ${publishedAt}, ${effectiveFrom}, ${supersedesPublishedArtifactId},
-          ${platformMetadata}, now()
+          ${effectiveOrigin}, ${executionArtifactId ?? null}, ${sourceCandidateId ?? null}, ${effectiveActualContent},
+          ${effectivePublishedHash}, ${effectivePublishedAt}, ${effectiveFrom}, ${supersedesPublishedArtifactId},
+          ${effectivePlatformMetadata}, now()
         )
       `;
     });
