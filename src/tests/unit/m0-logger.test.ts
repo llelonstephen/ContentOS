@@ -1,33 +1,78 @@
 /**
- * M0 Test 08 — Structured Logger
+ * M0 Test 08 — Structured Logger & Serialized Log Contract
  *
- * Validates M0 checklist item 08.
- * Tests that logger outputs correct SPEC01 §100 fields.
+ * Validates M0 checklist item 08 & SPEC01 §100:
+ *   - Structured logging fields
+ *   - Proves every emitted operational log has timestamp, level, module, and trace_id
+ *     by inspecting actual serialized JSON output.
+ *   - Proves trace_id is automatically generated if omitted in minimal context.
  */
 import { describe, it, expect } from 'vitest';
+import { Writable } from 'stream';
 import { createLogger } from '../../observability/logger.js';
 
-describe('M0-08: Structured Logger', () => {
-  it('should create a child logger with required SPEC01 §100 fields', () => {
-    const logger = createLogger({
-      module: 'test-module',
-      run_id: 'run-123',
-      decision_cycle_id: 'cycle-456',
-      trace_id: 'trace-789',
+describe('M0-08: Structured Logger & Serialized Log Contract', () => {
+  it('should include timestamp, level, module, and trace_id in serialized JSON output', async () => {
+    let captured = '';
+    const dest = new Writable({
+      write(chunk, _encoding, callback) {
+        captured += chunk.toString();
+        callback();
+      },
     });
 
-    // Logger should exist and be callable
-    expect(logger).toBeDefined();
-    expect(typeof logger.info).toBe('function');
-    expect(typeof logger.error).toBe('function');
-    expect(typeof logger.warn).toBe('function');
-    expect(typeof logger.debug).toBe('function');
+    const logger = createLogger(
+      {
+        module: 'test-execution',
+        trace_id: 'explicit-trace-12345',
+        run_id: 'run-99',
+      },
+      dest,
+    );
+
+    logger.info({ action: 'process_item' }, 'Operational execution step');
+
+    expect(captured.trim()).not.toBe('');
+    const parsed = JSON.parse(captured.trim());
+
+    // SPEC01 §100 required fields in serialized output:
+    expect(parsed).toHaveProperty('time');
+    expect(new Date(parsed.time).toISOString()).toBe(parsed.time); // Valid ISO timestamp
+    expect(parsed).toHaveProperty('level', 'info');
+    expect(parsed).toHaveProperty('module', 'test-execution');
+    expect(parsed).toHaveProperty('trace_id', 'explicit-trace-12345');
+    expect(parsed).toHaveProperty('run_id', 'run-99');
+    expect(parsed).toHaveProperty('msg', 'Operational execution step');
   });
 
-  it('should support all SPEC01 §100 context fields', () => {
-    // All fields from SPEC01 §100 should be accepted
+  it('should automatically generate trace_id when omitted in minimal context', async () => {
+    let captured = '';
+    const dest = new Writable({
+      write(chunk, _encoding, callback) {
+        captured += chunk.toString();
+        callback();
+      },
+    });
+
+    // Minimal context: trace_id NOT provided
+    const logger = createLogger({ module: 'minimal-worker' }, dest);
+    logger.warn('Warning event');
+
+    expect(captured.trim()).not.toBe('');
+    const parsed = JSON.parse(captured.trim());
+
+    // trace_id must NEVER silently disappear
+    expect(parsed).toHaveProperty('trace_id');
+    expect(typeof parsed.trace_id).toBe('string');
+    expect(parsed.trace_id.length).toBeGreaterThan(0);
+    expect(parsed.module).toBe('minimal-worker');
+    expect(parsed.level).toBe('warn');
+    expect(parsed).toHaveProperty('time');
+  });
+
+  it('should accept all SPEC01 §100 context fields', () => {
     const logger = createLogger({
-      module: 'test-module',
+      module: 'full-context',
       run_id: 'run-1',
       decision_cycle_id: 'dc-1',
       stage_execution_id: 'se-1',
@@ -39,10 +84,7 @@ describe('M0-08: Structured Logger', () => {
     });
 
     expect(logger).toBeDefined();
-  });
-
-  it('should work with minimal context', () => {
-    const logger = createLogger({ module: 'minimal' });
-    expect(logger).toBeDefined();
+    expect(typeof logger.info).toBe('function');
+    expect(typeof logger.error).toBe('function');
   });
 });

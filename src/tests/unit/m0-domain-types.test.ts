@@ -13,6 +13,7 @@ import {
   ContentOSError,
   type ImmutableEntityRef,
   type RevisionRef,
+  type SecretReference,
   type ErrorEnvelope,
   type Principal,
 } from '../../domain/shared/types.js';
@@ -39,6 +40,18 @@ describe('M0: Domain Shared Types', () => {
       expect(ref.entity_type).toBe('MetricDefinition');
       expect(ref.stable_id).toBe('CTR');
       expect(ref.revision_id).toBe('CTR_REV_004');
+    });
+  });
+
+  describe('SecretReference (SPEC01 §93)', () => {
+    it('should hold secret_id and optional version without exposing raw secret value', () => {
+      const ref: SecretReference = {
+        secret_id: 'api-key-evaluator-v1',
+        version: '2026-09-01',
+      };
+      expect(ref.secret_id).toBe('api-key-evaluator-v1');
+      expect(ref.version).toBe('2026-09-01');
+      expect(ref).not.toHaveProperty('value');
     });
   });
 

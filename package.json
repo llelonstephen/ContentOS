@@ -22,7 +22,11 @@
     "db:migrate": "drizzle-kit migrate",
     "db:studio": "drizzle-kit studio"
   },
-  "keywords": ["contentos", "evidence-grounded", "content-os"],
+  "keywords": [
+    "contentos",
+    "evidence-grounded",
+    "content-os"
+  ],
   "author": "",
   "license": "ISC",
   "dependencies": {
@@ -38,13 +42,13 @@
     "pino": "^10.3.1",
     "postgres": "^3.4.9",
     "tsx": "^4.23.15",
-    "typescript": "^7.0.2",
     "uuid": "^14.0.2",
     "zod": "^4.6.5"
   },
   "devDependencies": {
     "@vitest/coverage-v8": "^5.0.2",
     "fast-check": "^4.10.2",
+    "typescript": "^5.8.2",
     "vitest": "^5.0.2"
   }
 }

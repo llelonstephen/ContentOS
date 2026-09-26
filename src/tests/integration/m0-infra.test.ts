@@ -14,21 +14,41 @@ import postgres from 'postgres';
 import { Redis } from 'ioredis';
 import { Queue, Worker, type Job } from 'bullmq';
 
-const DB_URL = process.env['DATABASE_URL'] ?? 'postgresql://localhost:5432/contentos_test';
+// Prioritize DATABASE_URL_TEST, then fallback to DATABASE_URL or localhost test DB
+const DB_URL =
+  process.env['DATABASE_URL_TEST'] ??
+  process.env['DATABASE_URL'] ??
+  'postgresql://localhost:5432/contentos_test';
 const REDIS_URL = process.env['REDIS_URL'] ?? 'redis://localhost:6379';
+
+/**
+ * Safety guard: verifies target database is explicitly a test database
+ * to prevent destructive DROP statements against production or non-test databases.
+ */
+export function assertTestDatabase(url: string): void {
+  const parsed = new URL(url);
+  const dbName = parsed.pathname.replace(/^\//, '').toLowerCase();
+  if (!dbName.includes('test')) {
+    throw new Error(
+      `SAFETY GUARD BLOCKED EXECUTION: Refusing to run destructive migration tests against non-test database '${dbName}'. Database name must explicitly contain 'test'.`,
+    );
+  }
+}
 
 describe('M0 Integration: Live Infrastructure Verification', () => {
   let sql: ReturnType<typeof postgres>;
   let redis: Redis;
 
   beforeAll(async () => {
+    // Enforce safety guard before any database interaction
+    assertTestDatabase(DB_URL);
     sql = postgres(DB_URL, { max: 5 });
     redis = new Redis(REDIS_URL, { maxRetriesPerRequest: null });
   });
 
   afterAll(async () => {
-    await sql.end();
-    await redis.quit();
+    if (sql) await sql.end();
+    if (redis) await redis.quit();
   });
 
   describe('PostgreSQL Migration & Constraints Verification', () => {
@@ -193,4 +213,21 @@ describe('M0 Integration: Live Infrastructure Verification', () => {
       await queue.close();
     });
   });
+
+  describe('Non-Test Database Protection Guard', () => {
+    it('should reject non-test database URL to protect production data', () => {
+      expect(() => {
+        assertTestDatabase('postgresql://user:pass@localhost:5432/contentos_production');
+      }).toThrow('SAFETY GUARD BLOCKED EXECUTION');
+
+      expect(() => {
+        assertTestDatabase('postgresql://user:pass@localhost:5432/contentos');
+      }).toThrow('SAFETY GUARD BLOCKED EXECUTION');
+
+      expect(() => {
+        assertTestDatabase('postgresql://user:pass@localhost:5432/contentos_test');
+      }).not.toThrow();
+    });
+  });
 });
+

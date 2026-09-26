@@ -62,6 +62,20 @@ export interface RevisionRef {
 }
 
 // ──────────────────────────────────────────────
+// Secret Reference (SPEC01 §93)
+// ──────────────────────────────────────────────
+
+/**
+ * Used for secret references.
+ * Secrets live in a dedicated secret-management system.
+ * Domain objects contain secret_reference, NOT raw secret values.
+ */
+export interface SecretReference {
+  readonly secret_id: string;
+  readonly version?: string;
+}
+
+// ──────────────────────────────────────────────
 // Deployment Mode (SPEC01 §89)
 // ──────────────────────────────────────────────
 

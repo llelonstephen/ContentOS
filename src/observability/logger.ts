@@ -4,8 +4,10 @@
  * Implements SPEC01 §100 structured logging fields.
  * Operational logs are NOT canonical truth (SPEC01 §100).
  * Uses pino for fast structured JSON logging.
+ * Guarantees trace_id on every emitted operational log line.
  */
 import pino from 'pino';
+import crypto from 'crypto';
 
 /**
  * SPEC01 §100 required structured fields:
@@ -26,15 +28,9 @@ export interface LogContext {
 }
 
 /**
- * Create a child logger bound to specific context fields.
- * All SPEC01 §100 fields are included in every log line.
+ * Base logger options.
  */
-export function createLogger(context: LogContext): pino.Logger {
-  return baseLogger.child(context);
-}
-
-/** Base logger instance — module-level singleton */
-const baseLogger = pino({
+const baseOptions: pino.LoggerOptions = {
   level: process.env['LOG_LEVEL'] ?? 'info',
   timestamp: pino.stdTimeFunctions.isoTime,
   formatters: {
@@ -48,6 +44,31 @@ const baseLogger = pino({
     paths: ['secret', 'password', 'token', 'api_key'],
     censor: '[REDACTED]',
   },
-});
+};
+
+/** Base logger instance — module-level singleton */
+const baseLogger = pino(baseOptions);
+
+/**
+ * Create a child logger bound to specific context fields.
+ * Every emitted operational log is guaranteed to have a trace_id per SPEC01 §100,
+ * either supplied by context or deterministically generated at the logging boundary.
+ */
+export function createLogger(context: LogContext, destination?: pino.DestinationStream): pino.Logger {
+  const traceId = context.trace_id && context.trace_id.trim().length > 0
+    ? context.trace_id
+    : crypto.randomUUID();
+
+  const boundContext: LogContext & { trace_id: string } = {
+    ...context,
+    trace_id: traceId,
+  };
+
+  if (destination) {
+    return pino(baseOptions, destination).child(boundContext);
+  }
+
+  return baseLogger.child(boundContext);
+}
 
 export { baseLogger };

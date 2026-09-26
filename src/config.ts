@@ -34,13 +34,24 @@ const configSchema = z.object({
   SECRET_STORE_TYPE: z.enum(['env', 'vault']).default('env'),
 });
 
-export type AppConfig = z.infer<typeof configSchema>;
+/**
+ * SPEC01 §90: Single-Tenant Mode Security Assumption.
+ * "In SINGLE_TENANT, tenant ownership fields may be physically simplified.
+ * Security assumptions MUST explicitly state: one trust tenant per deployment"
+ */
+export const SINGLE_TENANT_SECURITY_ASSUMPTION = 'one trust tenant per deployment' as const;
+
+export type BaseAppConfig = z.infer<typeof configSchema>;
+
+export interface AppConfig extends BaseAppConfig {
+  readonly SECURITY_ASSUMPTION: string;
+}
 
 let _config: AppConfig | null = null;
 
 /**
  * Load configuration from environment variables.
- * Validates all required fields.
+ * Validates all required fields and attaches explicit security assumptions.
  * Caches result for subsequent calls.
  */
 export function loadConfig(env: Record<string, string | undefined> = process.env): AppConfig {
@@ -54,7 +65,15 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     throw new Error(`Configuration validation failed:\n${issues}`);
   }
 
-  _config = result.data;
+  const securityAssumption =
+    result.data.DEPLOYMENT_MODE === DeploymentMode.SINGLE_TENANT
+      ? SINGLE_TENANT_SECURITY_ASSUMPTION
+      : 'mandatory server-side tenant boundary enforcement on every tenant-scoped resource';
+
+  _config = {
+    ...result.data,
+    SECURITY_ASSUMPTION: securityAssumption,
+  };
   return _config;
 }
 
