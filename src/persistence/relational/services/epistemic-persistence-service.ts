@@ -1,15 +1,22 @@
 /**
  * ContentOS — Epistemic Chain Transactional Persistence Service
  *
- * Enforces SPEC02 transactional invariants:
- *   - §13, §22: At most one root EpistemicStateVersion per proposition_id.
- *   - §13, §22: Non-branching: At most one direct successor per predecessor.
- *   - §13, §22: Same proposition: Predecessor and successor must share proposition_id.
- *   - §13, §22: Temporal order: Successor known_from > predecessor known_from.
- *   - §13, §22: Acyclic: Chain must not contain cycles.
- *   - §5: Every immutable epistemic entity registers in ImmutableEntityRegistry in the same transaction.
+ * Enforces SPEC02 & SPEC03 transactional invariants:
+ *   - SPEC02 §13, §22: At most one root EpistemicStateVersion per proposition_id.
+ *   - SPEC02 §13, §22: Non-branching: At most one direct successor per predecessor.
+ *   - SPEC02 §13, §22: Same proposition: Predecessor and successor must share proposition_id.
+ *   - SPEC02 §13, §22: Temporal order: Successor known_from > predecessor known_from.
+ *   - SPEC02 §13, §22: Acyclic: Chain must not contain cycles.
+ *   - SPEC03 §6.7, §65: Causal support guard (non-causal proposition requires causal_status = NOT_APPLICABLE).
+ *   - SPEC03 §57: Exact assessment closure (all assessments must resolve to the same proposition).
+ *   - SPEC03 §63: Derivation revision pinning.
+ *   - SPEC03 §103, §104: FREEZING and stale worker commit rejection.
+ *   - SPEC03 §110: Historical exact-reference replay.
+ *   - SPEC02 §5: ImmutableEntityRegistry registration.
  */
 import postgres from 'postgres';
+import { validateCausalSupportGuard } from '../../../domain/knowledge/epistemic-derivation.js';
+import type { CausalStatus, PropositionType } from '../../../domain/knowledge/types.js';
 import { RegistryValidationError } from '../../../domain/services/registry-validator.js';
 
 export interface AppendEpistemicStateParams {
@@ -29,6 +36,7 @@ export interface AppendEpistemicStateParams {
   assessmentIds?: string[];
   tenantId: string;
   workspaceId?: string | null;
+  cycleId?: string | null;
 }
 
 export class EpistemicPersistenceService {
@@ -55,6 +63,7 @@ export class EpistemicPersistenceService {
       assessmentIds,
       tenantId,
       workspaceId,
+      cycleId,
     } = params;
 
     if (supersedesEpistemicStateId && supersedesEpistemicStateId === epistemicStateId) {
@@ -65,9 +74,30 @@ export class EpistemicPersistenceService {
     }
 
     await this.sql.begin(async (sqlTx) => {
-      // 1. Verify proposition exists
+      // 0. Stale worker / FREEZING check (SPEC03 §103, §104)
+      if (cycleId) {
+        const [cycle] = await sqlTx`
+          SELECT decision_cycle_id, status FROM decision_cycles WHERE decision_cycle_id = ${cycleId}
+        `;
+        if (cycle) {
+          if (cycle.status === 'FREEZING' || cycle.status === 'FROZEN') {
+            throw new RegistryValidationError(
+              'KNOWLEDGE_COMMIT_REJECTED_AFTER_FREEZING',
+              `Cannot commit epistemic state to DecisionCycle '${cycleId}' in status '${cycle.status}'. Upstream knowledge commits are prohibited after FREEZING begins.`,
+            );
+          }
+          if (cycle.status === 'CANCELLED' || cycle.status === 'SUPERSEDED') {
+            throw new RegistryValidationError(
+              'STALE_WORKER_COMMIT_REJECTED',
+              `Cannot commit epistemic state: DecisionCycle '${cycleId}' is '${cycle.status}'. Stale worker commit rejected.`,
+            );
+          }
+        }
+      }
+
+      // 1. Verify proposition exists and enforce Causal Support Guard (SPEC03 §6.7, §65)
       const [prop] = await sqlTx`
-        SELECT proposition_id, tenant_id
+        SELECT proposition_id, tenant_id, proposition_type
         FROM propositions
         WHERE proposition_id = ${propositionId}
       `;
@@ -78,6 +108,52 @@ export class EpistemicPersistenceService {
         );
       }
 
+      validateCausalSupportGuard(
+        prop.proposition_type as PropositionType,
+        causalStatus as CausalStatus,
+      );
+
+      // 2. Exact Assessment Closure (SPEC03 §57)
+      if (assessmentIds && assessmentIds.length > 0) {
+        for (const assId of assessmentIds) {
+          const [assessmentRow] = await sqlTx`
+            SELECT ea.assessment_id, epl.proposition_id
+            FROM evidence_assessments ea
+            JOIN evidence_proposition_links epl ON ea.link_id = epl.link_id
+            WHERE ea.assessment_id = ${assId}
+          `;
+          if (!assessmentRow) {
+            throw new RegistryValidationError(
+              'ASSESSMENT_NOT_FOUND',
+              `Assessment '${assId}' does not exist.`,
+            );
+          }
+          if (assessmentRow.proposition_id !== propositionId) {
+            throw new RegistryValidationError(
+              'EPISTEMIC_CLOSURE_VIOLATION',
+              `Assessment '${assId}' links to proposition '${assessmentRow.proposition_id}', which does not match target proposition '${propositionId}'.`,
+            );
+          }
+        }
+      }
+
+      // 3. Verify derivation revision exists in RevisionRegistry (SPEC03 §63)
+      if (derivationEntityType !== 'ResearchTrace') {
+        const [rev] = await sqlTx`
+          SELECT revision_id FROM revision_registry
+          WHERE entity_type = ${derivationEntityType}
+            AND stable_id = ${derivationStableId}
+            AND revision_id = ${derivationRevisionId}
+        `;
+        if (!rev) {
+          throw new RegistryValidationError(
+            'DERIVATION_REVISION_NOT_FOUND',
+            `Derivation revision ref '${derivationEntityType}/${derivationStableId}/${derivationRevisionId}' does not exist in RevisionRegistry.`,
+          );
+        }
+      }
+
+      // 4. Single-root vs successor verification
       if (!supersedesEpistemicStateId) {
         // Root case: verify at most one root per proposition_id
         const [existingRoot] = await sqlTx`
@@ -155,7 +231,7 @@ export class EpistemicPersistenceService {
         }
       }
 
-      // 2. Register in ImmutableEntityRegistry
+      // 5. Register in ImmutableEntityRegistry
       await sqlTx`
         INSERT INTO immutable_entity_registry (
           entity_type, entity_id, tenant_id, workspace_id, payload_state, created_at
@@ -164,7 +240,7 @@ export class EpistemicPersistenceService {
         )
       `;
 
-      // 3. Insert epistemic_state_versions
+      // 6. Insert epistemic_state_versions
       await sqlTx`
         INSERT INTO epistemic_state_versions (
           epistemic_state_id, tenant_id, workspace_id, supersedes_epistemic_state_id,
@@ -179,7 +255,7 @@ export class EpistemicPersistenceService {
         )
       `;
 
-      // 4. Insert normalized assessment links
+      // 7. Insert normalized assessment links
       if (assessmentIds && assessmentIds.length > 0) {
         for (const assessmentId of assessmentIds) {
           await sqlTx`
@@ -192,5 +268,50 @@ export class EpistemicPersistenceService {
         }
       }
     });
+  }
+
+  /**
+   * Performs an exact historical replay traversal for an EpistemicStateVersion.
+   * Implements SPEC03 §110:
+   * Traverses EpistemicStateVersion -> exact assessment_ids -> EvidenceAssessment -> EvidencePropositionLink -> EvidenceItem -> SourceArtifact/PerformanceObservation.
+   */
+  async getEpistemicStateReplay(epistemicStateId: string): Promise<{
+    epistemicState: any;
+    proposition: any;
+    assessments: any[];
+  }> {
+    const [epistemicState] = await this.sql`
+      SELECT * FROM epistemic_state_versions WHERE epistemic_state_id = ${epistemicStateId}
+    `;
+    if (!epistemicState) {
+      throw new RegistryValidationError(
+        'EPISTEMIC_STATE_NOT_FOUND',
+        `EpistemicStateVersion '${epistemicStateId}' does not exist.`,
+      );
+    }
+
+    const [proposition] = await this.sql`
+      SELECT * FROM propositions WHERE proposition_id = ${epistemicState.proposition_id}
+    `;
+
+    const assessments = await this.sql`
+      SELECT 
+        ea.*,
+        epl.evidence_id,
+        ei.statement,
+        ei.origin_type,
+        ei.origin_id
+      FROM epistemic_state_assessments esa
+      JOIN evidence_assessments ea ON esa.assessment_id = ea.assessment_id
+      JOIN evidence_proposition_links epl ON ea.link_id = epl.link_id
+      JOIN evidence_items ei ON epl.evidence_id = ei.evidence_id
+      WHERE esa.epistemic_state_id = ${epistemicStateId}
+    `;
+
+    return {
+      epistemicState,
+      proposition,
+      assessments,
+    };
   }
 }
