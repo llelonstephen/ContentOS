@@ -70,5 +70,3 @@ export function createLogger(context: LogContext, destination?: pino.Destination
 
   return baseLogger.child(boundContext);
 }
-
-export { baseLogger };
