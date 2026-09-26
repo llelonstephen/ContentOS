@@ -12,6 +12,7 @@
  */
 import postgres from 'postgres';
 import { RegistryValidationError } from '../../../domain/services/registry-validator.js';
+import { GovernanceActivationAuthority } from '../../../domain/services/governance-authority.js';
 
 export interface RegisterTypedRevisionParams {
   entityType: string;
@@ -44,7 +45,7 @@ export interface ActivateRevisionParams {
   activeRevisionId: string;
   effectiveFrom: Date;
   effectiveUntil?: Date | null;
-  callerRole?: 'GOVERNANCE_CONTROL_PLANE' | 'RUNTIME_EXECUTION' | 'RUNTIME_AGENT' | string;
+  authority: GovernanceActivationAuthority;
 }
 
 export class ControlPlanePersistenceService {
@@ -285,15 +286,22 @@ export class ControlPlanePersistenceService {
       activeRevisionId,
       effectiveFrom,
       effectiveUntil,
-      callerRole,
+      authority,
     } = params;
 
-    // Enforce SPEC02 §18, SPEC07 §75, SPEC10 §68: Runtime context is forbidden from activating revisions
-    const effectiveCallerRole = callerRole ?? 'GOVERNANCE_CONTROL_PLANE';
-    if (effectiveCallerRole === 'RUNTIME_EXECUTION' || effectiveCallerRole === 'RUNTIME_AGENT') {
+    // Fail closed: authority cannot be missing or defaulted to governance
+    if (!authority) {
       throw new RegistryValidationError(
-        'RUNTIME_ACTIVATION_PROHIBITED',
-        `Runtime execution context is strictly forbidden from directly activating Control Plane revisions (SPEC02 §18, SPEC07 §75, SPEC10 §68). Only authorized Governance authority may activate revisions.`,
+        'AUTHORIZATION_REQUIRED',
+        'Control Plane activation requires explicit GovernanceActivationAuthority. Missing authorization is rejected (fail-closed).',
+      );
+    }
+
+    // Enforce SPEC02 §18, SPEC07 §75, SPEC10 §68: Validate non-forgeable capability token
+    if (!GovernanceActivationAuthority.isAuthorized(authority)) {
+      throw new RegistryValidationError(
+        'FORGED_AUTHORITY_REJECTED',
+        'Supplied authorization is not a valid GovernanceActivationAuthority capability token. A string or unverified object cannot activate Control Plane revisions.',
       );
     }
 

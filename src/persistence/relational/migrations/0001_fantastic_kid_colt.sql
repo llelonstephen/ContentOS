@@ -2750,3 +2750,26 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER trg_object_reference_integrity
 BEFORE INSERT OR UPDATE ON "object_references"
 FOR EACH ROW EXECUTE FUNCTION enforce_object_reference_integrity();
+--> statement-breakpoint
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'contentos_control_plane_user') THEN
+    CREATE ROLE contentos_control_plane_user WITH LOGIN PASSWORD 'control_plane_secret';
+  END IF;
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'contentos_runtime_user') THEN
+    CREATE ROLE contentos_runtime_user WITH LOGIN PASSWORD 'runtime_secret';
+  END IF;
+END $$;
+--> statement-breakpoint
+GRANT USAGE ON SCHEMA public TO contentos_runtime_user, contentos_control_plane_user;
+--> statement-breakpoint
+GRANT ALL ON ALL TABLES IN SCHEMA public TO contentos_control_plane_user;
+--> statement-breakpoint
+GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO contentos_control_plane_user;
+--> statement-breakpoint
+GRANT ALL ON ALL TABLES IN SCHEMA public TO contentos_runtime_user;
+--> statement-breakpoint
+GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO contentos_runtime_user;
+--> statement-breakpoint
+REVOKE INSERT ON control_plane_activations FROM contentos_runtime_user;
+

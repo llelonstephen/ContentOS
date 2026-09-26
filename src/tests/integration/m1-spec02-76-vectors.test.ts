@@ -17,6 +17,7 @@ import { MeasurementPersistenceService } from '../../persistence/relational/serv
 import { DecisionPersistenceService } from '../../persistence/relational/services/decision-persistence-service.js';
 import { RetentionDeletionService } from '../../persistence/relational/services/retention-deletion-service.js';
 import { claimObjectForGC } from '../../persistence/relational/services/object-registry-service.js';
+import { GovernanceControlPlaneGateway } from '../../domain/services/governance-authority.js';
 import {
   RegistryValidationError,
   validateSupersession,
@@ -2052,6 +2053,7 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
       activeRevisionId: rev1,
       effectiveFrom: new Date('2026-01-01T00:00:00Z'),
       effectiveUntil: new Date('2026-06-01T00:00:00Z'),
+      authority: GovernanceControlPlaneGateway.issueGovernanceAuthority(),
     });
 
     let err: any;
@@ -2064,6 +2066,7 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
         activeRevisionId: rev2,
         effectiveFrom: new Date('2026-03-01T00:00:00Z'), // Overlaps [01-01, 06-01]
         effectiveUntil: new Date('2026-09-01T00:00:00Z'),
+        authority: GovernanceControlPlaneGateway.issueGovernanceAuthority(),
       });
     } catch (e) {
       err = e;
@@ -2087,6 +2090,7 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
       activeRevisionId: rev1,
       effectiveFrom: new Date('2026-01-01T00:00:00Z'),
       effectiveUntil: new Date('2026-06-01T00:00:00Z'),
+      authority: GovernanceControlPlaneGateway.issueGovernanceAuthority(),
     });
 
     const active = await cpService.resolveActiveAt(
@@ -2143,7 +2147,7 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
     const targetStable = uid('prompt-target-60');
     const targetRev = uid('rev-target-60');
 
-    // 1. Register target revision in revision_registry
+    // 1. Seed target revision in revision_registry
     await sql`
       INSERT INTO revision_registry (entity_type, stable_id, revision_id, tenant_id)
       VALUES ('PromptConfig', ${targetStable}, ${targetRev}, ${tenantA})
@@ -2164,26 +2168,89 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
       )
     `;
 
-    // 3. Attempt prohibited runtime activation through real production path:
-    // Case A: Runtime caller role attempts direct activation of target revision
-    let errRuntime: any;
+    // Proof 1: Runtime connection/context attempts to activate a valid registered revision -> REJECTED
+    const runtimeSql = postgres('postgresql://contentos_runtime_user:runtime_secret@localhost:5432/contentos_test');
+    let errRuntimeDb: any;
+    try {
+      await runtimeSql`
+        INSERT INTO control_plane_activations (
+          activation_id, deployment_scope, component_type, stable_id, active_revision_id, effective_from
+        ) VALUES (
+          ${uid('act-rt-direct')}, 'TENANT_DEFAULT', 'PromptConfig', ${targetStable}, ${targetRev}, now()
+        )
+      `;
+    } catch (e) {
+      errRuntimeDb = e;
+    }
+    expect(errRuntimeDb).toBeDefined();
+    expect(errRuntimeDb.code).toBe('42501'); // PostgreSQL permission denied for table control_plane_activations
+
+    // Proof 2: Runtime attempts activation while claiming/spoofing Governance authority -> still REJECTED
+    // 2a. Database level role spoofing
+    let errSpoofRole: any;
+    try {
+      await runtimeSql`SET ROLE contentos_control_plane_user`;
+    } catch (e) {
+      errSpoofRole = e;
+    }
+    expect(errSpoofRole).toBeDefined();
+    expect(errSpoofRole.code).toBe('42501'); // PostgreSQL permission denied to set role
+
+    // 2b. Service level spoofing via string claiming governance
+    let errSpoofString: any;
     try {
       await cpService.activateRevision({
-        activationId: uid('act-60-prohibited'),
+        activationId: uid('act-60-spoof-str'),
         deploymentScope: 'TENANT_DEFAULT',
         componentType: 'PromptConfig',
         stableId: targetStable,
         activeRevisionId: targetRev,
         effectiveFrom: new Date(),
-        callerRole: 'RUNTIME_EXECUTION', // Prohibited runtime context
+        authority: 'GOVERNANCE_CONTROL_PLANE' as any,
       });
     } catch (e) {
-      errRuntime = e;
+      errSpoofString = e;
     }
-    expect(errRuntime).toBeDefined();
-    expect(errRuntime.code).toBe('RUNTIME_ACTIVATION_PROHIBITED');
+    expect(errSpoofString).toBeDefined();
+    expect(errSpoofString.code).toBe('FORGED_AUTHORITY_REJECTED');
 
-    // Case B: Attempt to activate ChangeProposal directly as if proposal ID were an active revision ID (SPEC10 §68)
+    // 2c. Service level spoofing via fake object
+    let errSpoofObj: any;
+    try {
+      await cpService.activateRevision({
+        activationId: uid('act-60-spoof-obj'),
+        deploymentScope: 'TENANT_DEFAULT',
+        componentType: 'PromptConfig',
+        stableId: targetStable,
+        activeRevisionId: targetRev,
+        effectiveFrom: new Date(),
+        authority: { role: 'GOVERNANCE_CONTROL_PLANE' } as any,
+      });
+    } catch (e) {
+      errSpoofObj = e;
+    }
+    expect(errSpoofObj).toBeDefined();
+    expect(errSpoofObj.code).toBe('FORGED_AUTHORITY_REJECTED');
+
+    // Proof 3: Runtime omits authorization metadata -> REJECTED (fail-closed)
+    let errOmitted: any;
+    try {
+      await cpService.activateRevision({
+        activationId: uid('act-60-omitted'),
+        deploymentScope: 'TENANT_DEFAULT',
+        componentType: 'PromptConfig',
+        stableId: targetStable,
+        activeRevisionId: targetRev,
+        effectiveFrom: new Date(),
+      } as any);
+    } catch (e) {
+      errOmitted = e;
+    }
+    expect(errOmitted).toBeDefined();
+    expect(errOmitted.code).toBe('AUTHORIZATION_REQUIRED');
+
+    // Proof 5: ChangeProposal ID still cannot be activated directly as a revision (SPEC10 §68)
+    const validGovAuthority = GovernanceControlPlaneGateway.issueGovernanceAuthority();
     let errProposalId: any;
     try {
       await cpService.activateRevision({
@@ -2191,9 +2258,9 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
         deploymentScope: 'TENANT_DEFAULT',
         componentType: 'PromptConfig',
         stableId: targetStable,
-        activeRevisionId: propId, // Prohibited proposal self-activation
+        activeRevisionId: propId, // Attempting to use ChangeProposal ID as revision
         effectiveFrom: new Date(),
-        callerRole: 'GOVERNANCE_CONTROL_PLANE',
+        authority: validGovAuthority,
       });
     } catch (e) {
       errProposalId = e;
@@ -2201,11 +2268,31 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
     expect(errProposalId).toBeDefined();
     expect(errProposalId.code).toBe('PROPOSAL_CANNOT_SELF_ACTIVATE');
 
-    // Verify no activation row was created for targetStable
-    const activations = await sql`
-      SELECT * FROM control_plane_activations WHERE stable_id = ${targetStable}
+    // Proof 6: Rejected attempts create zero control_plane_activations rows
+    const activationsCount = await sql`
+      SELECT count(*) as count FROM control_plane_activations WHERE stable_id = ${targetStable}
     `;
-    expect(activations.length).toBe(0);
+    expect(Number(activationsCount[0]?.['count'])).toBe(0);
+
+    // Proof 4: Authorized Control Plane context activates the same valid revision -> SUCCEEDS
+    const actIdAuthorized = uid('act-60-authorized');
+    await cpService.activateRevision({
+      activationId: actIdAuthorized,
+      deploymentScope: 'TENANT_DEFAULT',
+      componentType: 'PromptConfig',
+      stableId: targetStable,
+      activeRevisionId: targetRev,
+      effectiveFrom: new Date('2026-01-01T00:00:00Z'),
+      effectiveUntil: new Date('2026-12-31T23:59:59Z'),
+      authority: validGovAuthority,
+    });
+
+    const [activatedRow] = await sql`
+      SELECT active_revision_id FROM control_plane_activations WHERE activation_id = ${actIdAuthorized}
+    `;
+    expect(activatedRow?.['active_revision_id']).toBe(targetRev);
+
+    await runtimeSql.end();
   });
 
   // 61-76: Deep Relational & Storage Invariants

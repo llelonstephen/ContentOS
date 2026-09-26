@@ -19,6 +19,7 @@ import { PublicationPersistenceService } from '../../persistence/relational/serv
 import { EpistemicPersistenceService } from '../../persistence/relational/services/epistemic-persistence-service.js';
 import { MeasurementPersistenceService } from '../../persistence/relational/services/measurement-persistence-service.js';
 import { DecisionPersistenceService } from '../../persistence/relational/services/decision-persistence-service.js';
+import { GovernanceControlPlaneGateway } from '../../domain/services/governance-authority.js';
 
 function assertTestDatabase(url: string): void {
   const parsed = new URL(url);
@@ -525,6 +526,7 @@ describe('M1 Adversarial Verification Suite: Live PostgreSQL Invariants', () => 
         activeRevisionId: rev1,
         effectiveFrom: new Date('2026-01-01T00:00:00Z'),
         effectiveUntil: new Date('2026-06-01T00:00:00Z'),
+        authority: GovernanceControlPlaneGateway.issueGovernanceAuthority(),
       });
     });
 
@@ -540,6 +542,7 @@ describe('M1 Adversarial Verification Suite: Live PostgreSQL Invariants', () => 
           activeRevisionId: rev2,
           effectiveFrom: new Date('2026-03-01T00:00:00Z'),
           effectiveUntil: new Date('2026-09-01T00:00:00Z'),
+          authority: GovernanceControlPlaneGateway.issueGovernanceAuthority(),
         });
       } catch (e) {
         err = e;
