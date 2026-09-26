@@ -1,0 +1,42 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022"],
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "strict": true,
+    "strictNullChecks": true,
+    "strictFunctionTypes": true,
+    "strictBindCallApply": true,
+    "strictPropertyInitialization": true,
+    "noImplicitAny": true,
+    "noImplicitReturns": true,
+    "noImplicitThis": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "paths": {
+      "@contentos/domain/*": ["./src/domain/*"],
+      "@contentos/application/*": ["./src/application/*"],
+      "@contentos/persistence/*": ["./src/persistence/*"],
+      "@contentos/workflow/*": ["./src/workflow/*"],
+      "@contentos/providers/*": ["./src/providers/*"],
+      "@contentos/events/*": ["./src/events/*"],
+      "@contentos/security/*": ["./src/security/*"],
+      "@contentos/observability/*": ["./src/observability/*"],
+      "@contentos/api/*": ["./src/api/*"]
+    }
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist", "**/*.test.ts", "**/*.spec.ts"]
+}

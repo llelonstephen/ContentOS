@@ -1,0 +1,50 @@
+{
+  "name": "contentos",
+  "version": "1.0.0",
+  "description": "ContentOS — Evidence-Grounded Content Operating System",
+  "main": "dist/main.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch src/main.ts",
+    "start": "node dist/main.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:unit": "vitest run src/tests/unit",
+    "test:integration": "vitest run src/tests/integration",
+    "test:property": "vitest run src/tests/property",
+    "test:concurrency": "vitest run src/tests/concurrency",
+    "test:failure": "vitest run src/tests/failure_injection",
+    "typecheck": "tsc --noEmit",
+    "db:generate": "drizzle-kit generate",
+    "db:push": "drizzle-kit push",
+    "db:migrate": "drizzle-kit migrate",
+    "db:studio": "drizzle-kit studio"
+  },
+  "keywords": ["contentos", "evidence-grounded", "content-os"],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@fastify/cors": "^11.3.0",
+    "@types/node": "^26.6.3",
+    "@types/uuid": "^10.0.0",
+    "bullmq": "^6.3.9",
+    "dotenv": "^18.0.4",
+    "drizzle-kit": "^0.31.11",
+    "drizzle-orm": "^0.45.3",
+    "fastify": "^5.12.5",
+    "ioredis": "^6.0.0",
+    "pino": "^10.3.1",
+    "postgres": "^3.4.9",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "uuid": "^14.0.2",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "^5.0.2",
+    "fast-check": "^4.10.2",
+    "vitest": "^5.0.2"
+  }
+}
