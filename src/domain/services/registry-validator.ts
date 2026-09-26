@@ -743,3 +743,13 @@ export function validateDeletionTombstone(tombstone: {
     );
   }
 }
+
+export function validateControlPlaneActivationRole(callerRole: string): void {
+  if (callerRole === 'RUNTIME_EXECUTION' || callerRole === 'RUNTIME_AGENT') {
+    throw new RegistryValidationError(
+      'RUNTIME_ACTIVATION_PROHIBITED',
+      `Runtime execution context is strictly forbidden from directly activating Control Plane revisions (SPEC02 §18, SPEC07 §75, SPEC10 §68). Revisions may only be activated by authorized Governance authority.`,
+    );
+  }
+}
+

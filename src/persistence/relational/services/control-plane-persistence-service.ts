@@ -44,6 +44,7 @@ export interface ActivateRevisionParams {
   activeRevisionId: string;
   effectiveFrom: Date;
   effectiveUntil?: Date | null;
+  callerRole?: 'GOVERNANCE_CONTROL_PLANE' | 'RUNTIME_EXECUTION' | 'RUNTIME_AGENT' | string;
 }
 
 export class ControlPlanePersistenceService {
@@ -284,7 +285,17 @@ export class ControlPlanePersistenceService {
       activeRevisionId,
       effectiveFrom,
       effectiveUntil,
+      callerRole,
     } = params;
+
+    // Enforce SPEC02 §18, SPEC07 §75, SPEC10 §68: Runtime context is forbidden from activating revisions
+    const effectiveCallerRole = callerRole ?? 'GOVERNANCE_CONTROL_PLANE';
+    if (effectiveCallerRole === 'RUNTIME_EXECUTION' || effectiveCallerRole === 'RUNTIME_AGENT') {
+      throw new RegistryValidationError(
+        'RUNTIME_ACTIVATION_PROHIBITED',
+        `Runtime execution context is strictly forbidden from directly activating Control Plane revisions (SPEC02 §18, SPEC07 §75, SPEC10 §68). Only authorized Governance authority may activate revisions.`,
+      );
+    }
 
     if (effectiveUntil && effectiveUntil <= effectiveFrom) {
       throw new RegistryValidationError(
@@ -294,6 +305,17 @@ export class ControlPlanePersistenceService {
     }
 
     await this.sql.begin(async (sqlTx) => {
+      // 0. Verify that a ChangeProposal is not being activated directly as a revision (SPEC10 §68)
+      const [proposal] = await sqlTx`
+        SELECT proposal_id FROM change_proposals WHERE proposal_id = ${activeRevisionId}
+      `;
+      if (proposal) {
+        throw new RegistryValidationError(
+          'PROPOSAL_CANNOT_SELF_ACTIVATE',
+          `ChangeProposal '${activeRevisionId}' cannot be activated directly (SPEC10 §68). A proposal must undergo review and result in a distinct registered revision.`,
+        );
+      }
+
       // 1. Verify revision exists in revision_registry
       const [rev] = await sqlTx`
         SELECT entity_type, stable_id, revision_id

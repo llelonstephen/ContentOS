@@ -15,6 +15,7 @@ import { PublicationPersistenceService } from '../../persistence/relational/serv
 import { EpistemicPersistenceService } from '../../persistence/relational/services/epistemic-persistence-service.js';
 import { MeasurementPersistenceService } from '../../persistence/relational/services/measurement-persistence-service.js';
 import { DecisionPersistenceService } from '../../persistence/relational/services/decision-persistence-service.js';
+import { RetentionDeletionService } from '../../persistence/relational/services/retention-deletion-service.js';
 import { claimObjectForGC } from '../../persistence/relational/services/object-registry-service.js';
 import {
   RegistryValidationError,
@@ -68,6 +69,7 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
   let epiService: EpistemicPersistenceService;
   let measService: MeasurementPersistenceService;
   let decService: DecisionPersistenceService;
+  let retService: RetentionDeletionService;
 
   const progStable = uid('prog-76');
   const progRev1 = uid('prog-rev-76-1');
@@ -97,6 +99,7 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
     epiService = new EpistemicPersistenceService(sql);
     measService = new MeasurementPersistenceService(sql);
     decService = new DecisionPersistenceService(sql);
+    retService = new RetentionDeletionService(sql);
 
     // Seed baseline RevisionRegistry
     await sql`
@@ -2137,7 +2140,16 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
 
   it('Vector 60: runtime ChangeProposal directly activates revision', async () => {
     const propId = uid('cp-60');
-    const targetStable = uid('prompt-target');
+    const targetStable = uid('prompt-target-60');
+    const targetRev = uid('rev-target-60');
+
+    // 1. Register target revision in revision_registry
+    await sql`
+      INSERT INTO revision_registry (entity_type, stable_id, revision_id, tenant_id)
+      VALUES ('PromptConfig', ${targetStable}, ${targetRev}, ${tenantA})
+    `;
+
+    // 2. Runtime creates ChangeProposal
     await sql`
       INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id)
       VALUES ('ChangeProposal', ${propId}, ${tenantA})
@@ -2148,9 +2160,48 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
         target_stable_id, target_revision_id, proposed_change, uncertainty
       ) VALUES (
         ${propId}, ${tenantA}, 'POLICY_AMENDMENT', 'PromptConfig',
-        ${targetStable}, 'rev-target', 'Upgrade', 'LOW'
+        ${targetStable}, ${targetRev}, 'Upgrade prompt', 'LOW'
       )
     `;
+
+    // 3. Attempt prohibited runtime activation through real production path:
+    // Case A: Runtime caller role attempts direct activation of target revision
+    let errRuntime: any;
+    try {
+      await cpService.activateRevision({
+        activationId: uid('act-60-prohibited'),
+        deploymentScope: 'TENANT_DEFAULT',
+        componentType: 'PromptConfig',
+        stableId: targetStable,
+        activeRevisionId: targetRev,
+        effectiveFrom: new Date(),
+        callerRole: 'RUNTIME_EXECUTION', // Prohibited runtime context
+      });
+    } catch (e) {
+      errRuntime = e;
+    }
+    expect(errRuntime).toBeDefined();
+    expect(errRuntime.code).toBe('RUNTIME_ACTIVATION_PROHIBITED');
+
+    // Case B: Attempt to activate ChangeProposal directly as if proposal ID were an active revision ID (SPEC10 §68)
+    let errProposalId: any;
+    try {
+      await cpService.activateRevision({
+        activationId: uid('act-60-proposal'),
+        deploymentScope: 'TENANT_DEFAULT',
+        componentType: 'PromptConfig',
+        stableId: targetStable,
+        activeRevisionId: propId, // Prohibited proposal self-activation
+        effectiveFrom: new Date(),
+        callerRole: 'GOVERNANCE_CONTROL_PLANE',
+      });
+    } catch (e) {
+      errProposalId = e;
+    }
+    expect(errProposalId).toBeDefined();
+    expect(errProposalId.code).toBe('PROPOSAL_CANNOT_SELF_ACTIVATE');
+
+    // Verify no activation row was created for targetStable
     const activations = await sql`
       SELECT * FROM control_plane_activations WHERE stable_id = ${targetStable}
     `;
@@ -2159,6 +2210,7 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
 
   // 61-76: Deep Relational & Storage Invariants
   it('Vector 61: primary immutable/revision identity accidentally modeled as self-FK', async () => {
+    // 1. Confirm primary identity column is PRIMARY KEY
     const pks = await sql`
       SELECT c.column_name 
       FROM information_schema.table_constraints tc 
@@ -2167,14 +2219,103 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
       WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_name = 'task_contract_revisions'
     `;
     expect(pks.map(r => r['column_name'])).toContain('task_revision_id');
+
+    // 2. Query PostgreSQL constraint metadata: verify primary identity column is NOT a self-referential foreign key
+    const selfFksOnPk = await sql`
+      SELECT 
+        c.conname,
+        rel.relname AS table_name,
+        att.attname AS column_name,
+        frel.relname AS ref_table_name,
+        fatt.attname AS ref_column_name
+      FROM pg_constraint c
+      JOIN pg_class rel ON rel.oid = c.conrelid
+      JOIN pg_class frel ON frel.oid = c.confrelid
+      JOIN pg_attribute att ON att.attrelid = c.conrelid AND att.attnum = ANY(c.conkey)
+      JOIN pg_attribute fatt ON fatt.attrelid = c.confrelid AND fatt.attnum = ANY(c.confkey)
+      WHERE c.contype = 'f' 
+        AND rel.relname = 'task_contract_revisions'
+        AND att.attname = 'task_revision_id'
+        AND frel.relname = 'task_contract_revisions'
+    `;
+    expect(selfFksOnPk.length).toBe(0);
+
+    // 3. Across all canonical revision tables, verify no primary revision key is modeled as a self-FK
+    const anySelfFkRevisionPks = await sql`
+      SELECT 
+        c.conname,
+        rel.relname AS table_name,
+        att.attname AS column_name
+      FROM pg_constraint c
+      JOIN pg_class rel ON rel.oid = c.conrelid
+      JOIN pg_class frel ON frel.oid = c.confrelid
+      JOIN pg_attribute att ON att.attrelid = c.conrelid AND att.attnum = ANY(c.conkey)
+      WHERE c.contype = 'f' 
+        AND rel.oid = c.confrelid
+        AND att.attname LIKE '%revision_id'
+    `;
+    expect(anySelfFkRevisionPks.length).toBe(0);
   });
 
   it('Vector 62: canonical ID-set stored as opaque StructuredCollection', async () => {
-    const check = await sql`
-      SELECT count(*) as count FROM information_schema.tables 
-      WHERE table_name IN ('strategy_required_propositions', 'task_guardrail_metrics')
+    // 1. All canonical reference-set relations must exist as normalized tables with foreign keys
+    const requiredNormalizedTables = [
+      'strategy_required_propositions',
+      'task_guardrail_metrics',
+      'task_secondary_metrics',
+      'channel_profile_rule_revisions',
+      'channel_profile_guidance_revisions',
+      'channel_profile_metric_revisions',
+      'run_delta_propositions',
+      'run_delta_knowledge_gaps',
+      'run_delta_evidence_assessments',
+      'run_delta_evidence_proposition_links',
+      'run_delta_research_traces',
+      'run_delta_epistemic_states',
+      'decision_snapshot_candidates',
+      'decision_policy_results',
+      'package_alternative_candidates',
+    ];
+    const existingTables = await sql`
+      SELECT table_name FROM information_schema.tables 
+      WHERE table_schema = 'public' AND table_name = ANY(${requiredNormalizedTables})
     `;
-    expect(Number(check[0]?.['count'])).toBe(2);
+    const foundTableNames = existingTables.map(r => r['table_name']);
+    for (const t of requiredNormalizedTables) {
+      expect(foundTableNames, `Normalized relation table '${t}' must exist`).toContain(t);
+    }
+
+    // 2. Parent entities must NOT simultaneously store canonical ID collections as opaque columns
+    const opaqueColumns = await sql`
+      SELECT table_name, column_name, data_type 
+      FROM information_schema.columns 
+      WHERE table_name IN ('task_contract_revisions', 'strategy_hypotheses', 'channel_profile_revisions', 'run_knowledge_deltas', 'decision_snapshots')
+        AND column_name IN (
+          'guardrail_metric_revision_ids', 'secondary_metric_revision_ids',
+          'guardrail_metrics', 'secondary_metrics',
+          'required_proposition_ids', 'propositions',
+          'knowledge_gaps', 'evidence_assessments',
+          'candidate_ids', 'candidates'
+        )
+    `;
+    expect(opaqueColumns.length).toBe(0);
+
+    // 3. Verify real foreign keys enforce normalized integrity on reference sets
+    const joinFks = await sql`
+      SELECT 
+        c.conname,
+        rel.relname AS table_name,
+        att.attname AS column_name,
+        frel.relname AS ref_table_name
+      FROM pg_constraint c
+      JOIN pg_class rel ON rel.oid = c.conrelid
+      JOIN pg_class frel ON frel.oid = c.confrelid
+      JOIN pg_attribute att ON att.attrelid = c.conrelid AND att.attnum = ANY(c.conkey)
+      WHERE c.contype = 'f' AND rel.relname = 'task_guardrail_metrics'
+    `;
+    const refTables = joinFks.map(r => r['ref_table_name']);
+    expect(refTables).toContain('task_contract_revisions');
+    expect(refTables).toContain('metric_definition_revisions');
   });
 
   it('Vector 63: DecisionCycle parent/successor/current pointer crosses Run or dangles', async () => {
@@ -2195,16 +2336,80 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
   });
 
   it('Vector 64: retention deletion breaks typed FK graph or mutates surviving semantic history', async () => {
-    const entityId = uid('exec-erased');
+    const targetObj = uid('obj-ret-64');
+    const key64 = uid('key-64');
+    const ownerArtifactId = uid('art-ret-64');
+
+    // 1. Create canonical target (ObjectRegistry) + dependent canonical FK reference (ObjectReference)
     await sql`
-      INSERT INTO deleted_target_tombstones (
-        entity_type, entity_id, tenant_id, deletion_reason_code
-      ) VALUES (
-        'ExecutionArtifact', ${entityId}, ${tenantA}, 'GDPR_REQUEST'
-      )
+      INSERT INTO object_registry (object_id, tenant_id, content_hash, object_key, size_bytes, media_type, state)
+      VALUES (${targetObj}, ${tenantA}, ${uid('hash-64')}, ${key64}, 1024, 'application/json', 'AVAILABLE')
     `;
-    const rows = await sql`SELECT * FROM deleted_target_tombstones WHERE entity_id = ${entityId}`;
-    expect(rows.length).toBe(1);
+    await sql`
+      INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id)
+      VALUES ('ExecutionArtifact', ${ownerArtifactId}, ${tenantA})
+    `;
+    await sql`
+      INSERT INTO object_references (owner_entity_type, owner_entity_id, field_name, tenant_id, object_id)
+      VALUES ('ExecutionArtifact', ${ownerArtifactId}, 'actual_content', ${tenantA}, ${targetObj})
+    `;
+
+    // 2. Invoke real deletion/retention enforcement path WITHOUT dependent closure:
+    // Proves system refuses to leave a surviving dangling enforced FK
+    let danglingErr: any;
+    try {
+      await retService.executeRetentionDeletion({
+        tenantId: tenantA,
+        targetEntityType: 'ObjectRegistry',
+        targetEntityId: targetObj,
+        deletionReasonCode: 'GDPR_ERASURE_REQUEST',
+        dependentClosureEntities: [], // Omitting dependent reference
+      });
+    } catch (e) {
+      danglingErr = e;
+    }
+    expect(danglingErr).toBeDefined();
+    expect(['CANNOT_LEAVE_DANGLING_FK', '23503']).toContain(danglingErr.code);
+
+    // Verify target was NOT deleted while dangling FK would remain
+    const [stillExists] = await sql`SELECT object_id FROM object_registry WHERE object_id = ${targetObj}`;
+    expect(stillExists?.['object_id']).toBe(targetObj);
+
+    // 3. Invoke real retention deletion WITH complete lawful deletion closure
+    const deletionResult = await retService.executeRetentionDeletion({
+      tenantId: tenantA,
+      targetEntityType: 'ObjectRegistry',
+      targetEntityId: targetObj,
+      deletionReasonCode: 'GDPR_ERASURE_REQUEST',
+      dependentClosureEntities: [
+        { entityType: 'ObjectReference', entityId: ownerArtifactId },
+      ],
+    });
+
+    // 4. Verify resulting permitted deletion/degraded-replay state:
+    expect(deletionResult.tombstoneCreated).toBe(true);
+    expect(deletionResult.replayabilityStatus).toBe('DEGRADED');
+
+    // 5. Verify target is removed, tombstone exists, and no surviving dangling FK exists
+    const [targetAfter] = await sql`SELECT object_id FROM object_registry WHERE object_id = ${targetObj}`;
+    expect(targetAfter).toBeUndefined();
+
+    const [tombstone] = await sql`
+      SELECT entity_id, payload_retained, deletion_reason_code 
+      FROM deleted_target_tombstones 
+      WHERE entity_id = ${targetObj}
+    `;
+    expect(tombstone?.['entity_id']).toBe(targetObj);
+    expect(tombstone?.['payload_retained']).toBe(false);
+
+    const survivingFks = await sql`SELECT * FROM object_references WHERE object_id = ${targetObj}`;
+    expect(survivingFks.length).toBe(0);
+
+    // 6. Verify surviving historical semantic references are not rewritten
+    const [revRegistryRow] = await sql`
+      SELECT revision_id FROM revision_registry WHERE revision_id = ${taskRev1}
+    `;
+    expect(revRegistryRow?.['revision_id']).toBe(taskRev1);
   });
 
   it('Vector 65: SourceArtifact snapshot_reference bypasses ObjectRegistry / GC serialization', async () => {
@@ -2307,10 +2512,64 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
   });
 
   it('Vector 69: required deletion rewrites immutable historical reference to tombstone ID', async () => {
-    const checkImmutable = await sql`
-      SELECT count(*) as count FROM pg_trigger WHERE tgname LIKE 'trg_immutable_%'
+    const saId = uid('sa-69');
+    const realObjId = uid('obj-real-69');
+    const tombstoneObjId = uid('obj-tombstone-69');
+
+    // 1. Create canonical target object and historical SourceArtifact containing real reference
+    await sql`
+      INSERT INTO object_registry (object_id, tenant_id, content_hash, object_key, size_bytes, media_type, state)
+      VALUES (${realObjId}, ${tenantA}, ${uid('hash-69')}, ${uid('key-69')}, 512, 'text/plain', 'AVAILABLE')
     `;
-    expect(Number(checkImmutable[0]?.['count'])).toBeGreaterThan(0);
+    await sql`
+      INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id)
+      VALUES ('SourceArtifact', ${saId}, ${tenantA})
+    `;
+    await sql`
+      INSERT INTO source_artifacts (
+        source_id, tenant_id, source_type, publisher, author, jurisdiction,
+        source_version, retrieved_at, content_hash, snapshot_reference,
+        rights_policy_id, data_scope
+      ) VALUES (
+        ${saId}, ${tenantA}, 'DOCUMENT', 'Historical Pub', 'Author', 'US',
+        'v1', now(), 'hash-sa-69', ${realObjId},
+        ${policyId}, 'TENANT_PRIVATE'
+      )
+    `;
+
+    // 2. Create lawful deletion/tombstone state through production deletion boundary
+    await sql`
+      INSERT INTO deleted_target_tombstones (
+        entity_type, entity_id, tenant_id, deletion_reason_code, payload_retained
+      ) VALUES (
+        'ObjectRegistry', ${tombstoneObjId}, ${tenantA}, 'GDPR_ERASURE_REQUEST', false
+      )
+    `;
+
+    // 3. Exercise the attack: attempt to rewrite old historical reference to the tombstone ID
+    let rewriteErr: any;
+    try {
+      await retService.rewriteHistoricalReferenceForbidden({
+        tableName: 'source_artifacts',
+        columnName: 'snapshot_reference',
+        whereClauseColumn: 'source_id',
+        whereClauseValue: saId,
+        tombstoneId: tombstoneObjId,
+      });
+    } catch (e) {
+      rewriteErr = e;
+    }
+
+    // 4. Prove production persistence boundary rejects the rewrite (immutability trigger 55000 / FK violation 23503)
+    expect(rewriteErr).toBeDefined();
+    expect(['55000', '23503']).toContain(rewriteErr.code);
+
+    // 5. Verify the original immutable reference value is NOT silently substituted
+    const [persistedRow] = await sql`
+      SELECT snapshot_reference FROM source_artifacts WHERE source_id = ${saId}
+    `;
+    expect(persistedRow?.['snapshot_reference']).toBe(realObjId);
+    expect(persistedRow?.['snapshot_reference']).not.toBe(tombstoneObjId);
   });
 
   it('Vector 70: DecisionRecord violates snapshot/task/review/selected-action closure', async () => {
