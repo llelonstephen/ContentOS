@@ -84,21 +84,21 @@ export class PublicationPersistenceService {
     }
 
     await this.sql.begin(async (sqlTx) => {
-      // 1. Insert lineage
-      await sqlTx`
-        INSERT INTO publication_lineages (
-          publication_lineage_id, tenant_id, workspace_id, channel, destination, created_at
-        ) VALUES (
-          ${lineageId}, ${tenantId}, ${workspaceId ?? null}, ${channel}, ${destination}, now()
-        )
-      `;
-
-      // 2. Register lineage in ImmutableEntityRegistry
+      // 1. Register lineage in ImmutableEntityRegistry
       await sqlTx`
         INSERT INTO immutable_entity_registry (
           entity_type, entity_id, tenant_id, workspace_id, payload_state, created_at
         ) VALUES (
           'PublicationLineage', ${lineageId}, ${tenantId}, ${workspaceId ?? null}, 'AVAILABLE', now()
+        )
+      `;
+
+      // 2. Insert lineage
+      await sqlTx`
+        INSERT INTO publication_lineages (
+          publication_lineage_id, tenant_id, workspace_id, channel, destination, created_at
+        ) VALUES (
+          ${lineageId}, ${tenantId}, ${workspaceId ?? null}, ${channel}, ${destination}, now()
         )
       `;
 

@@ -183,6 +183,14 @@ export class ControlPlanePersistenceService {
           `Cross-tenant violation: Payload tenant '${tenantId}' does not match ObjectRegistry tenant '${obj.tenant_id}'.`,
         );
       }
+      if (workspaceId || obj.workspace_id) {
+        if ((workspaceId ?? null) !== (obj.workspace_id ?? null)) {
+          throw new RegistryValidationError(
+            'CROSS_WORKSPACE_PAYLOAD_OBJECT',
+            `Cross-workspace violation: Payload workspace '${workspaceId}' does not match ObjectRegistry workspace '${obj.workspace_id}'.`,
+          );
+        }
+      }
       if (obj.content_hash !== payloadHash) {
         throw new RegistryValidationError(
           'PAYLOAD_HASH_MISMATCH',

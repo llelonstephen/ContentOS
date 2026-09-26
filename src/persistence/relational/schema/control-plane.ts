@@ -278,7 +278,7 @@ export const channelProfileRevisions = pgTable(
     channel_profile_revision_id: text('channel_profile_revision_id').primaryKey(),
     supersedes_channel_profile_revision_id: text('supersedes_channel_profile_revision_id'),
     identity: text('identity').notNull(),
-    platform_if_applicable: text('platform_if_applicable'),
+    platform_if_applicable: text('platform_if_applicable').notNull(),
     supported_formats: text('supported_formats').notNull(),
     distribution_capabilities: text('distribution_capabilities').notNull(),
     technical_capabilities: text('technical_capabilities').notNull(),

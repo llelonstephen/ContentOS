@@ -154,9 +154,9 @@ export const objectReferences = pgTable(
     owner_entity_type: text('owner_entity_type').notNull(),
     owner_entity_id: text('owner_entity_id').notNull(),
     field_name: text('field_name').notNull(),
-    object_id: text('object_id')
-      .notNull()
-      .references(() => objectRegistry.object_id),
+    tenant_id: text('tenant_id').notNull(),
+    workspace_id: text('workspace_id'),
+    object_id: text('object_id').notNull(),
     created_at: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
@@ -164,10 +164,18 @@ export const objectReferences = pgTable(
       columns: [table.owner_entity_type, table.owner_entity_id, table.field_name],
     }),
     foreignKey({
-      columns: [table.owner_entity_type, table.owner_entity_id],
+      columns: [table.tenant_id, table.owner_entity_type, table.owner_entity_id],
       foreignColumns: [
+        immutableEntityRegistry.tenant_id,
         immutableEntityRegistry.entity_type,
         immutableEntityRegistry.entity_id,
+      ],
+    }),
+    foreignKey({
+      columns: [table.tenant_id, table.object_id],
+      foreignColumns: [
+        objectRegistry.tenant_id,
+        objectRegistry.object_id,
       ],
     }),
   ],

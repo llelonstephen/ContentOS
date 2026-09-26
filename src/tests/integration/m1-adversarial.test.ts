@@ -56,6 +56,28 @@ describe('M1 Adversarial Verification Suite: Live PostgreSQL Invariants', () => 
     measService = new MeasurementPersistenceService(sql);
     decService = new DecisionPersistenceService(sql);
 
+    // Seed baseline registries
+    await sql`
+      INSERT INTO revision_registry (entity_type, stable_id, revision_id, tenant_id)
+      VALUES 
+        ('ContentProgramRevision', 'prog-adv', 'prog-rev-adv', ${tenantA}),
+        ('MetricDefinitionRevision', 'metric-adv-ctr', 'metric-rev-adv-ctr', ${tenantA}),
+        ('TaskContractRevision', 'task-adv', 'task-rev-adv', ${tenantA}),
+        ('EvalContractRevision', 'eval-adv', 'eval-rev-adv', ${tenantA})
+      ON CONFLICT DO NOTHING
+    `;
+
+    await sql`
+      INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id)
+      VALUES
+        ('RunConfig', 'rc-adv', ${tenantA}),
+        ('KnowledgeManifest', 'km-adv', ${tenantA}),
+        ('BaselineKnowledgeSnapshot', 'bks-adv', ${tenantA}),
+        ('RunKnowledgeDelta', 'rkd-adv', ${tenantA}),
+        ('GovernanceSnapshot', 'gov-adv', ${tenantA})
+      ON CONFLICT DO NOTHING
+    `;
+
     // Seed baseline common control plane fixtures needed for FK targets
     await sql`
       INSERT INTO content_program_revisions (
@@ -137,6 +159,12 @@ describe('M1 Adversarial Verification Suite: Live PostgreSQL Invariants', () => 
 
   describe('Adversarial 1: Enum Vocabulary Violations', () => {
     it('adversarial attack: reject AudienceState.state_stage = AWARENESS (check constraint)', async () => {
+      await sql`
+        INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id)
+        VALUES ('AudienceState', 'aud-invalid-stage', ${tenantA})
+        ON CONFLICT DO NOTHING
+      `;
+
       let err: any;
       try {
         await sql`
@@ -158,6 +186,12 @@ describe('M1 Adversarial Verification Suite: Live PostgreSQL Invariants', () => 
 
     it('should accept valid frozen AudienceState stage (FINAL_FOR_DECISION)', async () => {
       await sql`
+        INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id)
+        VALUES ('AudienceState', 'aud-valid-stage', ${tenantA})
+        ON CONFLICT DO NOTHING
+      `;
+
+      await sql`
         INSERT INTO audience_states (
           audience_state_id, tenant_id, task_revision_id, state_stage, context, knowledge_state,
           problem_state, solution_state, product_state, brand_state, intent_state, desired_outcome,
@@ -173,6 +207,45 @@ describe('M1 Adversarial Verification Suite: Live PostgreSQL Invariants', () => 
   });
 
   describe('Adversarial 2: Immutability Protection & Triggers', () => {
+    it('adversarial attack: direct insert to typed revision without RevisionRegistry must fail (REGISTRY_IDENTITY_REQUIRED)', async () => {
+      let err: any;
+      try {
+        await sql`
+          INSERT INTO task_contract_revisions (
+            task_id, task_revision_id, program_revision_id, standalone_task, objective,
+            format, language, market, jurisdiction, brand_id, product_id, audience_context,
+            channel, success_metric_revision_id, constraints, risk_context, compute_budget,
+            tenant_id
+          ) VALUES (
+            'unregistered-task', 'unregistered-task-rev', 'prog-rev-adv', false, 'Direct Write',
+            'POST', 'en', 'US', 'US-FED', 'brand-adv', 'prod-adv', 'Audience',
+            'TWITTER_X', 'metric-rev-adv-ctr', '{}', '{}', '{}',
+            ${tenantA}
+          )
+        `;
+      } catch (e) {
+        err = e;
+      }
+      expect(err).toBeDefined();
+      expect(err.code).toBe('23503');
+      expect(err.message).toContain('REGISTRY_IDENTITY_REQUIRED');
+    });
+
+    it('adversarial attack: direct insert to immutable entity without ImmutableEntityRegistry must fail (REGISTRY_IDENTITY_REQUIRED)', async () => {
+      let err: any;
+      try {
+        await sql`
+          INSERT INTO knowledge_manifests (knowledge_manifest_id, tenant_id, content_hash)
+          VALUES ('unregistered-km', ${tenantA}, 'hash-unregistered')
+        `;
+      } catch (e) {
+        err = e;
+      }
+      expect(err).toBeDefined();
+      expect(err.code).toBe('23503');
+      expect(err.message).toContain('REGISTRY_IDENTITY_REQUIRED');
+    });
+
     it('adversarial attack: reject ordinary UPDATE on immutable table', async () => {
       let err: any;
       try {
@@ -206,8 +279,50 @@ describe('M1 Adversarial Verification Suite: Live PostgreSQL Invariants', () => 
       expect(err.message).toContain('MUTATION_FORBIDDEN');
     });
 
-    it('should allow DELETE under privileged deletion bypass (SPEC08 GDPR erasure)', async () => {
+    it('adversarial attack: reject DELETE by application role even if contentos.privileged_deletion is enabled', async () => {
+      const tempRevId = 'task-rev-app-role-delete';
+      await sql`
+        INSERT INTO revision_registry (entity_type, stable_id, revision_id, tenant_id)
+        VALUES ('TaskContractRevision', 'task-app-del', ${tempRevId}, ${tenantA})
+        ON CONFLICT DO NOTHING
+      `;
+      await sql`
+        INSERT INTO task_contract_revisions (
+          task_id, task_revision_id, program_revision_id, standalone_task, objective,
+          format, language, market, jurisdiction, brand_id, product_id, audience_context,
+          channel, success_metric_revision_id, constraints, risk_context, compute_budget,
+          tenant_id
+        ) VALUES (
+          'task-app-del', ${tempRevId}, 'prog-rev-adv', false, 'App Role Del',
+          'POST', 'en', 'US', 'US-FED', 'brand-adv', 'prod-adv', 'Tech Leads',
+          'TWITTER_X', 'metric-rev-adv-ctr', '{}', '{}', '{}',
+          ${tenantA}
+        )
+      `;
+
+      let err: any;
+      try {
+        await sql.begin(async (tx) => {
+          await tx.unsafe("SET LOCAL ROLE contentos_app_role;");
+          await tx.unsafe("SET LOCAL contentos.privileged_deletion = 'on';");
+          await tx`DELETE FROM task_contract_revisions WHERE task_revision_id = ${tempRevId}`;
+        });
+      } catch (e) {
+        err = e;
+      }
+
+      expect(err).toBeDefined();
+      expect(err.code).toBe('42501'); // PRIVILEGED_ROLE_REQUIRED
+      expect(err.message).toContain('PRIVILEGED_ROLE_REQUIRED');
+    });
+
+    it('should allow DELETE under privileged deletion role (contentos_privileged_deleter)', async () => {
       const tempRevId = 'task-rev-to-delete';
+      await sql`
+        INSERT INTO revision_registry (entity_type, stable_id, revision_id, tenant_id)
+        VALUES ('TaskContractRevision', 'task-del', ${tempRevId}, ${tenantA})
+        ON CONFLICT DO NOTHING
+      `;
       await sql`
         INSERT INTO task_contract_revisions (
           task_id, task_revision_id, program_revision_id, standalone_task, objective,
@@ -222,8 +337,9 @@ describe('M1 Adversarial Verification Suite: Live PostgreSQL Invariants', () => 
         )
       `;
 
-      // Perform privileged deletion
+      // Perform privileged deletion as contentos_privileged_deleter
       await sql.begin(async (tx) => {
+        await tx.unsafe("SET LOCAL ROLE contentos_privileged_deleter;");
         await tx.unsafe("SET LOCAL contentos.privileged_deletion = 'on';");
         await tx`DELETE FROM task_contract_revisions WHERE task_revision_id = ${tempRevId}`;
       });
@@ -268,6 +384,62 @@ describe('M1 Adversarial Verification Suite: Live PostgreSQL Invariants', () => 
 
       expect(err).toBeDefined();
       expect(err.code).toBe('23503'); // foreign_key_violation (composite fk tenant_id, object_id)
+    });
+
+    it('adversarial attack: ObjectReference tenant mismatch with object_registry fails composite FK', async () => {
+      await sql`
+        INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id)
+        VALUES ('KnowledgeManifest', 'km-ref-tenant-a', ${tenantA})
+        ON CONFLICT DO NOTHING
+      `;
+
+      let err: any;
+      try {
+        await sql`
+          INSERT INTO object_references (
+            owner_entity_type, owner_entity_id, field_name, object_id, tenant_id
+          ) VALUES (
+            'KnowledgeManifest', 'km-ref-tenant-a', 'data_payload', ${objTenantB}, ${tenantA}
+          )
+        `;
+      } catch (e) {
+        err = e;
+      }
+
+      expect(err).toBeDefined();
+      expect(err.code).toBe('23503'); // composite FK (tenant_id, object_id) -> object_registry
+    });
+
+    it('adversarial attack: Control Plane payload workspace mismatch with object workspace fails integrity check', async () => {
+      const objWsA = 'obj-ws-a-1';
+      await sql`
+        INSERT INTO object_registry (object_id, tenant_id, workspace_id, content_hash, object_key, size_bytes, media_type, state)
+        VALUES (${objWsA}, ${tenantA}, 'workspace-1', 'hash-ws-a', 'key-ws-a', 512, 'application/json', 'AVAILABLE')
+        ON CONFLICT DO NOTHING
+      `;
+
+      await sql`
+        INSERT INTO revision_registry (entity_type, stable_id, revision_id, tenant_id, workspace_id)
+        VALUES ('PromptConfig', 'prompt-ws-a', 'rev-ws-a', ${tenantA}, 'workspace-1')
+        ON CONFLICT DO NOTHING
+      `;
+
+      let err: any;
+      try {
+        // Attempt payload insert with workspace-2 (mismatched with object's workspace-1)
+        await sql`
+          INSERT INTO registered_control_plane_revision_payloads (
+            entity_type, stable_id, revision_id, tenant_id, workspace_id, object_id, payload_hash, payload_schema_revision_id
+          ) VALUES (
+            'PromptConfig', 'prompt-ws-a', 'rev-ws-a', ${tenantA}, 'workspace-2', ${objWsA}, 'hash-ws-a', 'schema-v1'
+          )
+        `;
+      } catch (e) {
+        err = e;
+      }
+
+      expect(err).toBeDefined();
+      expect(['23514', 'PAYLOAD_WORKSPACE_MISMATCH']).toContain(err.code);
     });
   });
 
@@ -550,6 +722,15 @@ describe('M1 Adversarial Verification Suite: Live PostgreSQL Invariants', () => 
     const rootEpsId = `eps-root-1-${timestamp}`;
 
     beforeAll(async () => {
+      // Seed immutable_entity_registry for propositions
+      await sql`
+        INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id)
+        VALUES
+          ('Proposition', ${prop1}, ${tenantA}),
+          ('Proposition', ${prop2}, ${tenantA})
+        ON CONFLICT DO NOTHING
+      `;
+
       // Seed propositions with exact SPEC02 columns
       await sql`
         INSERT INTO propositions (
@@ -665,6 +846,12 @@ describe('M1 Adversarial Verification Suite: Live PostgreSQL Invariants', () => 
     const artOther = `art-meas-other-${timestamp}`;
 
     beforeAll(async () => {
+      await sql`
+        INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id)
+        VALUES ('MeasurementState', ${measStateId}, ${tenantA})
+        ON CONFLICT DO NOTHING
+      `;
+
       await sql`
         INSERT INTO measurement_states (
           measurement_state_id, tenant_id, data_maturity, is_final, late_event_window,

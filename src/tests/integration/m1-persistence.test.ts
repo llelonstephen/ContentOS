@@ -86,6 +86,30 @@ describe('M1 Integration: Live PostgreSQL Relational Persistence', () => {
     }
 
     // Seed baseline common control-plane and governance entities needed for FK trees
+    // 1. Register in RevisionRegistry
+    await sql`
+      INSERT INTO revision_registry (entity_type, stable_id, revision_id, tenant_id)
+      VALUES 
+        ('ContentProgramRevision', 'prog-001', 'prog-rev-001', ${tenantId}),
+        ('MetricDefinitionRevision', 'metric-ctr', 'metric-rev-ctr', ${tenantId}),
+        ('TaskContractRevision', 'task-core', 'task-rev-001', ${tenantId}),
+        ('EvalContractRevision', 'eval-c1', 'eval-rev-001', ${tenantId})
+      ON CONFLICT DO NOTHING
+    `;
+
+    // 2. Register in ImmutableEntityRegistry
+    await sql`
+      INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id)
+      VALUES
+        ('RunConfig', 'rc-001', ${tenantId}),
+        ('KnowledgeManifest', 'km-001', ${tenantId}),
+        ('BaselineKnowledgeSnapshot', 'bks-001', ${tenantId}),
+        ('RunKnowledgeDelta', 'rkd-001', ${tenantId}),
+        ('GovernanceSnapshot', 'gov-001', ${tenantId}),
+        ('AudienceState', 'aud-001', ${tenantId})
+      ON CONFLICT DO NOTHING
+    `;
+
     await sql`
       INSERT INTO content_program_revisions (
         program_id, program_revision_id, business_objective, brand_objective, target_audiences, markets,
@@ -464,6 +488,11 @@ describe('M1 Integration: Live PostgreSQL Relational Persistence', () => {
     it('should enforce DecisionCycleBinding uniqueness on decision_snapshot_id', async () => {
       const snapId = 'snap-binding-001';
       await sql`
+        INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id)
+        VALUES ('DecisionSnapshot', ${snapId}, ${tenantId})
+        ON CONFLICT DO NOTHING
+      `;
+      await sql`
         INSERT INTO decision_snapshots (
           snapshot_id, tenant_id, baseline_knowledge_snapshot_id, run_knowledge_delta_id,
           governance_snapshot_id, run_config_id, task_revision_id, audience_state_id, frozen_at
@@ -499,6 +528,18 @@ describe('M1 Integration: Live PostgreSQL Relational Persistence', () => {
 
     beforeAll(async () => {
       await sql`
+        INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id)
+        VALUES ('DecisionSnapshot', ${snapId}, ${tenantId})
+        ON CONFLICT DO NOTHING
+      `;
+
+      await sql`
+        INSERT INTO revision_registry (entity_type, stable_id, revision_id, tenant_id)
+        VALUES ('DecisionPolicyRevision', 'pol-safety', 'pol-rev-001', ${tenantId})
+        ON CONFLICT DO NOTHING
+      `;
+
+      await sql`
         INSERT INTO decision_snapshots (
           snapshot_id, tenant_id, baseline_knowledge_snapshot_id, run_knowledge_delta_id,
           governance_snapshot_id, run_config_id, task_revision_id, audience_state_id, frozen_at
@@ -518,6 +559,14 @@ describe('M1 Integration: Live PostgreSQL Relational Persistence', () => {
     });
 
     it('should reject duplicate PolicyResult for same (snapshot_id, policy_revision_id)', async () => {
+      await sql`
+        INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id)
+        VALUES
+          ('PolicyResult', 'pres-001', ${tenantId}),
+          ('PolicyResult', 'pres-002', ${tenantId})
+        ON CONFLICT DO NOTHING
+      `;
+
       await sql`
         INSERT INTO policy_results (
           policy_result_id, tenant_id, snapshot_id, policy_revision_id, triggered, action, reason_code, input_uncertainty
@@ -545,6 +594,14 @@ describe('M1 Integration: Live PostgreSQL Relational Persistence', () => {
 
     it('should reject duplicate PolicyConflictResolution for same (snapshot_id, conflict_key)', async () => {
       const conflictKey = 'conf-key-brand-safety';
+
+      await sql`
+        INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id)
+        VALUES
+          ('PolicyConflictResolution', 'conf-res-001', ${tenantId}),
+          ('PolicyConflictResolution', 'conf-res-002', ${tenantId})
+        ON CONFLICT DO NOTHING
+      `;
 
       await sql`
         INSERT INTO policy_conflict_resolutions (
@@ -576,6 +633,16 @@ describe('M1 Integration: Live PostgreSQL Relational Persistence', () => {
     const lineageId = 'lin-x-test';
 
     beforeAll(async () => {
+      await sql`
+        INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id)
+        VALUES
+          ('PublicationLineage', ${lineageId}, ${tenantId}),
+          ('PublishedArtifact', 'pub-art-001', ${tenantId}),
+          ('PublishedArtifact', 'pub-art-002', ${tenantId}),
+          ('PublishedArtifact', 'pub-art-003', ${tenantId})
+        ON CONFLICT DO NOTHING
+      `;
+
       await sql`
         INSERT INTO publication_lineages (publication_lineage_id, tenant_id, channel, destination)
         VALUES (${lineageId}, ${tenantId}, 'TWITTER_X', 'handle:@brand')
@@ -628,6 +695,12 @@ describe('M1 Integration: Live PostgreSQL Relational Persistence', () => {
 
   describe('Relational Foreign Key Integrity on Normalized Reference Sets', () => {
     it('adversarial attack: reject reference to non-existent proposition in normalized link table', async () => {
+      await sql`
+        INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id)
+        VALUES ('StrategyHypothesis', 'strat-fk-test', ${tenantId})
+        ON CONFLICT DO NOTHING
+      `;
+
       // Insert valid strategy hypothesis
       await sql`
         INSERT INTO strategy_hypotheses (
@@ -679,9 +752,9 @@ describe('M1 Integration: Live PostgreSQL Relational Persistence', () => {
       try {
         await sql`
           INSERT INTO object_references (
-            owner_entity_type, owner_entity_id, field_name, object_id
+            owner_entity_type, owner_entity_id, field_name, tenant_id, object_id
           ) VALUES (
-            'EvidenceItem', 'ev-deleted-target-123', 'snapshot_reference', 'obj-non-existent-999'
+            'EvidenceItem', 'ev-deleted-target-123', 'snapshot_reference', ${tenantId}, 'obj-non-existent-999'
           )
         `;
       } catch (e) {

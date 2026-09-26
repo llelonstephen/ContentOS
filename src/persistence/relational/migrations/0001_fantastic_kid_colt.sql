@@ -24,6 +24,8 @@ CREATE TABLE "object_references" (
 	"owner_entity_type" text NOT NULL,
 	"owner_entity_id" text NOT NULL,
 	"field_name" text NOT NULL,
+	"tenant_id" text NOT NULL,
+	"workspace_id" text,
 	"object_id" text NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "object_references_owner_entity_type_owner_entity_id_field_name_pk" PRIMARY KEY("owner_entity_type","owner_entity_id","field_name")
@@ -81,7 +83,7 @@ CREATE TABLE "channel_profile_revisions" (
 	"channel_profile_revision_id" text PRIMARY KEY NOT NULL,
 	"supersedes_channel_profile_revision_id" text,
 	"identity" text NOT NULL,
-	"platform_if_applicable" text,
+	"platform_if_applicable" text NOT NULL,
 	"supported_formats" text NOT NULL,
 	"distribution_capabilities" text NOT NULL,
 	"technical_capabilities" text NOT NULL,
@@ -1460,8 +1462,8 @@ CREATE TABLE "deleted_target_tombstones" (
 	CONSTRAINT "deleted_target_tombstones_entity_type_entity_id_pk" PRIMARY KEY("entity_type","entity_id")
 );
 --> statement-breakpoint
-ALTER TABLE "object_references" ADD CONSTRAINT "object_references_object_id_object_registry_object_id_fk" FOREIGN KEY ("object_id") REFERENCES "public"."object_registry"("object_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "object_references" ADD CONSTRAINT "object_references_owner_entity_type_owner_entity_id_immutable_entity_registry_entity_type_entity_id_fk" FOREIGN KEY ("owner_entity_type","owner_entity_id") REFERENCES "public"."immutable_entity_registry"("entity_type","entity_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "object_references" ADD CONSTRAINT "object_references_tenant_id_object_id_object_registry_tenant_id_object_id_fk" FOREIGN KEY ("tenant_id","object_id") REFERENCES "public"."object_registry"("tenant_id","object_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "object_references" ADD CONSTRAINT "object_references_tenant_id_owner_entity_type_owner_entity_id_immutable_entity_registry_tenant_id_entity_type_entity_id_fk" FOREIGN KEY ("tenant_id","owner_entity_type","owner_entity_id") REFERENCES "public"."immutable_entity_registry"("tenant_id","entity_type","entity_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "control_plane_activations" ADD CONSTRAINT "control_plane_activations_component_type_stable_id_active_revision_id_revision_registry_entity_type_stable_id_revision_id_fk" FOREIGN KEY ("component_type","stable_id","active_revision_id") REFERENCES "public"."revision_registry"("entity_type","stable_id","revision_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "registered_control_plane_revision_payloads" ADD CONSTRAINT "registered_control_plane_revision_payloads_tenant_id_entity_type_stable_id_revision_id_revision_registry_tenant_id_entity_type_stable_id_revision_id_fk" FOREIGN KEY ("tenant_id","entity_type","stable_id","revision_id") REFERENCES "public"."revision_registry"("tenant_id","entity_type","stable_id","revision_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "registered_control_plane_revision_payloads" ADD CONSTRAINT "registered_control_plane_revision_payloads_tenant_id_object_id_object_registry_tenant_id_object_id_fk" FOREIGN KEY ("tenant_id","object_id") REFERENCES "public"."object_registry"("tenant_id","object_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
@@ -1803,14 +1805,35 @@ CREATE INDEX "idx_deleted_rev_triple" ON "deleted_revision_tombstones" USING btr
 CREATE INDEX "idx_deleted_rev_tenant" ON "deleted_revision_tombstones" USING btree ("tenant_id");--> statement-breakpoint
 CREATE INDEX "idx_deleted_target_tenant" ON "deleted_target_tombstones" USING btree ("tenant_id");
 --> statement-breakpoint
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'contentos_privileged_deleter') THEN
+    CREATE ROLE contentos_privileged_deleter NOLOGIN;
+  END IF;
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'contentos_app_role') THEN
+    CREATE ROLE contentos_app_role NOLOGIN;
+  END IF;
+END
+$$;
+--> statement-breakpoint
+GRANT USAGE ON SCHEMA public TO contentos_app_role, contentos_privileged_deleter;--> statement-breakpoint
+GRANT ALL ON ALL TABLES IN SCHEMA public TO contentos_app_role, contentos_privileged_deleter;--> statement-breakpoint
+GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO contentos_app_role, contentos_privileged_deleter;--> statement-breakpoint
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO contentos_app_role, contentos_privileged_deleter;--> statement-breakpoint
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO contentos_app_role, contentos_privileged_deleter;--> statement-breakpoint
 CREATE OR REPLACE FUNCTION prevent_immutable_mutation()
 RETURNS TRIGGER AS $$
 BEGIN
   IF current_setting('contentos.privileged_deletion', true) = 'on' THEN
-    IF TG_OP = 'DELETE' THEN
-      RETURN OLD;
+    IF pg_has_role(CURRENT_USER, 'contentos_privileged_deleter', 'MEMBER') THEN
+      IF TG_OP = 'DELETE' THEN
+        RETURN OLD;
+      ELSE
+        RETURN NEW;
+      END IF;
     ELSE
-      RETURN NEW;
+      RAISE EXCEPTION 'PRIVILEGED_ROLE_REQUIRED: Role % is not authorized for privileged deletion', CURRENT_USER
+        USING ERRCODE = '42501';
     END IF;
   END IF;
   RAISE EXCEPTION 'MUTATION_FORBIDDEN: Immutable table % cannot be modified by UPDATE or DELETE', TG_TABLE_NAME
@@ -2305,3 +2328,424 @@ FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
 CREATE TRIGGER trg_immutable_replayability_missing_refs
 BEFORE UPDATE OR DELETE ON "replayability_missing_refs"
 FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE OR REPLACE FUNCTION enforce_typed_revision_registry()
+RETURNS TRIGGER AS $$
+DECLARE
+  v_entity_type text;
+  v_stable_id text;
+  v_revision_id text;
+  v_reg_count int;
+BEGIN
+  CASE TG_TABLE_NAME
+    WHEN 'content_program_revisions' THEN
+      v_entity_type := 'ContentProgramRevision';
+      v_stable_id := NEW.program_id;
+      v_revision_id := NEW.program_revision_id;
+    WHEN 'metric_definition_revisions' THEN
+      v_entity_type := 'MetricDefinitionRevision';
+      v_stable_id := NEW.metric_id;
+      v_revision_id := NEW.metric_revision_id;
+    WHEN 'task_contract_revisions' THEN
+      v_entity_type := 'TaskContractRevision';
+      v_stable_id := NEW.task_id;
+      v_revision_id := NEW.task_revision_id;
+    WHEN 'eval_contract_revisions' THEN
+      v_entity_type := 'EvalContractRevision';
+      v_stable_id := NEW.eval_contract_id;
+      v_revision_id := NEW.eval_contract_revision_id;
+    WHEN 'channel_profile_revisions' THEN
+      v_entity_type := 'ChannelProfileRevision';
+      v_stable_id := NEW.channel_profile_id;
+      v_revision_id := NEW.channel_profile_revision_id;
+    WHEN 'attribution_model_revisions' THEN
+      v_entity_type := 'AttributionModelRevision';
+      v_stable_id := NEW.attribution_model_id;
+      v_revision_id := NEW.attribution_model_revision_id;
+    WHEN 'guidance_revisions' THEN
+      v_entity_type := 'GuidanceRevision';
+      v_stable_id := NEW.guidance_id;
+      v_revision_id := NEW.guidance_revision_id;
+    WHEN 'normative_rule_revisions' THEN
+      v_entity_type := 'NormativeRuleRevision';
+      v_stable_id := NEW.rule_id;
+      v_revision_id := NEW.rule_revision_id;
+    WHEN 'decision_policy_revisions' THEN
+      v_entity_type := 'DecisionPolicyRevision';
+      v_stable_id := NEW.policy_id;
+      v_revision_id := NEW.policy_revision_id;
+    WHEN 'registered_control_plane_revisions' THEN
+      v_entity_type := NEW.entity_type;
+      v_stable_id := NEW.stable_id;
+      v_revision_id := NEW.revision_id;
+    ELSE
+      RETURN NEW;
+  END CASE;
+
+  SELECT count(*) INTO v_reg_count
+  FROM revision_registry
+  WHERE entity_type = v_entity_type
+    AND stable_id = v_stable_id
+    AND revision_id = v_revision_id
+    AND tenant_id = NEW.tenant_id;
+
+  IF v_reg_count = 0 THEN
+    RAISE EXCEPTION 'REGISTRY_IDENTITY_REQUIRED: Cannot insert into % without matching revision_registry entry (entity_type=%, stable_id=%, revision_id=%, tenant_id=%)',
+      TG_TABLE_NAME, v_entity_type, v_stable_id, v_revision_id, NEW.tenant_id
+      USING ERRCODE = '23503';
+  END IF;
+
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+--> statement-breakpoint
+CREATE TRIGGER trg_registry_content_program_revisions
+BEFORE INSERT ON "content_program_revisions"
+FOR EACH ROW EXECUTE FUNCTION enforce_typed_revision_registry();
+--> statement-breakpoint
+CREATE TRIGGER trg_registry_metric_definition_revisions
+BEFORE INSERT ON "metric_definition_revisions"
+FOR EACH ROW EXECUTE FUNCTION enforce_typed_revision_registry();
+--> statement-breakpoint
+CREATE TRIGGER trg_registry_task_contract_revisions
+BEFORE INSERT ON "task_contract_revisions"
+FOR EACH ROW EXECUTE FUNCTION enforce_typed_revision_registry();
+--> statement-breakpoint
+CREATE TRIGGER trg_registry_eval_contract_revisions
+BEFORE INSERT ON "eval_contract_revisions"
+FOR EACH ROW EXECUTE FUNCTION enforce_typed_revision_registry();
+--> statement-breakpoint
+CREATE TRIGGER trg_registry_channel_profile_revisions
+BEFORE INSERT ON "channel_profile_revisions"
+FOR EACH ROW EXECUTE FUNCTION enforce_typed_revision_registry();
+--> statement-breakpoint
+CREATE TRIGGER trg_registry_attribution_model_revisions
+BEFORE INSERT ON "attribution_model_revisions"
+FOR EACH ROW EXECUTE FUNCTION enforce_typed_revision_registry();
+--> statement-breakpoint
+CREATE TRIGGER trg_registry_guidance_revisions
+BEFORE INSERT ON "guidance_revisions"
+FOR EACH ROW EXECUTE FUNCTION enforce_typed_revision_registry();
+--> statement-breakpoint
+CREATE TRIGGER trg_registry_normative_rule_revisions
+BEFORE INSERT ON "normative_rule_revisions"
+FOR EACH ROW EXECUTE FUNCTION enforce_typed_revision_registry();
+--> statement-breakpoint
+CREATE TRIGGER trg_registry_decision_policy_revisions
+BEFORE INSERT ON "decision_policy_revisions"
+FOR EACH ROW EXECUTE FUNCTION enforce_typed_revision_registry();
+--> statement-breakpoint
+CREATE TRIGGER trg_registry_registered_control_plane_revisions
+BEFORE INSERT ON "registered_control_plane_revisions"
+FOR EACH ROW EXECUTE FUNCTION enforce_typed_revision_registry();
+--> statement-breakpoint
+CREATE OR REPLACE FUNCTION enforce_immutable_entity_registry()
+RETURNS TRIGGER AS $$
+DECLARE
+  v_entity_type text;
+  v_entity_id text;
+  v_reg_count int;
+BEGIN
+  CASE TG_TABLE_NAME
+    WHEN 'rights_policies' THEN
+      v_entity_type := 'RightsPolicy';
+      v_entity_id := NEW.rights_policy_id;
+    WHEN 'audience_states' THEN
+      v_entity_type := 'AudienceState';
+      v_entity_id := NEW.audience_state_id;
+    WHEN 'knowledge_manifests' THEN
+      v_entity_type := 'KnowledgeManifest';
+      v_entity_id := NEW.knowledge_manifest_id;
+    WHEN 'baseline_knowledge_snapshots' THEN
+      v_entity_type := 'BaselineKnowledgeSnapshot';
+      v_entity_id := NEW.baseline_snapshot_id;
+    WHEN 'run_knowledge_deltas' THEN
+      v_entity_type := 'RunKnowledgeDelta';
+      v_entity_id := NEW.delta_id;
+    WHEN 'governance_snapshots' THEN
+      v_entity_type := 'GovernanceSnapshot';
+      v_entity_id := NEW.governance_snapshot_id;
+    WHEN 'decision_snapshots' THEN
+      v_entity_type := 'DecisionSnapshot';
+      v_entity_id := NEW.snapshot_id;
+    WHEN 'policy_results' THEN
+      v_entity_type := 'PolicyResult';
+      v_entity_id := NEW.policy_result_id;
+    WHEN 'policy_overrides' THEN
+      v_entity_type := 'PolicyOverride';
+      v_entity_id := NEW.override_id;
+    WHEN 'policy_conflict_resolutions' THEN
+      v_entity_type := 'PolicyConflictResolution';
+      v_entity_id := NEW.resolution_id;
+    WHEN 'human_review_records' THEN
+      v_entity_type := 'HumanReviewRecord';
+      v_entity_id := NEW.review_id;
+    WHEN 'decision_records' THEN
+      v_entity_type := 'DecisionRecord';
+      v_entity_id := NEW.decision_id;
+    WHEN 'final_content_packages' THEN
+      v_entity_type := 'FinalContentPackage';
+      v_entity_id := NEW.package_id;
+    WHEN 'publication_lineages' THEN
+      v_entity_type := 'PublicationLineage';
+      v_entity_id := NEW.publication_lineage_id;
+    WHEN 'execution_artifacts' THEN
+      v_entity_type := 'ExecutionArtifact';
+      v_entity_id := NEW.execution_artifact_id;
+    WHEN 'published_artifacts' THEN
+      v_entity_type := 'PublishedArtifact';
+      v_entity_id := NEW.published_artifact_id;
+    WHEN 'performance_observations' THEN
+      v_entity_type := 'PerformanceObservation';
+      v_entity_id := NEW.observation_id;
+    WHEN 'measurement_states' THEN
+      v_entity_type := 'MeasurementState';
+      v_entity_id := NEW.measurement_state_id;
+    WHEN 'change_proposals' THEN
+      v_entity_type := 'ChangeProposal';
+      v_entity_id := NEW.proposal_id;
+    WHEN 'run_configs' THEN
+      v_entity_type := 'RunConfig';
+      v_entity_id := NEW.run_config_id;
+    WHEN 'source_artifacts' THEN
+      v_entity_type := 'SourceArtifact';
+      v_entity_id := NEW.source_id;
+    WHEN 'evidence_items' THEN
+      v_entity_type := 'EvidenceItem';
+      v_entity_id := NEW.evidence_id;
+    WHEN 'propositions' THEN
+      v_entity_type := 'Proposition';
+      v_entity_id := NEW.proposition_id;
+    WHEN 'evidence_assessments' THEN
+      v_entity_type := 'EvidenceAssessment';
+      v_entity_id := NEW.assessment_id;
+    WHEN 'epistemic_state_versions' THEN
+      v_entity_type := 'EpistemicStateVersion';
+      v_entity_id := NEW.epistemic_state_id;
+    WHEN 'knowledge_gaps' THEN
+      v_entity_type := 'KnowledgeGap';
+      v_entity_id := NEW.gap_id;
+    WHEN 'research_traces' THEN
+      v_entity_type := 'ResearchTrace';
+      v_entity_id := NEW.research_trace_id;
+    WHEN 'content_candidates' THEN
+      v_entity_type := 'ContentCandidate';
+      v_entity_id := NEW.candidate_id;
+    WHEN 'strategy_hypotheses' THEN
+      v_entity_type := 'StrategyHypothesis';
+      v_entity_id := NEW.strategy_id;
+    ELSE
+      RETURN NEW;
+  END CASE;
+
+  SELECT count(*) INTO v_reg_count
+  FROM immutable_entity_registry
+  WHERE entity_type = v_entity_type
+    AND entity_id = v_entity_id
+    AND tenant_id = NEW.tenant_id;
+
+  IF v_reg_count = 0 THEN
+    RAISE EXCEPTION 'REGISTRY_IDENTITY_REQUIRED: Cannot insert into % without matching immutable_entity_registry entry (entity_type=%, entity_id=%, tenant_id=%)',
+      TG_TABLE_NAME, v_entity_type, v_entity_id, NEW.tenant_id
+      USING ERRCODE = '23503';
+  END IF;
+
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+--> statement-breakpoint
+CREATE TRIGGER trg_registry_rights_policies
+BEFORE INSERT ON "rights_policies"
+FOR EACH ROW EXECUTE FUNCTION enforce_immutable_entity_registry();
+--> statement-breakpoint
+CREATE TRIGGER trg_registry_audience_states
+BEFORE INSERT ON "audience_states"
+FOR EACH ROW EXECUTE FUNCTION enforce_immutable_entity_registry();
+--> statement-breakpoint
+CREATE TRIGGER trg_registry_knowledge_manifests
+BEFORE INSERT ON "knowledge_manifests"
+FOR EACH ROW EXECUTE FUNCTION enforce_immutable_entity_registry();
+--> statement-breakpoint
+CREATE TRIGGER trg_registry_baseline_knowledge_snapshots
+BEFORE INSERT ON "baseline_knowledge_snapshots"
+FOR EACH ROW EXECUTE FUNCTION enforce_immutable_entity_registry();
+--> statement-breakpoint
+CREATE TRIGGER trg_registry_run_knowledge_deltas
+BEFORE INSERT ON "run_knowledge_deltas"
+FOR EACH ROW EXECUTE FUNCTION enforce_immutable_entity_registry();
+--> statement-breakpoint
+CREATE TRIGGER trg_registry_governance_snapshots
+BEFORE INSERT ON "governance_snapshots"
+FOR EACH ROW EXECUTE FUNCTION enforce_immutable_entity_registry();
+--> statement-breakpoint
+CREATE TRIGGER trg_registry_decision_snapshots
+BEFORE INSERT ON "decision_snapshots"
+FOR EACH ROW EXECUTE FUNCTION enforce_immutable_entity_registry();
+--> statement-breakpoint
+CREATE TRIGGER trg_registry_policy_results
+BEFORE INSERT ON "policy_results"
+FOR EACH ROW EXECUTE FUNCTION enforce_immutable_entity_registry();
+--> statement-breakpoint
+CREATE TRIGGER trg_registry_policy_overrides
+BEFORE INSERT ON "policy_overrides"
+FOR EACH ROW EXECUTE FUNCTION enforce_immutable_entity_registry();
+--> statement-breakpoint
+CREATE TRIGGER trg_registry_policy_conflict_resolutions
+BEFORE INSERT ON "policy_conflict_resolutions"
+FOR EACH ROW EXECUTE FUNCTION enforce_immutable_entity_registry();
+--> statement-breakpoint
+CREATE TRIGGER trg_registry_human_review_records
+BEFORE INSERT ON "human_review_records"
+FOR EACH ROW EXECUTE FUNCTION enforce_immutable_entity_registry();
+--> statement-breakpoint
+CREATE TRIGGER trg_registry_decision_records
+BEFORE INSERT ON "decision_records"
+FOR EACH ROW EXECUTE FUNCTION enforce_immutable_entity_registry();
+--> statement-breakpoint
+CREATE TRIGGER trg_registry_final_content_packages
+BEFORE INSERT ON "final_content_packages"
+FOR EACH ROW EXECUTE FUNCTION enforce_immutable_entity_registry();
+--> statement-breakpoint
+CREATE TRIGGER trg_registry_publication_lineages
+BEFORE INSERT ON "publication_lineages"
+FOR EACH ROW EXECUTE FUNCTION enforce_immutable_entity_registry();
+--> statement-breakpoint
+CREATE TRIGGER trg_registry_execution_artifacts
+BEFORE INSERT ON "execution_artifacts"
+FOR EACH ROW EXECUTE FUNCTION enforce_immutable_entity_registry();
+--> statement-breakpoint
+CREATE TRIGGER trg_registry_published_artifacts
+BEFORE INSERT ON "published_artifacts"
+FOR EACH ROW EXECUTE FUNCTION enforce_immutable_entity_registry();
+--> statement-breakpoint
+CREATE TRIGGER trg_registry_performance_observations
+BEFORE INSERT ON "performance_observations"
+FOR EACH ROW EXECUTE FUNCTION enforce_immutable_entity_registry();
+--> statement-breakpoint
+CREATE TRIGGER trg_registry_measurement_states
+BEFORE INSERT ON "measurement_states"
+FOR EACH ROW EXECUTE FUNCTION enforce_immutable_entity_registry();
+--> statement-breakpoint
+CREATE TRIGGER trg_registry_change_proposals
+BEFORE INSERT ON "change_proposals"
+FOR EACH ROW EXECUTE FUNCTION enforce_immutable_entity_registry();
+--> statement-breakpoint
+CREATE TRIGGER trg_registry_run_configs
+BEFORE INSERT ON "run_configs"
+FOR EACH ROW EXECUTE FUNCTION enforce_immutable_entity_registry();
+--> statement-breakpoint
+CREATE TRIGGER trg_registry_source_artifacts
+BEFORE INSERT ON "source_artifacts"
+FOR EACH ROW EXECUTE FUNCTION enforce_immutable_entity_registry();
+--> statement-breakpoint
+CREATE TRIGGER trg_registry_evidence_items
+BEFORE INSERT ON "evidence_items"
+FOR EACH ROW EXECUTE FUNCTION enforce_immutable_entity_registry();
+--> statement-breakpoint
+CREATE TRIGGER trg_registry_propositions
+BEFORE INSERT ON "propositions"
+FOR EACH ROW EXECUTE FUNCTION enforce_immutable_entity_registry();
+--> statement-breakpoint
+CREATE TRIGGER trg_registry_evidence_assessments
+BEFORE INSERT ON "evidence_assessments"
+FOR EACH ROW EXECUTE FUNCTION enforce_immutable_entity_registry();
+--> statement-breakpoint
+CREATE TRIGGER trg_registry_epistemic_state_versions
+BEFORE INSERT ON "epistemic_state_versions"
+FOR EACH ROW EXECUTE FUNCTION enforce_immutable_entity_registry();
+--> statement-breakpoint
+CREATE TRIGGER trg_registry_knowledge_gaps
+BEFORE INSERT ON "knowledge_gaps"
+FOR EACH ROW EXECUTE FUNCTION enforce_immutable_entity_registry();
+--> statement-breakpoint
+CREATE TRIGGER trg_registry_research_traces
+BEFORE INSERT ON "research_traces"
+FOR EACH ROW EXECUTE FUNCTION enforce_immutable_entity_registry();
+--> statement-breakpoint
+CREATE TRIGGER trg_registry_content_candidates
+BEFORE INSERT ON "content_candidates"
+FOR EACH ROW EXECUTE FUNCTION enforce_immutable_entity_registry();
+--> statement-breakpoint
+CREATE TRIGGER trg_registry_strategy_hypotheses
+BEFORE INSERT ON "strategy_hypotheses"
+FOR EACH ROW EXECUTE FUNCTION enforce_immutable_entity_registry();
+--> statement-breakpoint
+CREATE OR REPLACE FUNCTION enforce_payload_workspace_integrity()
+RETURNS TRIGGER AS $$
+DECLARE
+  v_rev_workspace text;
+  v_obj_workspace text;
+BEGIN
+  SELECT workspace_id INTO v_rev_workspace
+  FROM revision_registry
+  WHERE entity_type = NEW.entity_type
+    AND stable_id = NEW.stable_id
+    AND revision_id = NEW.revision_id
+    AND tenant_id = NEW.tenant_id;
+
+  SELECT workspace_id INTO v_obj_workspace
+  FROM object_registry
+  WHERE object_id = NEW.object_id
+    AND tenant_id = NEW.tenant_id;
+
+  IF (NEW.workspace_id IS NOT NULL OR v_rev_workspace IS NOT NULL OR v_obj_workspace IS NOT NULL) THEN
+    IF COALESCE(NEW.workspace_id, '') <> COALESCE(v_rev_workspace, '') OR
+       COALESCE(NEW.workspace_id, '') <> COALESCE(v_obj_workspace, '') THEN
+      RAISE EXCEPTION 'CROSS_WORKSPACE_PAYLOAD_MISMATCH: Payload workspace (%), revision workspace (%), and object workspace (%) must match when workspace scope exists',
+        NEW.workspace_id, v_rev_workspace, v_obj_workspace
+        USING ERRCODE = '23514';
+    END IF;
+  END IF;
+
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+--> statement-breakpoint
+CREATE TRIGGER trg_payload_workspace_integrity
+BEFORE INSERT OR UPDATE ON "registered_control_plane_revision_payloads"
+FOR EACH ROW EXECUTE FUNCTION enforce_payload_workspace_integrity();
+--> statement-breakpoint
+CREATE OR REPLACE FUNCTION enforce_object_reference_integrity()
+RETURNS TRIGGER AS $$
+DECLARE
+  v_owner_tenant text;
+  v_obj_tenant text;
+  v_owner_workspace text;
+  v_obj_workspace text;
+BEGIN
+  SELECT tenant_id, workspace_id INTO v_owner_tenant, v_owner_workspace
+  FROM immutable_entity_registry
+  WHERE entity_type = NEW.owner_entity_type
+    AND entity_id = NEW.owner_entity_id;
+
+  SELECT tenant_id, workspace_id INTO v_obj_tenant, v_obj_workspace
+  FROM object_registry
+  WHERE object_id = NEW.object_id;
+
+  IF v_owner_tenant IS NULL OR v_obj_tenant IS NULL THEN
+    RAISE EXCEPTION 'OBJECT_REFERENCE_TARGET_NOT_FOUND: Owner entity or target object not found in registries'
+      USING ERRCODE = '23503';
+  END IF;
+
+  IF v_owner_tenant <> v_obj_tenant OR NEW.tenant_id <> v_owner_tenant THEN
+    RAISE EXCEPTION 'CROSS_TENANT_OBJECT_REFERENCE: Reference tenant (%), owner tenant (%), and object tenant (%) must all match',
+      NEW.tenant_id, v_owner_tenant, v_obj_tenant
+      USING ERRCODE = '23503';
+  END IF;
+
+  IF (NEW.workspace_id IS NOT NULL OR v_owner_workspace IS NOT NULL OR v_obj_workspace IS NOT NULL) THEN
+    IF COALESCE(NEW.workspace_id, '') <> COALESCE(v_owner_workspace, '') OR
+       COALESCE(NEW.workspace_id, '') <> COALESCE(v_obj_workspace, '') THEN
+      RAISE EXCEPTION 'CROSS_WORKSPACE_OBJECT_REFERENCE: Reference workspace (%), owner workspace (%), and object workspace (%) must match when workspace scope exists',
+        NEW.workspace_id, v_owner_workspace, v_obj_workspace
+        USING ERRCODE = '23514';
+    END IF;
+  END IF;
+
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+--> statement-breakpoint
+CREATE TRIGGER trg_object_reference_integrity
+BEFORE INSERT OR UPDATE ON "object_references"
+FOR EACH ROW EXECUTE FUNCTION enforce_object_reference_integrity();
