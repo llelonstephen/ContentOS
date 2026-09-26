@@ -18,9 +18,12 @@ import {
   boolean,
   uniqueIndex,
   index,
+  check,
 } from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
 import { objectRegistry } from './registries.js';
 import { taskContractRevisions } from './control-plane.js';
+import { rightsPolicies } from './content.js';
 
 /**
  * SourceArtifact (SPEC02 §13)
@@ -42,13 +45,19 @@ export const sourceArtifacts = pgTable(
     snapshot_reference: text('snapshot_reference')
       .notNull()
       .references(() => objectRegistry.object_id),
-    rights_policy_id: text('rights_policy_id').notNull(),
+    rights_policy_id: text('rights_policy_id')
+      .notNull()
+      .references(() => rightsPolicies.rights_policy_id),
     data_scope: text('data_scope').notNull(),
     created_at: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
     index('idx_source_artifact_tenant').on(table.tenant_id),
     index('idx_source_artifact_snapshot_ref').on(table.snapshot_reference),
+    check(
+      'ck_source_artifact_data_scope',
+      sql`${table.data_scope} IN ('TENANT_PRIVATE', 'WORKSPACE_SHARED', 'AUTHORIZED_AGGREGATE', 'GLOBAL_PUBLIC')`,
+    ),
   ],
 );
 
@@ -80,6 +89,14 @@ export const evidenceItems = pgTable(
   (table) => [
     index('idx_evidence_item_tenant').on(table.tenant_id),
     index('idx_evidence_item_origin').on(table.origin_type, table.origin_id),
+    check(
+      'ck_evidence_item_origin_type',
+      sql`${table.origin_type} IN ('SOURCE_ARTIFACT', 'PERFORMANCE_OBSERVATION')`,
+    ),
+    check(
+      'ck_evidence_item_domain',
+      sql`${table.evidence_domain} IN ('PRODUCT_DOCUMENTATION', 'FIRST_PARTY_OBSERVATION', 'CUSTOMER_REPORT', 'EXPERT_SOURCE', 'ACADEMIC_STUDY', 'REGULATORY_SOURCE', 'PLATFORM_POLICY', 'PLATFORM_ANALYTICS', 'OBSERVATIONAL_PERFORMANCE', 'RANDOMIZED_EXPERIMENT', 'QUASI_EXPERIMENT', 'MARKET_DATA')`,
+    ),
   ],
 );
 
@@ -108,6 +125,10 @@ export const propositions = pgTable(
   (table) => [
     index('idx_proposition_tenant').on(table.tenant_id),
     index('idx_proposition_supersedes').on(table.supersedes_proposition_id),
+    check(
+      'ck_proposition_type',
+      sql`${table.proposition_type} IN ('FACTUAL', 'CAUSAL', 'PREDICTIVE', 'STRATEGIC', 'PERFORMANCE', 'AUDIENCE', 'MEASUREMENT', 'DEFINITIONAL')`,
+    ),
   ],
 );
 
@@ -171,6 +192,14 @@ export const evidenceAssessments = pgTable(
     index('idx_evidence_assessment_tenant').on(table.tenant_id),
     index('idx_evidence_assessment_link').on(table.link_id),
     index('idx_evidence_assessment_supersedes').on(table.supersedes_assessment_id),
+    check(
+      'ck_evidence_compat_status',
+      sql`${table.compatibility_status} IN ('COMPATIBLE', 'COMPATIBLE_WITH_LIMITS', 'INCOMPATIBLE', 'UNCERTAIN')`,
+    ),
+    check(
+      'ck_evidence_relationship',
+      sql`${table.relationship} IN ('SUPPORTS', 'PARTIALLY_SUPPORTS', 'QUALIFIES', 'CONTRADICTS', 'DOES_NOT_ADDRESS')`,
+    ),
   ],
 );
 
@@ -236,6 +265,10 @@ export const knowledgeGaps = pgTable(
     index('idx_knowledge_gap_tenant').on(table.tenant_id),
     index('idx_knowledge_gap_task').on(table.task_revision_id),
     index('idx_knowledge_gap_supersedes').on(table.supersedes_gap_id),
+    check(
+      'ck_knowledge_gap_status',
+      sql`${table.status} IN ('OPEN', 'RESOLVED_BY_RESEARCH', 'RESOLVED_BY_USER', 'EXPLICIT_ASSUMPTION', 'UNRESOLVED_NON_BLOCKING', 'BLOCKING')`,
+    ),
   ],
 );
 
@@ -267,5 +300,9 @@ export const researchTraces = pgTable(
   (table) => [
     index('idx_research_trace_tenant').on(table.tenant_id),
     index('idx_research_trace_gap').on(table.gap_id),
+    check(
+      'ck_research_trace_outcome',
+      sql`${table.outcome} IN ('FOUND_RELEVANT_EVIDENCE', 'NO_EVIDENCE_FOUND', 'SEARCH_INCOMPLETE', 'SEARCH_FAILED')`,
+    ),
   ],
 );

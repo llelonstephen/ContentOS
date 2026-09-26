@@ -21,7 +21,9 @@ import {
   boolean,
   uniqueIndex,
   index,
+  check,
 } from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
 import {
   contentProgramRevisions,
   runConfigs,
@@ -141,6 +143,7 @@ export const decisionSnapshots = pgTable(
     uncertainty_assessment_id: text('uncertainty_assessment_id')
       .references(() => uncertaintyAssessments.uncertainty_assessment_id),
     frozen_at: timestamp('frozen_at', { withTimezone: true }).notNull(),
+    created_at: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
     index('idx_decision_snapshot_tenant').on(table.tenant_id),
@@ -225,6 +228,10 @@ export const policyConflictResolutions = pgTable(
     uniqueIndex('uq_policy_conflict_res_snapshot_key').on(table.snapshot_id, table.conflict_key),
     index('idx_policy_conflict_tenant').on(table.tenant_id),
     index('idx_policy_conflict_snapshot').on(table.snapshot_id),
+    check(
+      'ck_policy_conflict_resolution_type',
+      sql`${table.resolution_type} IN ('HARD_DENY_OVERRIDES', 'HARD_REQUIREMENT_OVERRIDES', 'MORE_SPECIFIC_SCOPE', 'EXPLICIT_PRIORITY', 'AUTHORIZED_OVERRIDE', 'ESCALATE')`,
+    ),
   ],
 );
 
@@ -255,6 +262,10 @@ export const humanReviewRecords = pgTable(
     index('idx_human_review_tenant').on(table.tenant_id),
     index('idx_human_review_snapshot').on(table.snapshot_id),
     index('idx_human_review_task').on(table.task_revision_id),
+    check(
+      'ck_human_review_mode',
+      sql`${table.review_mode} IN ('ADJUDICATION_ONLY', 'NEW_INFORMATION_INTRODUCED')`,
+    ),
   ],
 );
 
@@ -289,6 +300,10 @@ export const decisionRecords = pgTable(
     index('idx_decision_record_snapshot').on(table.snapshot_id),
     index('idx_decision_record_task').on(table.task_revision_id),
     index('idx_decision_record_candidate').on(table.selected_candidate_id),
+    check(
+      'ck_decision_record_release_status',
+      sql`${table.release_status} IN ('READY', 'READY_WITH_WARNINGS', 'HUMAN_REVIEW_REQUIRED', 'BLOCKED')`,
+    ),
   ],
 );
 

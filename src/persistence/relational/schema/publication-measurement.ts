@@ -17,7 +17,9 @@ import {
   boolean,
   uniqueIndex,
   index,
+  check,
 } from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
 import { metricDefinitionRevisions } from './control-plane.js';
 import { contentCandidates } from './content.js';
 import { decisionRecords } from './governance-snapshots.js';
@@ -96,6 +98,10 @@ export const publishedArtifacts = pgTable(
     index('idx_published_artifact_tenant').on(table.tenant_id),
     index('idx_published_artifact_lineage').on(table.publication_lineage_id),
     index('idx_published_artifact_effective').on(table.effective_from),
+    check(
+      'ck_published_artifact_origin',
+      sql`${table.origin} IN ('CONTENTOS_EXECUTION', 'MANUAL_EXTERNAL')`,
+    ),
   ],
 );
 
@@ -154,6 +160,14 @@ export const performanceObservations = pgTable(
     index('idx_perf_observation_tenant').on(table.tenant_id),
     index('idx_perf_observation_metric').on(table.metric_revision_id),
     index('idx_perf_observation_state').on(table.measurement_state_id),
+    check(
+      'ck_perf_observation_pub_state',
+      sql`${table.publication_state} IN ('SINGLE_ARTIFACT', 'MIXED_PUBLICATION_STATE', 'UNRESOLVED_PUBLICATION_STATE')`,
+    ),
+    check(
+      'ck_perf_observation_window',
+      sql`${table.measurement_window_end} > ${table.measurement_window_start}`,
+    ),
   ],
 );
 
@@ -191,11 +205,15 @@ export const replayabilityStatuses = pgTable(
       .references(() => decisionRecords.decision_id),
     tenant_id: text('tenant_id').notNull(),
     workspace_id: text('workspace_id'),
-    status: text('status').notNull(), // FULLY_REPLAYABLE | DEGRADED | UNREPLAYABLE
+    status: text('status').notNull(), // FULL | PARTIAL_REDACTED | UNAVAILABLE_DUE_TO_RETENTION | INVALIDATED_BY_DELETION
     reason_codes: text('reason_codes').notNull(),
     updated_at: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
     index('idx_replayability_status_tenant').on(table.tenant_id),
+    check(
+      'ck_replayability_status_value',
+      sql`${table.status} IN ('FULL', 'PARTIAL_REDACTED', 'UNAVAILABLE_DUE_TO_RETENTION', 'INVALIDATED_BY_DELETION')`,
+    ),
   ],
 );

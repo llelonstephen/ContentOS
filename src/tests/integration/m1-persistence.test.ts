@@ -71,10 +71,10 @@ describe('M1 Integration: Live PostgreSQL Relational Persistence', () => {
       await sql.unsafe(stmt);
     }
 
-    // Apply M1 migration (0001_tan_blizzard.sql)
+    // Apply M1 migration (0001_fantastic_kid_colt.sql)
     const m1MigrationPath = path.resolve(
       import.meta.dirname,
-      '../../persistence/relational/migrations/0001_tan_blizzard.sql',
+      '../../persistence/relational/migrations/0001_fantastic_kid_colt.sql',
     );
     const m1Sql = await fs.readFile(m1MigrationPath, 'utf-8');
     const m1Statements = m1Sql
@@ -105,30 +105,33 @@ describe('M1 Integration: Live PostgreSQL Relational Persistence', () => {
 
     await sql`
       INSERT INTO task_contract_revisions (
-        task_id, task_revision_id, program_revision_id, task_name, primary_metric_revision_id,
-        target_audience, channel, content_format, effective_from, tenant_id
+        task_id, task_revision_id, program_revision_id, standalone_task, objective,
+        format, language, market, jurisdiction, brand_id, product_id, audience_context,
+        channel, success_metric_revision_id, constraints, risk_context, compute_budget,
+        tenant_id
       ) VALUES (
-        'task-core', 'task-rev-001', 'prog-rev-001', 'Core Task', 'metric-rev-ctr',
-        'Tech Leads', 'TWITTER_X', 'POST', now(), ${tenantId}
+        'task-core', 'task-rev-001', 'prog-rev-001', false, 'Core Objective',
+        'POST', 'en', 'US', 'US-FED', 'brand-001', 'prod-001', 'Tech Leads',
+        'TWITTER_X', 'metric-rev-ctr', '{}', '{}', '{}',
+        ${tenantId}
       )
     `;
 
     await sql`
       INSERT INTO eval_contract_revisions (
-        eval_contract_id, eval_contract_revision_id, contract_name, target_artifact_type, rubric_definition,
-        thresholds, effective_from, tenant_id
+        eval_contract_id, eval_contract_revision_id, component, capability,
+        required_dimensions, hard_gates, release_impact, tenant_id
       ) VALUES (
-        'eval-c1', 'eval-rev-001', 'Quality Contract', 'CONTENT_CANDIDATE', '{}', '{}', now(), ${tenantId}
+        'eval-c1', 'eval-rev-001', 'Quality Component', 'GENERATION',
+        '[]', '[]', 'BLOCK_ON_FAIL', ${tenantId}
       )
     `;
 
     await sql`
       INSERT INTO run_configs (
-        run_config_id, task_revision_id, eval_contract_revision_id, prompt_config_revision_id,
-        model_config_revision_id, retriever_config_revision_id, tool_config_revision_id,
-        evaluator_config_revision_id, runtime_parameters, tenant_id
+        run_config_id, runtime_parameters, tenant_id
       ) VALUES (
-        'rc-001', 'task-rev-001', 'eval-rev-001', 'p1', 'm1', 'r1', 't1', 'e1', '{}', ${tenantId}
+        'rc-001', '{}', ${tenantId}
       )
     `;
 
@@ -158,7 +161,7 @@ describe('M1 Integration: Live PostgreSQL Relational Persistence', () => {
         problem_state, solution_state, product_state, brand_state, intent_state, desired_outcome,
         objections, decision_criteria, prior_exposure, origin, uncertainty
       ) VALUES (
-        'aud-001', ${tenantId}, 'task-rev-001', 'AWARENESS', 'c', 'k', 'p', 's', 'pr', 'b', 'i', 'd', 'o', 'dc', 'pe', 'ANALYTICAL', 'u'
+        'aud-001', ${tenantId}, 'task-rev-001', 'FINAL_FOR_DECISION', 'c', 'k', 'p', 's', 'pr', 'b', 'i', 'd', 'o', 'dc', 'pe', 'ANALYTICAL', 'u'
       )
     `;
   });
@@ -280,6 +283,13 @@ describe('M1 Integration: Live PostgreSQL Relational Persistence', () => {
     });
 
     it('adversarial attack: reject GC claim when object is referenced by generic payload source', async () => {
+      // Insert reference into revision_registry first so composite FK succeeds
+      await sql`
+        INSERT INTO revision_registry (entity_type, stable_id, revision_id, tenant_id)
+        VALUES ('PromptConfig', 'prompt-brand', 'rev-001', ${tenantId})
+        ON CONFLICT DO NOTHING
+      `;
+
       // Insert reference into registered_control_plane_revision_payloads (NOT object_references)
       await sql`
         INSERT INTO registered_control_plane_revision_payloads (
@@ -308,11 +318,14 @@ describe('M1 Integration: Live PostgreSQL Relational Persistence', () => {
     });
 
     it('should successfully claim and delete object after all canonical references are removed', async () => {
-      // Remove payload reference
-      await sql`
-        DELETE FROM registered_control_plane_revision_payloads
-        WHERE object_id = ${objId}
-      `;
+      // Remove payload reference using privileged deletion bypass
+      await sql.begin(async (tx) => {
+        await tx.unsafe("SET LOCAL contentos.privileged_deletion = 'on';");
+        await tx`
+          DELETE FROM registered_control_plane_revision_payloads
+          WHERE object_id = ${objId}
+        `;
+      });
 
       const reachability = await computeCanonicalObjectReachability(sql, objId);
       expect(reachability.totalReferences).toBe(0);
@@ -346,10 +359,17 @@ describe('M1 Integration: Live PostgreSQL Relational Persistence', () => {
       const fromTime = new Date('2026-01-01T00:00:00Z');
 
       await sql`
+        INSERT INTO revision_registry (entity_type, stable_id, revision_id, tenant_id)
+        VALUES 
+          (${comp}, ${stableId}, 'act-rev-001', ${tenantId}),
+          (${comp}, ${stableId}, 'act-rev-002', ${tenantId})
+      `;
+
+      await sql`
         INSERT INTO control_plane_activations (
           activation_id, deployment_scope, component_type, stable_id, active_revision_id, effective_from
         ) VALUES (
-          ${actId1}, ${scope}, ${comp}, ${stableId}, 'rev-001', ${fromTime}
+          ${actId1}, ${scope}, ${comp}, ${stableId}, 'act-rev-001', ${fromTime}
         )
       `;
 
@@ -360,7 +380,7 @@ describe('M1 Integration: Live PostgreSQL Relational Persistence', () => {
           INSERT INTO control_plane_activations (
             activation_id, deployment_scope, component_type, stable_id, active_revision_id, effective_from
           ) VALUES (
-            ${actId2}, ${scope}, ${comp}, ${stableId}, 'rev-002', ${fromTime}
+            ${actId2}, ${scope}, ${comp}, ${stableId}, 'act-rev-002', ${fromTime}
           )
         `;
       } catch (e) {
@@ -530,7 +550,7 @@ describe('M1 Integration: Live PostgreSQL Relational Persistence', () => {
         INSERT INTO policy_conflict_resolutions (
           resolution_id, tenant_id, snapshot_id, conflict_key, resolution_type, reason_codes
         ) VALUES (
-          'conf-res-001', ${tenantId}, ${snapId}, ${conflictKey}, 'PRECEDENCE', 'RESOLVED_BY_PRIORITY'
+          'conf-res-001', ${tenantId}, ${snapId}, ${conflictKey}, 'EXPLICIT_PRIORITY', 'RESOLVED_BY_PRIORITY'
         )
       `;
 
@@ -540,7 +560,7 @@ describe('M1 Integration: Live PostgreSQL Relational Persistence', () => {
           INSERT INTO policy_conflict_resolutions (
             resolution_id, tenant_id, snapshot_id, conflict_key, resolution_type, reason_codes
           ) VALUES (
-            'conf-res-002', ${tenantId}, ${snapId}, ${conflictKey}, 'PRECEDENCE', 'RESOLVED_AGAIN'
+            'conf-res-002', ${tenantId}, ${snapId}, ${conflictKey}, 'EXPLICIT_PRIORITY', 'RESOLVED_AGAIN'
           )
         `;
       } catch (e) {

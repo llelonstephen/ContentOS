@@ -8,6 +8,7 @@
 import {
   pgTable,
   text,
+  integer,
   primaryKey,
 } from 'drizzle-orm/pg-core';
 import {
@@ -15,12 +16,13 @@ import {
   outcomeModels,
   outcomeEdges,
   metricDefinitionRevisions,
+  channelProfileRevisions,
   taskContractRevisions,
+  runConfigs,
   guidanceRevisions,
   normativeRuleRevisions,
   decisionPolicyRevisions,
   attributionModelRevisions,
-  rightsPolicyRevisions,
 } from './control-plane.js';
 import {
   sourceArtifacts,
@@ -44,10 +46,12 @@ import {
   qualitativeEvaluations,
   applicabilityAssessments,
   riskAssessments,
+  rightsPolicies,
   rightsChecks,
 } from './content.js';
 import {
   knowledgeManifests,
+  baselineKnowledgeSnapshots,
   runKnowledgeDeltas,
   governanceSnapshots,
   decisionSnapshots,
@@ -61,6 +65,7 @@ import {
 import {
   publishedArtifacts,
   performanceObservations,
+  replayabilityStatuses,
 } from './publication-measurement.js';
 
 // --- Control Plane Link Tables ---
@@ -545,12 +550,12 @@ export const governanceSnapshotRights = pgTable(
     governance_snapshot_id: text('governance_snapshot_id')
       .notNull()
       .references(() => governanceSnapshots.governance_snapshot_id),
-    rights_policy_revision_id: text('rights_policy_revision_id')
+    rights_policy_id: text('rights_policy_id')
       .notNull()
-      .references(() => rightsPolicyRevisions.policy_revision_id),
+      .references(() => rightsPolicies.rights_policy_id),
   },
   (table) => [
-    primaryKey({ columns: [table.governance_snapshot_id, table.rights_policy_revision_id] }),
+    primaryKey({ columns: [table.governance_snapshot_id, table.rights_policy_id] }),
   ],
 );
 
@@ -906,3 +911,252 @@ export const performanceObservationArtifacts = pgTable(
     primaryKey({ columns: [table.observation_id, table.published_artifact_id] }),
   ],
 );
+
+// --- SPEC02 Reconciled Link Tables ---
+
+export const channelProfileRuleRevisions = pgTable(
+  'channel_profile_rule_revisions',
+  {
+    channel_profile_revision_id: text('channel_profile_revision_id')
+      .notNull()
+      .references(() => channelProfileRevisions.channel_profile_revision_id),
+    rule_revision_id: text('rule_revision_id')
+      .notNull()
+      .references(() => normativeRuleRevisions.rule_revision_id),
+  },
+  (table) => [
+    primaryKey({ columns: [table.channel_profile_revision_id, table.rule_revision_id] }),
+  ],
+);
+
+export const channelProfileGuidanceRevisions = pgTable(
+  'channel_profile_guidance_revisions',
+  {
+    channel_profile_revision_id: text('channel_profile_revision_id')
+      .notNull()
+      .references(() => channelProfileRevisions.channel_profile_revision_id),
+    guidance_revision_id: text('guidance_revision_id')
+      .notNull()
+      .references(() => guidanceRevisions.guidance_revision_id),
+  },
+  (table) => [
+    primaryKey({ columns: [table.channel_profile_revision_id, table.guidance_revision_id] }),
+  ],
+);
+
+export const channelProfileMetricRevisions = pgTable(
+  'channel_profile_metric_revisions',
+  {
+    channel_profile_revision_id: text('channel_profile_revision_id')
+      .notNull()
+      .references(() => channelProfileRevisions.channel_profile_revision_id),
+    metric_revision_id: text('metric_revision_id')
+      .notNull()
+      .references(() => metricDefinitionRevisions.metric_revision_id),
+  },
+  (table) => [
+    primaryKey({ columns: [table.channel_profile_revision_id, table.metric_revision_id] }),
+  ],
+);
+
+export const baselineChannelProfiles = pgTable(
+  'baseline_channel_profiles',
+  {
+    baseline_snapshot_id: text('baseline_snapshot_id')
+      .notNull()
+      .references(() => baselineKnowledgeSnapshots.baseline_snapshot_id),
+    channel_profile_revision_id: text('channel_profile_revision_id')
+      .notNull()
+      .references(() => channelProfileRevisions.channel_profile_revision_id),
+  },
+  (table) => [
+    primaryKey({ columns: [table.baseline_snapshot_id, table.channel_profile_revision_id] }),
+  ],
+);
+
+export const guidanceSupportingPropositions = pgTable(
+  'guidance_supporting_propositions',
+  {
+    guidance_revision_id: text('guidance_revision_id')
+      .notNull()
+      .references(() => guidanceRevisions.guidance_revision_id),
+    proposition_id: text('proposition_id')
+      .notNull()
+      .references(() => propositions.proposition_id),
+  },
+  (table) => [
+    primaryKey({ columns: [table.guidance_revision_id, table.proposition_id] }),
+  ],
+);
+
+export const normativeRuleSources = pgTable(
+  'normative_rule_sources',
+  {
+    rule_revision_id: text('rule_revision_id')
+      .notNull()
+      .references(() => normativeRuleRevisions.rule_revision_id),
+    source_id: text('source_id')
+      .notNull()
+      .references(() => sourceArtifacts.source_id),
+  },
+  (table) => [
+    primaryKey({ columns: [table.rule_revision_id, table.source_id] }),
+  ],
+);
+
+export const runConfigPromptRevisions = pgTable(
+  'run_config_prompt_revisions',
+  {
+    run_config_id: text('run_config_id')
+      .notNull()
+      .references(() => runConfigs.run_config_id),
+    revision_id: text('revision_id').notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.run_config_id, table.revision_id] }),
+  ],
+);
+
+export const runConfigModelRevisions = pgTable(
+  'run_config_model_revisions',
+  {
+    run_config_id: text('run_config_id')
+      .notNull()
+      .references(() => runConfigs.run_config_id),
+    revision_id: text('revision_id').notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.run_config_id, table.revision_id] }),
+  ],
+);
+
+export const runConfigToolRevisions = pgTable(
+  'run_config_tool_revisions',
+  {
+    run_config_id: text('run_config_id')
+      .notNull()
+      .references(() => runConfigs.run_config_id),
+    revision_id: text('revision_id').notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.run_config_id, table.revision_id] }),
+  ],
+);
+
+export const runConfigSchemaRevisions = pgTable(
+  'run_config_schema_revisions',
+  {
+    run_config_id: text('run_config_id')
+      .notNull()
+      .references(() => runConfigs.run_config_id),
+    revision_id: text('revision_id').notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.run_config_id, table.revision_id] }),
+  ],
+);
+
+export const runConfigRetrieverRevisions = pgTable(
+  'run_config_retriever_revisions',
+  {
+    run_config_id: text('run_config_id')
+      .notNull()
+      .references(() => runConfigs.run_config_id),
+    revision_id: text('revision_id').notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.run_config_id, table.revision_id] }),
+  ],
+);
+
+export const runConfigEvaluatorRevisions = pgTable(
+  'run_config_evaluator_revisions',
+  {
+    run_config_id: text('run_config_id')
+      .notNull()
+      .references(() => runConfigs.run_config_id),
+    revision_id: text('revision_id').notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.run_config_id, table.revision_id] }),
+  ],
+);
+
+export const outcomeModelContentMetrics = pgTable(
+  'outcome_model_content_metrics',
+  {
+    outcome_model_id: text('outcome_model_id')
+      .notNull()
+      .references(() => outcomeModels.outcome_model_id),
+    metric_revision_id: text('metric_revision_id')
+      .notNull()
+      .references(() => metricDefinitionRevisions.metric_revision_id),
+  },
+  (table) => [
+    primaryKey({ columns: [table.outcome_model_id, table.metric_revision_id] }),
+  ],
+);
+
+export const outcomeModelDiagnosticMetrics = pgTable(
+  'outcome_model_diagnostic_metrics',
+  {
+    outcome_model_id: text('outcome_model_id')
+      .notNull()
+      .references(() => outcomeModels.outcome_model_id),
+    metric_revision_id: text('metric_revision_id')
+      .notNull()
+      .references(() => metricDefinitionRevisions.metric_revision_id),
+  },
+  (table) => [
+    primaryKey({ columns: [table.outcome_model_id, table.metric_revision_id] }),
+  ],
+);
+
+export const outcomeModelGuardrailMetrics = pgTable(
+  'outcome_model_guardrail_metrics',
+  {
+    outcome_model_id: text('outcome_model_id')
+      .notNull()
+      .references(() => outcomeModels.outcome_model_id),
+    metric_revision_id: text('metric_revision_id')
+      .notNull()
+      .references(() => metricDefinitionRevisions.metric_revision_id),
+  },
+  (table) => [
+    primaryKey({ columns: [table.outcome_model_id, table.metric_revision_id] }),
+  ],
+);
+
+export const outcomeEdgePropositions = pgTable(
+  'outcome_edge_propositions',
+  {
+    edge_id: text('edge_id')
+      .notNull()
+      .references(() => outcomeEdges.edge_id),
+    proposition_id: text('proposition_id')
+      .notNull()
+      .references(() => propositions.proposition_id),
+  },
+  (table) => [
+    primaryKey({ columns: [table.edge_id, table.proposition_id] }),
+  ],
+);
+
+export const replayabilityMissingRefs = pgTable(
+  'replayability_missing_refs',
+  {
+    decision_id: text('decision_id')
+      .notNull()
+      .references(() => replayabilityStatuses.decision_id),
+    ordinal: integer('ordinal').notNull(),
+    ref_kind: text('ref_kind').notNull(),
+    entity_type: text('entity_type').notNull(),
+    entity_id: text('entity_id'),
+    stable_id: text('stable_id'),
+    revision_id: text('revision_id'),
+  },
+  (table) => [
+    primaryKey({ columns: [table.decision_id, table.ordinal] }),
+  ],
+);
+

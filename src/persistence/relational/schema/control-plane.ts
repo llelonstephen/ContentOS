@@ -6,9 +6,9 @@
  *   - ControlPlaneActivation (SPEC02 §19, §29)
  *   - ContentProgramRevision, OutcomeModel, OutcomeEdge
  *   - AttributionModelRevision, MetricDefinitionRevision
- *   - EvalContractRevision, TaskContractRevision
- *   - RunConfig, ExecutionPlanRevision
- *   - GuidanceRevision, NormativeRuleRevision, RightsPolicyRevision
+ *   - EvalContractRevision, ChannelProfileRevision, TaskContractRevision
+ *   - RunConfig (SPEC02 §17)
+ *   - GuidanceRevision, NormativeRuleRevision, DecisionPolicyRevision
  */
 import {
   pgTable,
@@ -17,8 +17,11 @@ import {
   boolean,
   primaryKey,
   uniqueIndex,
+  foreignKey,
+  check,
 } from 'drizzle-orm/pg-core';
-import { objectRegistry } from './registries.js';
+import { sql } from 'drizzle-orm';
+import { objectRegistry, revisionRegistry } from './registries.js';
 
 /**
  * RegisteredControlPlaneRevision (SPEC02 §14)
@@ -30,20 +33,27 @@ export const registeredControlPlaneRevisions = pgTable(
     entity_type: text('entity_type').notNull(),
     stable_id: text('stable_id').notNull(),
     revision_id: text('revision_id').notNull(),
+    supersedes_revision_id: text('supersedes_revision_id'),
+    payload_hash: text('payload_hash').notNull(),
+    payload_schema_revision_id: text('payload_schema_revision_id').notNull(),
+    created_at: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     tenant_id: text('tenant_id').notNull(),
     workspace_id: text('workspace_id'),
-    supersedes_revision_id: text('supersedes_revision_id'),
-    description: text('description').notNull(),
-    created_at: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
     primaryKey({ columns: [table.entity_type, table.revision_id] }),
+    uniqueIndex('uq_cplane_rev_triple').on(table.entity_type, table.stable_id, table.revision_id),
+    check(
+      'ck_cplane_entity_type',
+      sql`${table.entity_type} IN ('PromptConfig', 'ModelConfig', 'ToolConfig', 'RetrieverConfig', 'EvaluatorConfig', 'SchemaDefinition')`,
+    ),
   ],
 );
 
 /**
  * RegisteredControlPlaneRevisionPayload (SPEC02 §14)
  * Binds immutable revision identity to immutable object in ObjectRegistry.
+ * Enforces same-tenant ownership via composite foreign keys.
  */
 export const registeredControlPlaneRevisionPayloads = pgTable(
   'registered_control_plane_revision_payloads',
@@ -53,7 +63,7 @@ export const registeredControlPlaneRevisionPayloads = pgTable(
     revision_id: text('revision_id').notNull(),
     tenant_id: text('tenant_id').notNull(),
     workspace_id: text('workspace_id'),
-    object_id: text('object_id').notNull().references(() => objectRegistry.object_id),
+    object_id: text('object_id').notNull(),
     payload_hash: text('payload_hash').notNull(),
     payload_schema_revision_id: text('payload_schema_revision_id').notNull(),
     created_at: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
@@ -61,6 +71,22 @@ export const registeredControlPlaneRevisionPayloads = pgTable(
   (table) => [
     primaryKey({ columns: [table.entity_type, table.revision_id] }),
     uniqueIndex('uq_cplane_payload_triple').on(table.entity_type, table.stable_id, table.revision_id),
+    foreignKey({
+      columns: [table.tenant_id, table.entity_type, table.stable_id, table.revision_id],
+      foreignColumns: [
+        revisionRegistry.tenant_id,
+        revisionRegistry.entity_type,
+        revisionRegistry.stable_id,
+        revisionRegistry.revision_id,
+      ],
+    }),
+    foreignKey({
+      columns: [table.tenant_id, table.object_id],
+      foreignColumns: [
+        objectRegistry.tenant_id,
+        objectRegistry.object_id,
+      ],
+    }),
   ],
 );
 
@@ -86,6 +112,18 @@ export const controlPlaneActivations = pgTable(
       table.component_type,
       table.stable_id,
       table.effective_from,
+    ),
+    foreignKey({
+      columns: [table.component_type, table.stable_id, table.active_revision_id],
+      foreignColumns: [
+        revisionRegistry.entity_type,
+        revisionRegistry.stable_id,
+        revisionRegistry.revision_id,
+      ],
+    }),
+    check(
+      'ck_activation_effective_range',
+      sql`${table.effective_until} IS NULL OR ${table.effective_until} > ${table.effective_from}`,
     ),
   ],
 );
@@ -116,6 +154,10 @@ export const contentProgramRevisions = pgTable(
   },
   (table) => [
     uniqueIndex('uq_prog_rev_stable').on(table.program_id, table.program_revision_id),
+    check(
+      'ck_content_program_expiration',
+      sql`${table.scheduled_expiration} IS NULL OR ${table.scheduled_expiration} > ${table.effective_from}`,
+    ),
   ],
 );
 
@@ -196,6 +238,10 @@ export const metricDefinitionRevisions = pgTable(
   },
   (table) => [
     uniqueIndex('uq_metric_rev_stable').on(table.metric_id, table.metric_revision_id),
+    check(
+      'ck_metric_definition_expiration',
+      sql`${table.scheduled_expiration} IS NULL OR ${table.scheduled_expiration} > ${table.effective_from}`,
+    ),
   ],
 );
 
@@ -208,17 +254,41 @@ export const evalContractRevisions = pgTable(
     eval_contract_id: text('eval_contract_id').notNull(),
     eval_contract_revision_id: text('eval_contract_revision_id').primaryKey(),
     supersedes_eval_contract_revision_id: text('supersedes_eval_contract_revision_id'),
-    contract_name: text('contract_name').notNull(),
-    target_artifact_type: text('target_artifact_type').notNull(),
-    rubric_definition: text('rubric_definition').notNull(),
-    thresholds: text('thresholds').notNull(),
-    effective_from: timestamp('effective_from', { withTimezone: true }).notNull(),
+    component: text('component').notNull(),
+    capability: text('capability').notNull(),
+    required_dimensions: text('required_dimensions').notNull(),
+    hard_gates: text('hard_gates').notNull(),
+    release_impact: text('release_impact').notNull(),
     created_at: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     tenant_id: text('tenant_id').notNull(),
     workspace_id: text('workspace_id'),
   },
   (table) => [
     uniqueIndex('uq_eval_contract_rev_stable').on(table.eval_contract_id, table.eval_contract_revision_id),
+  ],
+);
+
+/**
+ * ChannelProfileRevision (SPEC02 §14)
+ */
+export const channelProfileRevisions = pgTable(
+  'channel_profile_revisions',
+  {
+    channel_profile_id: text('channel_profile_id').notNull(),
+    channel_profile_revision_id: text('channel_profile_revision_id').primaryKey(),
+    supersedes_channel_profile_revision_id: text('supersedes_channel_profile_revision_id'),
+    identity: text('identity').notNull(),
+    platform_if_applicable: text('platform_if_applicable'),
+    supported_formats: text('supported_formats').notNull(),
+    distribution_capabilities: text('distribution_capabilities').notNull(),
+    technical_capabilities: text('technical_capabilities').notNull(),
+    content_capabilities: text('content_capabilities').notNull(),
+    created_at: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    tenant_id: text('tenant_id').notNull(),
+    workspace_id: text('workspace_id'),
+  },
+  (table) => [
+    uniqueIndex('uq_channel_profile_rev_stable').on(table.channel_profile_id, table.channel_profile_revision_id),
   ],
 );
 
@@ -232,69 +302,47 @@ export const taskContractRevisions = pgTable(
     task_revision_id: text('task_revision_id').primaryKey(),
     supersedes_task_revision_id: text('supersedes_task_revision_id'),
     program_revision_id: text('program_revision_id')
-      .notNull()
       .references(() => contentProgramRevisions.program_revision_id),
-    task_name: text('task_name').notNull(),
-    primary_metric_revision_id: text('primary_metric_revision_id')
+    standalone_task: boolean('standalone_task').notNull(),
+    objective: text('objective').notNull(),
+    channel: text('channel').notNull(),
+    format: text('format').notNull(),
+    language: text('language').notNull(),
+    market: text('market').notNull(),
+    jurisdiction: text('jurisdiction').notNull(),
+    brand_id: text('brand_id').notNull(),
+    product_id: text('product_id').notNull(),
+    audience_context: text('audience_context').notNull(),
+    success_metric_revision_id: text('success_metric_revision_id')
       .notNull()
       .references(() => metricDefinitionRevisions.metric_revision_id),
-    target_audience: text('target_audience').notNull(),
-    channel: text('channel').notNull(),
-    content_format: text('content_format').notNull(),
-    effective_from: timestamp('effective_from', { withTimezone: true }).notNull(),
+    constraints: text('constraints').notNull(),
+    risk_context: text('risk_context').notNull(),
+    compute_budget: text('compute_budget').notNull(),
+    intended_publication_time: timestamp('intended_publication_time', { withTimezone: true }),
     created_at: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     tenant_id: text('tenant_id').notNull(),
     workspace_id: text('workspace_id'),
   },
   (table) => [
     uniqueIndex('uq_task_rev_stable').on(table.task_id, table.task_revision_id),
+    check(
+      'ck_task_contract_standalone_program',
+      sql`(${table.standalone_task} = TRUE AND ${table.program_revision_id} IS NULL) OR (${table.standalone_task} = FALSE AND ${table.program_revision_id} IS NOT NULL)`,
+    ),
   ],
 );
 
 /**
- * RunConfig (SPEC02 §14)
+ * RunConfig (SPEC02 §17)
  */
 export const runConfigs = pgTable('run_configs', {
   run_config_id: text('run_config_id').primaryKey(),
-  task_revision_id: text('task_revision_id')
-    .notNull()
-    .references(() => taskContractRevisions.task_revision_id),
-  eval_contract_revision_id: text('eval_contract_revision_id')
-    .notNull()
-    .references(() => evalContractRevisions.eval_contract_revision_id),
-  prompt_config_revision_id: text('prompt_config_revision_id').notNull(),
-  model_config_revision_id: text('model_config_revision_id').notNull(),
-  retriever_config_revision_id: text('retriever_config_revision_id').notNull(),
-  tool_config_revision_id: text('tool_config_revision_id').notNull(),
-  evaluator_config_revision_id: text('evaluator_config_revision_id').notNull(),
   runtime_parameters: text('runtime_parameters').notNull(),
   created_at: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   tenant_id: text('tenant_id').notNull(),
   workspace_id: text('workspace_id'),
 });
-
-/**
- * ExecutionPlanRevision (SPEC02 §14)
- */
-export const executionPlanRevisions = pgTable(
-  'execution_plan_revisions',
-  {
-    execution_plan_id: text('execution_plan_id').notNull(),
-    execution_plan_revision_id: text('execution_plan_revision_id').primaryKey(),
-    supersedes_plan_revision_id: text('supersedes_plan_revision_id'),
-    task_revision_id: text('task_revision_id')
-      .notNull()
-      .references(() => taskContractRevisions.task_revision_id),
-    plan_definition: text('plan_definition').notNull(),
-    effective_from: timestamp('effective_from', { withTimezone: true }).notNull(),
-    created_at: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-    tenant_id: text('tenant_id').notNull(),
-    workspace_id: text('workspace_id'),
-  },
-  (table) => [
-    uniqueIndex('uq_plan_rev_stable').on(table.execution_plan_id, table.execution_plan_revision_id),
-  ],
-);
 
 /**
  * GuidanceRevision (SPEC02 §14)
@@ -305,15 +353,22 @@ export const guidanceRevisions = pgTable(
     guidance_id: text('guidance_id').notNull(),
     guidance_revision_id: text('guidance_revision_id').primaryKey(),
     supersedes_guidance_revision_id: text('supersedes_guidance_revision_id'),
-    title: text('title').notNull(),
-    body: text('body').notNull(),
+    guidance_type: text('guidance_type').notNull(),
+    recommendation: text('recommendation').notNull(),
+    scope: text('scope').notNull(),
+    limitations: text('limitations').notNull(),
     effective_from: timestamp('effective_from', { withTimezone: true }).notNull(),
+    scheduled_expiration: timestamp('scheduled_expiration', { withTimezone: true }),
     created_at: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     tenant_id: text('tenant_id').notNull(),
     workspace_id: text('workspace_id'),
   },
   (table) => [
     uniqueIndex('uq_guidance_rev_stable').on(table.guidance_id, table.guidance_revision_id),
+    check(
+      'ck_guidance_expiration',
+      sql`${table.scheduled_expiration} IS NULL OR ${table.scheduled_expiration} > ${table.effective_from}`,
+    ),
   ],
 );
 
@@ -327,35 +382,24 @@ export const normativeRuleRevisions = pgTable(
     rule_revision_id: text('rule_revision_id').primaryKey(),
     supersedes_rule_revision_id: text('supersedes_rule_revision_id'),
     rule_type: text('rule_type').notNull(), // HARD_DENY | HARD_REQUIREMENT | PREFERENCE
-    rule_definition: text('rule_definition').notNull(),
-    effective_from: timestamp('effective_from', { withTimezone: true }).notNull(),
+    statement: text('statement').notNull(),
+    jurisdiction: text('jurisdiction').notNull(),
+    scope: text('scope').notNull(),
+    applicability_conditions: text('applicability_conditions').notNull(),
+    enforcement_level: text('enforcement_level').notNull(),
+    valid_from: timestamp('valid_from', { withTimezone: true }).notNull(),
+    known_from: timestamp('known_from', { withTimezone: true }).notNull(),
+    scheduled_expiration: timestamp('scheduled_expiration', { withTimezone: true }),
     created_at: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     tenant_id: text('tenant_id').notNull(),
     workspace_id: text('workspace_id'),
   },
   (table) => [
     uniqueIndex('uq_rule_rev_stable').on(table.rule_id, table.rule_revision_id),
-  ],
-);
-
-/**
- * RightsPolicyRevision (SPEC02 §14)
- */
-export const rightsPolicyRevisions = pgTable(
-  'rights_policy_revisions',
-  {
-    policy_id: text('policy_id').notNull(),
-    policy_revision_id: text('policy_revision_id').primaryKey(),
-    supersedes_policy_revision_id: text('supersedes_policy_revision_id'),
-    policy_type: text('policy_type').notNull(),
-    policy_definition: text('policy_definition').notNull(),
-    effective_from: timestamp('effective_from', { withTimezone: true }).notNull(),
-    created_at: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-    tenant_id: text('tenant_id').notNull(),
-    workspace_id: text('workspace_id'),
-  },
-  (table) => [
-    uniqueIndex('uq_rights_rev_stable').on(table.policy_id, table.policy_revision_id),
+    check(
+      'ck_normative_rule_expiration',
+      sql`${table.scheduled_expiration} IS NULL OR ${table.scheduled_expiration} > ${table.valid_from}`,
+    ),
   ],
 );
 
@@ -384,4 +428,3 @@ export const decisionPolicyRevisions = pgTable(
     uniqueIndex('uq_decision_policy_rev_stable').on(table.policy_id, table.policy_revision_id),
   ],
 );
-

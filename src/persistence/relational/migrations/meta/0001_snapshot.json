@@ -1,5 +1,5 @@
 {
-  "id": "a40743e3-d924-4d5d-a7f6-ab7ecbfbce3a",
+  "id": "476c1863-d727-4866-8c35-fef2f8853399",
   "prevId": "3a7275ba-8328-43bf-a785-8297e904e190",
   "version": "7",
   "dialect": "postgresql",
@@ -301,7 +301,35 @@
           "notNull": false
         }
       },
-      "indexes": {},
+      "indexes": {
+        "uq_imm_entity_tenant_triple": {
+          "name": "uq_imm_entity_tenant_triple",
+          "columns": [
+            {
+              "expression": "tenant_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "entity_type",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "entity_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {},
       "compositePrimaryKeys": {
         "immutable_entity_registry_entity_type_entity_id_pk": {
@@ -314,7 +342,12 @@
       },
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "ck_imm_payload_state": {
+          "name": "ck_imm_payload_state",
+          "value": "\"immutable_entity_registry\".\"payload_state\" IN ('AVAILABLE', 'REDACTED', 'DELETED')"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.object_references": {
@@ -520,13 +553,39 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "uq_object_registry_tenant_id": {
+          "name": "uq_object_registry_tenant_id",
+          "columns": [
+            {
+              "expression": "tenant_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "object_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "ck_object_registry_state": {
+          "name": "ck_object_registry_state",
+          "value": "\"object_registry\".\"state\" IN ('AVAILABLE', 'GC_CLAIMED', 'DELETED')"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.revision_registry": {
@@ -611,6 +670,39 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "uq_revision_registry_tenant_triple": {
+          "name": "uq_revision_registry_tenant_triple",
+          "columns": [
+            {
+              "expression": "tenant_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "entity_type",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "stable_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "revision_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {},
@@ -625,7 +717,12 @@
       },
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "ck_rev_payload_state": {
+          "name": "ck_rev_payload_state",
+          "value": "\"revision_registry\".\"payload_state\" IN ('AVAILABLE', 'REDACTED', 'DELETED')"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.attribution_model_revisions": {
@@ -718,6 +815,114 @@
             },
             {
               "expression": "attribution_model_revision_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.channel_profile_revisions": {
+      "name": "channel_profile_revisions",
+      "schema": "",
+      "columns": {
+        "channel_profile_id": {
+          "name": "channel_profile_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "channel_profile_revision_id": {
+          "name": "channel_profile_revision_id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "supersedes_channel_profile_revision_id": {
+          "name": "supersedes_channel_profile_revision_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "identity": {
+          "name": "identity",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "platform_if_applicable": {
+          "name": "platform_if_applicable",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "supported_formats": {
+          "name": "supported_formats",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "distribution_capabilities": {
+          "name": "distribution_capabilities",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "technical_capabilities": {
+          "name": "technical_capabilities",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "content_capabilities": {
+          "name": "content_capabilities",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "tenant_id": {
+          "name": "tenant_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "workspace_id": {
+          "name": "workspace_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "uq_channel_profile_rev_stable": {
+          "name": "uq_channel_profile_rev_stable",
+          "columns": [
+            {
+              "expression": "channel_profile_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "channel_profile_revision_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -871,7 +1076,12 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "ck_content_program_expiration": {
+          "name": "ck_content_program_expiration",
+          "value": "\"content_program_revisions\".\"scheduled_expiration\" IS NULL OR \"content_program_revisions\".\"scheduled_expiration\" > \"content_program_revisions\".\"effective_from\""
+        }
+      },
       "isRLSEnabled": false
     },
     "public.control_plane_activations": {
@@ -963,11 +1173,34 @@
           "with": {}
         }
       },
-      "foreignKeys": {},
+      "foreignKeys": {
+        "control_plane_activations_component_type_stable_id_active_revision_id_revision_registry_entity_type_stable_id_revision_id_fk": {
+          "name": "control_plane_activations_component_type_stable_id_active_revision_id_revision_registry_entity_type_stable_id_revision_id_fk",
+          "tableFrom": "control_plane_activations",
+          "tableTo": "revision_registry",
+          "columnsFrom": [
+            "component_type",
+            "stable_id",
+            "active_revision_id"
+          ],
+          "columnsTo": [
+            "entity_type",
+            "stable_id",
+            "revision_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "ck_activation_effective_range": {
+          "name": "ck_activation_effective_range",
+          "value": "\"control_plane_activations\".\"effective_until\" IS NULL OR \"control_plane_activations\".\"effective_until\" > \"control_plane_activations\".\"effective_from\""
+        }
+      },
       "isRLSEnabled": false
     },
     "public.decision_policy_revisions": {
@@ -1112,33 +1345,33 @@
           "primaryKey": false,
           "notNull": false
         },
-        "contract_name": {
-          "name": "contract_name",
+        "component": {
+          "name": "component",
           "type": "text",
           "primaryKey": false,
           "notNull": true
         },
-        "target_artifact_type": {
-          "name": "target_artifact_type",
+        "capability": {
+          "name": "capability",
           "type": "text",
           "primaryKey": false,
           "notNull": true
         },
-        "rubric_definition": {
-          "name": "rubric_definition",
+        "required_dimensions": {
+          "name": "required_dimensions",
           "type": "text",
           "primaryKey": false,
           "notNull": true
         },
-        "thresholds": {
-          "name": "thresholds",
+        "hard_gates": {
+          "name": "hard_gates",
           "type": "text",
           "primaryKey": false,
           "notNull": true
         },
-        "effective_from": {
-          "name": "effective_from",
-          "type": "timestamp with time zone",
+        "release_impact": {
+          "name": "release_impact",
+          "type": "text",
           "primaryKey": false,
           "notNull": true
         },
@@ -1192,110 +1425,6 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
-    "public.execution_plan_revisions": {
-      "name": "execution_plan_revisions",
-      "schema": "",
-      "columns": {
-        "execution_plan_id": {
-          "name": "execution_plan_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "execution_plan_revision_id": {
-          "name": "execution_plan_revision_id",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "supersedes_plan_revision_id": {
-          "name": "supersedes_plan_revision_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "task_revision_id": {
-          "name": "task_revision_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "plan_definition": {
-          "name": "plan_definition",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "effective_from": {
-          "name": "effective_from",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "tenant_id": {
-          "name": "tenant_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "workspace_id": {
-          "name": "workspace_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        }
-      },
-      "indexes": {
-        "uq_plan_rev_stable": {
-          "name": "uq_plan_rev_stable",
-          "columns": [
-            {
-              "expression": "execution_plan_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "execution_plan_revision_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "execution_plan_revisions_task_revision_id_task_contract_revisions_task_revision_id_fk": {
-          "name": "execution_plan_revisions_task_revision_id_task_contract_revisions_task_revision_id_fk",
-          "tableFrom": "execution_plan_revisions",
-          "tableTo": "task_contract_revisions",
-          "columnsFrom": [
-            "task_revision_id"
-          ],
-          "columnsTo": [
-            "task_revision_id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
     "public.guidance_revisions": {
       "name": "guidance_revisions",
       "schema": "",
@@ -1318,14 +1447,26 @@
           "primaryKey": false,
           "notNull": false
         },
-        "title": {
-          "name": "title",
+        "guidance_type": {
+          "name": "guidance_type",
           "type": "text",
           "primaryKey": false,
           "notNull": true
         },
-        "body": {
-          "name": "body",
+        "recommendation": {
+          "name": "recommendation",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "scope": {
+          "name": "scope",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "limitations": {
+          "name": "limitations",
           "type": "text",
           "primaryKey": false,
           "notNull": true
@@ -1335,6 +1476,12 @@
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true
+        },
+        "scheduled_expiration": {
+          "name": "scheduled_expiration",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
         },
         "created_at": {
           "name": "created_at",
@@ -1383,7 +1530,12 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "ck_guidance_expiration": {
+          "name": "ck_guidance_expiration",
+          "value": "\"guidance_revisions\".\"scheduled_expiration\" IS NULL OR \"guidance_revisions\".\"scheduled_expiration\" > \"guidance_revisions\".\"effective_from\""
+        }
+      },
       "isRLSEnabled": false
     },
     "public.metric_definition_revisions": {
@@ -1509,7 +1661,12 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "ck_metric_definition_expiration": {
+          "name": "ck_metric_definition_expiration",
+          "value": "\"metric_definition_revisions\".\"scheduled_expiration\" IS NULL OR \"metric_definition_revisions\".\"scheduled_expiration\" > \"metric_definition_revisions\".\"effective_from\""
+        }
+      },
       "isRLSEnabled": false
     },
     "public.normative_rule_revisions": {
@@ -1540,17 +1697,53 @@
           "primaryKey": false,
           "notNull": true
         },
-        "rule_definition": {
-          "name": "rule_definition",
+        "statement": {
+          "name": "statement",
           "type": "text",
           "primaryKey": false,
           "notNull": true
         },
-        "effective_from": {
-          "name": "effective_from",
+        "jurisdiction": {
+          "name": "jurisdiction",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "scope": {
+          "name": "scope",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "applicability_conditions": {
+          "name": "applicability_conditions",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "enforcement_level": {
+          "name": "enforcement_level",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "valid_from": {
+          "name": "valid_from",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true
+        },
+        "known_from": {
+          "name": "known_from",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "scheduled_expiration": {
+          "name": "scheduled_expiration",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
         },
         "created_at": {
           "name": "created_at",
@@ -1599,7 +1792,12 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "ck_normative_rule_expiration": {
+          "name": "ck_normative_rule_expiration",
+          "value": "\"normative_rule_revisions\".\"scheduled_expiration\" IS NULL OR \"normative_rule_revisions\".\"scheduled_expiration\" > \"normative_rule_revisions\".\"valid_from\""
+        }
+      },
       "isRLSEnabled": false
     },
     "public.outcome_edges": {
@@ -1822,14 +2020,35 @@
         }
       },
       "foreignKeys": {
-        "registered_control_plane_revision_payloads_object_id_object_registry_object_id_fk": {
-          "name": "registered_control_plane_revision_payloads_object_id_object_registry_object_id_fk",
+        "registered_control_plane_revision_payloads_tenant_id_entity_type_stable_id_revision_id_revision_registry_tenant_id_entity_type_stable_id_revision_id_fk": {
+          "name": "registered_control_plane_revision_payloads_tenant_id_entity_type_stable_id_revision_id_revision_registry_tenant_id_entity_type_stable_id_revision_id_fk",
+          "tableFrom": "registered_control_plane_revision_payloads",
+          "tableTo": "revision_registry",
+          "columnsFrom": [
+            "tenant_id",
+            "entity_type",
+            "stable_id",
+            "revision_id"
+          ],
+          "columnsTo": [
+            "tenant_id",
+            "entity_type",
+            "stable_id",
+            "revision_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "registered_control_plane_revision_payloads_tenant_id_object_id_object_registry_tenant_id_object_id_fk": {
+          "name": "registered_control_plane_revision_payloads_tenant_id_object_id_object_registry_tenant_id_object_id_fk",
           "tableFrom": "registered_control_plane_revision_payloads",
           "tableTo": "object_registry",
           "columnsFrom": [
+            "tenant_id",
             "object_id"
           ],
           "columnsTo": [
+            "tenant_id",
             "object_id"
           ],
           "onDelete": "no action",
@@ -1872,91 +2091,21 @@
           "primaryKey": false,
           "notNull": true
         },
-        "tenant_id": {
-          "name": "tenant_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "workspace_id": {
-          "name": "workspace_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
         "supersedes_revision_id": {
           "name": "supersedes_revision_id",
           "type": "text",
           "primaryKey": false,
           "notNull": false
         },
-        "description": {
-          "name": "description",
+        "payload_hash": {
+          "name": "payload_hash",
           "type": "text",
           "primaryKey": false,
           "notNull": true
         },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {},
-      "compositePrimaryKeys": {
-        "registered_control_plane_revisions_entity_type_revision_id_pk": {
-          "name": "registered_control_plane_revisions_entity_type_revision_id_pk",
-          "columns": [
-            "entity_type",
-            "revision_id"
-          ]
-        }
-      },
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.rights_policy_revisions": {
-      "name": "rights_policy_revisions",
-      "schema": "",
-      "columns": {
-        "policy_id": {
-          "name": "policy_id",
+        "payload_schema_revision_id": {
+          "name": "payload_schema_revision_id",
           "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "policy_revision_id": {
-          "name": "policy_revision_id",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "supersedes_policy_revision_id": {
-          "name": "supersedes_policy_revision_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "policy_type": {
-          "name": "policy_type",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "policy_definition": {
-          "name": "policy_definition",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "effective_from": {
-          "name": "effective_from",
-          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true
         },
@@ -1981,17 +2130,23 @@
         }
       },
       "indexes": {
-        "uq_rights_rev_stable": {
-          "name": "uq_rights_rev_stable",
+        "uq_cplane_rev_triple": {
+          "name": "uq_cplane_rev_triple",
           "columns": [
             {
-              "expression": "policy_id",
+              "expression": "entity_type",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
             },
             {
-              "expression": "policy_revision_id",
+              "expression": "stable_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "revision_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -2004,10 +2159,23 @@
         }
       },
       "foreignKeys": {},
-      "compositePrimaryKeys": {},
+      "compositePrimaryKeys": {
+        "registered_control_plane_revisions_entity_type_revision_id_pk": {
+          "name": "registered_control_plane_revisions_entity_type_revision_id_pk",
+          "columns": [
+            "entity_type",
+            "revision_id"
+          ]
+        }
+      },
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "ck_cplane_entity_type": {
+          "name": "ck_cplane_entity_type",
+          "value": "\"registered_control_plane_revisions\".\"entity_type\" IN ('PromptConfig', 'ModelConfig', 'ToolConfig', 'RetrieverConfig', 'EvaluatorConfig', 'SchemaDefinition')"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.run_configs": {
@@ -2018,48 +2186,6 @@
           "name": "run_config_id",
           "type": "text",
           "primaryKey": true,
-          "notNull": true
-        },
-        "task_revision_id": {
-          "name": "task_revision_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "eval_contract_revision_id": {
-          "name": "eval_contract_revision_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "prompt_config_revision_id": {
-          "name": "prompt_config_revision_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "model_config_revision_id": {
-          "name": "model_config_revision_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "retriever_config_revision_id": {
-          "name": "retriever_config_revision_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "tool_config_revision_id": {
-          "name": "tool_config_revision_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "evaluator_config_revision_id": {
-          "name": "evaluator_config_revision_id",
-          "type": "text",
-          "primaryKey": false,
           "notNull": true
         },
         "runtime_parameters": {
@@ -2089,34 +2215,7 @@
         }
       },
       "indexes": {},
-      "foreignKeys": {
-        "run_configs_task_revision_id_task_contract_revisions_task_revision_id_fk": {
-          "name": "run_configs_task_revision_id_task_contract_revisions_task_revision_id_fk",
-          "tableFrom": "run_configs",
-          "tableTo": "task_contract_revisions",
-          "columnsFrom": [
-            "task_revision_id"
-          ],
-          "columnsTo": [
-            "task_revision_id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        },
-        "run_configs_eval_contract_revision_id_eval_contract_revisions_eval_contract_revision_id_fk": {
-          "name": "run_configs_eval_contract_revision_id_eval_contract_revisions_eval_contract_revision_id_fk",
-          "tableFrom": "run_configs",
-          "tableTo": "eval_contract_revisions",
-          "columnsFrom": [
-            "eval_contract_revision_id"
-          ],
-          "columnsTo": [
-            "eval_contract_revision_id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        }
-      },
+      "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
@@ -2149,22 +2248,16 @@
           "name": "program_revision_id",
           "type": "text",
           "primaryKey": false,
-          "notNull": true
+          "notNull": false
         },
-        "task_name": {
-          "name": "task_name",
-          "type": "text",
+        "standalone_task": {
+          "name": "standalone_task",
+          "type": "boolean",
           "primaryKey": false,
           "notNull": true
         },
-        "primary_metric_revision_id": {
-          "name": "primary_metric_revision_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "target_audience": {
-          "name": "target_audience",
+        "objective": {
+          "name": "objective",
           "type": "text",
           "primaryKey": false,
           "notNull": true
@@ -2175,17 +2268,77 @@
           "primaryKey": false,
           "notNull": true
         },
-        "content_format": {
-          "name": "content_format",
+        "format": {
+          "name": "format",
           "type": "text",
           "primaryKey": false,
           "notNull": true
         },
-        "effective_from": {
-          "name": "effective_from",
-          "type": "timestamp with time zone",
+        "language": {
+          "name": "language",
+          "type": "text",
           "primaryKey": false,
           "notNull": true
+        },
+        "market": {
+          "name": "market",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "jurisdiction": {
+          "name": "jurisdiction",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "brand_id": {
+          "name": "brand_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "product_id": {
+          "name": "product_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "audience_context": {
+          "name": "audience_context",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "success_metric_revision_id": {
+          "name": "success_metric_revision_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "constraints": {
+          "name": "constraints",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "risk_context": {
+          "name": "risk_context",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "compute_budget": {
+          "name": "compute_budget",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "intended_publication_time": {
+          "name": "intended_publication_time",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
         },
         "created_at": {
           "name": "created_at",
@@ -2244,12 +2397,12 @@
           "onDelete": "no action",
           "onUpdate": "no action"
         },
-        "task_contract_revisions_primary_metric_revision_id_metric_definition_revisions_metric_revision_id_fk": {
-          "name": "task_contract_revisions_primary_metric_revision_id_metric_definition_revisions_metric_revision_id_fk",
+        "task_contract_revisions_success_metric_revision_id_metric_definition_revisions_metric_revision_id_fk": {
+          "name": "task_contract_revisions_success_metric_revision_id_metric_definition_revisions_metric_revision_id_fk",
           "tableFrom": "task_contract_revisions",
           "tableTo": "metric_definition_revisions",
           "columnsFrom": [
-            "primary_metric_revision_id"
+            "success_metric_revision_id"
           ],
           "columnsTo": [
             "metric_revision_id"
@@ -2261,7 +2414,12 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "ck_task_contract_standalone_program": {
+          "name": "ck_task_contract_standalone_program",
+          "value": "(\"task_contract_revisions\".\"standalone_task\" = TRUE AND \"task_contract_revisions\".\"program_revision_id\" IS NULL) OR (\"task_contract_revisions\".\"standalone_task\" = FALSE AND \"task_contract_revisions\".\"program_revision_id\" IS NOT NULL)"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.epistemic_state_versions": {
@@ -2637,7 +2795,16 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "ck_evidence_compat_status": {
+          "name": "ck_evidence_compat_status",
+          "value": "\"evidence_assessments\".\"compatibility_status\" IN ('COMPATIBLE', 'COMPATIBLE_WITH_LIMITS', 'INCOMPATIBLE', 'UNCERTAIN')"
+        },
+        "ck_evidence_relationship": {
+          "name": "ck_evidence_relationship",
+          "value": "\"evidence_assessments\".\"relationship\" IN ('SUPPORTS', 'PARTIALLY_SUPPORTS', 'QUALIFIES', 'CONTRADICTS', 'DOES_NOT_ADDRESS')"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.evidence_items": {
@@ -2790,7 +2957,16 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "ck_evidence_item_origin_type": {
+          "name": "ck_evidence_item_origin_type",
+          "value": "\"evidence_items\".\"origin_type\" IN ('SOURCE_ARTIFACT', 'PERFORMANCE_OBSERVATION')"
+        },
+        "ck_evidence_item_domain": {
+          "name": "ck_evidence_item_domain",
+          "value": "\"evidence_items\".\"evidence_domain\" IN ('PRODUCT_DOCUMENTATION', 'FIRST_PARTY_OBSERVATION', 'CUSTOMER_REPORT', 'EXPERT_SOURCE', 'ACADEMIC_STUDY', 'REGULATORY_SOURCE', 'PLATFORM_POLICY', 'PLATFORM_ANALYTICS', 'OBSERVATIONAL_PERFORMANCE', 'RANDOMIZED_EXPERIMENT', 'QUASI_EXPERIMENT', 'MARKET_DATA')"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.evidence_proposition_links": {
@@ -3062,7 +3238,12 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "ck_knowledge_gap_status": {
+          "name": "ck_knowledge_gap_status",
+          "value": "\"knowledge_gaps\".\"status\" IN ('OPEN', 'RESOLVED_BY_RESEARCH', 'RESOLVED_BY_USER', 'EXPLICIT_ASSUMPTION', 'UNRESOLVED_NON_BLOCKING', 'BLOCKING')"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.propositions": {
@@ -3191,7 +3372,12 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "ck_proposition_type": {
+          "name": "ck_proposition_type",
+          "value": "\"propositions\".\"proposition_type\" IN ('FACTUAL', 'CAUSAL', 'PREDICTIVE', 'STRATEGIC', 'PERFORMANCE', 'AUDIENCE', 'MEASUREMENT', 'DEFINITIONAL')"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.research_traces": {
@@ -3339,7 +3525,12 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "ck_research_trace_outcome": {
+          "name": "ck_research_trace_outcome",
+          "value": "\"research_traces\".\"outcome\" IN ('FOUND_RELEVANT_EVIDENCE', 'NO_EVIDENCE_FOUND', 'SEARCH_INCOMPLETE', 'SEARCH_FAILED')"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.source_artifacts": {
@@ -3477,12 +3668,30 @@
           ],
           "onDelete": "no action",
           "onUpdate": "no action"
+        },
+        "source_artifacts_rights_policy_id_rights_policies_rights_policy_id_fk": {
+          "name": "source_artifacts_rights_policy_id_rights_policies_rights_policy_id_fk",
+          "tableFrom": "source_artifacts",
+          "tableTo": "rights_policies",
+          "columnsFrom": [
+            "rights_policy_id"
+          ],
+          "columnsTo": [
+            "rights_policy_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "ck_source_artifact_data_scope": {
+          "name": "ck_source_artifact_data_scope",
+          "value": "\"source_artifacts\".\"data_scope\" IN ('TENANT_PRIVATE', 'WORKSPACE_SHARED', 'AUTHORIZED_AGGREGATE', 'GLOBAL_PUBLIC')"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.applicability_assessments": {
@@ -3649,7 +3858,20 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "ck_applicability_subject_type": {
+          "name": "ck_applicability_subject_type",
+          "value": "\"applicability_assessments\".\"subject_type\" IN ('GUIDANCE', 'NORMATIVE_RULE')"
+        },
+        "ck_applicability_stage": {
+          "name": "ck_applicability_stage",
+          "value": "\"applicability_assessments\".\"assessment_stage\" IN ('PRE_GENERATION_PROVISIONAL', 'PRE_GENERATION_FINAL', 'CONTENT_LEVEL')"
+        },
+        "ck_applicability_result": {
+          "name": "ck_applicability_result",
+          "value": "\"applicability_assessments\".\"result\" IN ('APPLICABLE', 'PARTIALLY_APPLICABLE', 'NOT_APPLICABLE', 'UNCERTAIN')"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.assertion_proposition_links": {
@@ -3722,24 +3944,15 @@
           "method": "btree",
           "with": {}
         },
-        "idx_assertion_prop_link_assertion": {
-          "name": "idx_assertion_prop_link_assertion",
+        "idx_assertion_prop_link_pair": {
+          "name": "idx_assertion_prop_link_pair",
           "columns": [
             {
               "expression": "assertion_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "idx_assertion_prop_link_prop": {
-          "name": "idx_assertion_prop_link_prop",
-          "columns": [
+            },
             {
               "expression": "proposition_id",
               "isExpression": false,
@@ -3784,7 +3997,12 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "ck_assertion_prop_relation": {
+          "name": "ck_assertion_prop_relation",
+          "value": "\"assertion_proposition_links\".\"relation\" IN ('EQUIVALENT', 'NARROWER', 'BROADER', 'CONJUNCT', 'IMPLIES', 'CONTRADICTS')"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.assertion_validation_results": {
@@ -3833,20 +4051,20 @@
           "primaryKey": false,
           "notNull": false
         },
-        "evaluator_entity_type": {
-          "name": "evaluator_entity_type",
+        "evaluator_revision_ref_entity_type": {
+          "name": "evaluator_revision_ref_entity_type",
           "type": "text",
           "primaryKey": false,
           "notNull": true
         },
-        "evaluator_stable_id": {
-          "name": "evaluator_stable_id",
+        "evaluator_revision_ref_stable_id": {
+          "name": "evaluator_revision_ref_stable_id",
           "type": "text",
           "primaryKey": false,
           "notNull": true
         },
-        "evaluator_revision_id": {
-          "name": "evaluator_revision_id",
+        "evaluator_revision_ref_revision_id": {
+          "name": "evaluator_revision_ref_revision_id",
           "type": "text",
           "primaryKey": false,
           "notNull": true
@@ -3909,7 +4127,12 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "ck_assertion_validation_status": {
+          "name": "ck_assertion_validation_status",
+          "value": "\"assertion_validation_results\".\"status\" IN ('SUPPORTED', 'SUPPORTED_WITH_QUALIFICATION', 'OVERCLAIM', 'UNSUPPORTED', 'CONTRADICTORY')"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.audience_states": {
@@ -4082,7 +4305,12 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "ck_audience_state_stage": {
+          "name": "ck_audience_state_stage",
+          "value": "\"audience_states\".\"state_stage\" IN ('PROVISIONAL', 'REFINED', 'FINAL_FOR_DECISION')"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.composite_impression_assessments": {
@@ -4137,20 +4365,20 @@
           "primaryKey": false,
           "notNull": true
         },
-        "evaluator_entity_type": {
-          "name": "evaluator_entity_type",
+        "evaluator_revision_ref_entity_type": {
+          "name": "evaluator_revision_ref_entity_type",
           "type": "text",
           "primaryKey": false,
           "notNull": true
         },
-        "evaluator_stable_id": {
-          "name": "evaluator_stable_id",
+        "evaluator_revision_ref_stable_id": {
+          "name": "evaluator_revision_ref_stable_id",
           "type": "text",
           "primaryKey": false,
           "notNull": true
         },
-        "evaluator_revision_id": {
-          "name": "evaluator_revision_id",
+        "evaluator_revision_ref_revision_id": {
+          "name": "evaluator_revision_ref_revision_id",
           "type": "text",
           "primaryKey": false,
           "notNull": true
@@ -4213,7 +4441,12 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "ck_composite_assessment_status": {
+          "name": "ck_composite_assessment_status",
+          "value": "\"composite_impression_assessments\".\"status\" IN ('STABLE', 'STABLE_WITH_REQUIREMENTS', 'INVALID', 'REVIEW_REQUIRED')"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.content_architectures": {
@@ -4265,8 +4498,8 @@
         }
       },
       "indexes": {
-        "idx_content_architecture_tenant": {
-          "name": "idx_content_architecture_tenant",
+        "idx_content_arch_tenant": {
+          "name": "idx_content_arch_tenant",
           "columns": [
             {
               "expression": "tenant_id",
@@ -4280,8 +4513,8 @@
           "method": "btree",
           "with": {}
         },
-        "idx_content_architecture_task": {
-          "name": "idx_content_architecture_task",
+        "idx_content_arch_task": {
+          "name": "idx_content_arch_task",
           "columns": [
             {
               "expression": "task_revision_id",
@@ -4295,8 +4528,8 @@
           "method": "btree",
           "with": {}
         },
-        "idx_content_architecture_strategy": {
-          "name": "idx_content_architecture_strategy",
+        "idx_content_arch_strategy": {
+          "name": "idx_content_arch_strategy",
           "columns": [
             {
               "expression": "strategy_id",
@@ -4367,14 +4600,14 @@
           "primaryKey": false,
           "notNull": false
         },
-        "artifact_entity_type": {
-          "name": "artifact_entity_type",
+        "artifact_ref_type": {
+          "name": "artifact_ref_type",
           "type": "text",
           "primaryKey": false,
           "notNull": true
         },
-        "artifact_entity_id": {
-          "name": "artifact_entity_id",
+        "artifact_ref_id": {
+          "name": "artifact_ref_id",
           "type": "text",
           "primaryKey": false,
           "notNull": true
@@ -4455,13 +4688,13 @@
           "name": "idx_content_assertion_artifact",
           "columns": [
             {
-              "expression": "artifact_entity_type",
+              "expression": "artifact_ref_type",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
             },
             {
-              "expression": "artifact_entity_id",
+              "expression": "artifact_ref_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -4577,38 +4810,8 @@
           "method": "btree",
           "with": {}
         },
-        "idx_content_candidate_strategy": {
-          "name": "idx_content_candidate_strategy",
-          "columns": [
-            {
-              "expression": "strategy_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "idx_content_candidate_arch": {
-          "name": "idx_content_candidate_arch",
-          "columns": [
-            {
-              "expression": "architecture_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "idx_content_candidate_run_config": {
-          "name": "idx_content_candidate_run_config",
+        "idx_content_candidate_run_cfg": {
+          "name": "idx_content_candidate_run_cfg",
           "columns": [
             {
               "expression": "run_config_id",
@@ -4855,20 +5058,20 @@
           "primaryKey": false,
           "notNull": false
         },
-        "evaluator_entity_type": {
-          "name": "evaluator_entity_type",
+        "evaluator_revision_ref_entity_type": {
+          "name": "evaluator_revision_ref_entity_type",
           "type": "text",
           "primaryKey": false,
           "notNull": true
         },
-        "evaluator_stable_id": {
-          "name": "evaluator_stable_id",
+        "evaluator_revision_ref_stable_id": {
+          "name": "evaluator_revision_ref_stable_id",
           "type": "text",
           "primaryKey": false,
           "notNull": true
         },
-        "evaluator_revision_id": {
-          "name": "evaluator_revision_id",
+        "evaluator_revision_ref_revision_id": {
+          "name": "evaluator_revision_ref_revision_id",
           "type": "text",
           "primaryKey": false,
           "notNull": true
@@ -4882,8 +5085,8 @@
         }
       },
       "indexes": {
-        "idx_qual_evaluation_tenant": {
-          "name": "idx_qual_evaluation_tenant",
+        "idx_qual_eval_tenant": {
+          "name": "idx_qual_eval_tenant",
           "columns": [
             {
               "expression": "tenant_id",
@@ -4897,8 +5100,8 @@
           "method": "btree",
           "with": {}
         },
-        "idx_qual_evaluation_candidate": {
-          "name": "idx_qual_evaluation_candidate",
+        "idx_qual_eval_candidate": {
+          "name": "idx_qual_eval_candidate",
           "columns": [
             {
               "expression": "candidate_id",
@@ -4912,8 +5115,8 @@
           "method": "btree",
           "with": {}
         },
-        "idx_qual_evaluation_contract": {
-          "name": "idx_qual_evaluation_contract",
+        "idx_qual_eval_contract": {
+          "name": "idx_qual_eval_contract",
           "columns": [
             {
               "expression": "eval_contract_revision_id",
@@ -5100,15 +5303,15 @@
         }
       },
       "foreignKeys": {
-        "rights_checks_rights_policy_id_rights_policy_revisions_policy_revision_id_fk": {
-          "name": "rights_checks_rights_policy_id_rights_policy_revisions_policy_revision_id_fk",
+        "rights_checks_rights_policy_id_rights_policies_rights_policy_id_fk": {
+          "name": "rights_checks_rights_policy_id_rights_policies_rights_policy_id_fk",
           "tableFrom": "rights_checks",
-          "tableTo": "rights_policy_revisions",
+          "tableTo": "rights_policies",
           "columnsFrom": [
             "rights_policy_id"
           ],
           "columnsTo": [
-            "policy_revision_id"
+            "rights_policy_id"
           ],
           "onDelete": "no action",
           "onUpdate": "no action"
@@ -5117,7 +5320,143 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "ck_rights_check_status": {
+          "name": "ck_rights_check_status",
+          "value": "\"rights_checks\".\"status\" IN ('ALLOWED', 'ALLOWED_WITH_REQUIREMENTS', 'REVIEW_REQUIRED', 'BLOCKED')"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.rights_policies": {
+      "name": "rights_policies",
+      "schema": "",
+      "columns": {
+        "rights_policy_id": {
+          "name": "rights_policy_id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "tenant_id": {
+          "name": "tenant_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "workspace_id": {
+          "name": "workspace_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "copyright_status": {
+          "name": "copyright_status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "license": {
+          "name": "license",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "analysis_use": {
+          "name": "analysis_use",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "generation_use": {
+          "name": "generation_use",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "quotation_use": {
+          "name": "quotation_use",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "transformation_permission": {
+          "name": "transformation_permission",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "redistribution_permission": {
+          "name": "redistribution_permission",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "commercial_use_permission": {
+          "name": "commercial_use_permission",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "attribution_requirements": {
+          "name": "attribution_requirements",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "effective_from": {
+          "name": "effective_from",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "scheduled_expiration": {
+          "name": "scheduled_expiration",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "supersedes_rights_policy_id": {
+          "name": "supersedes_rights_policy_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "idx_rights_policy_tenant": {
+          "name": "idx_rights_policy_tenant",
+          "columns": [
+            {
+              "expression": "tenant_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "ck_rights_policy_expiration": {
+          "name": "ck_rights_policy_expiration",
+          "value": "\"rights_policies\".\"scheduled_expiration\" IS NULL OR \"rights_policies\".\"scheduled_expiration\" > \"rights_policies\".\"effective_from\""
+        }
+      },
       "isRLSEnabled": false
     },
     "public.risk_assessments": {
@@ -5797,7 +6136,12 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "ck_decision_record_release_status": {
+          "name": "ck_decision_record_release_status",
+          "value": "\"decision_records\".\"release_status\" IN ('READY', 'READY_WITH_WARNINGS', 'HUMAN_REVIEW_REQUIRED', 'BLOCKED')"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.decision_snapshots": {
@@ -5869,6 +6213,13 @@
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
         }
       },
       "indexes": {
@@ -6502,7 +6853,12 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "ck_human_review_mode": {
+          "name": "ck_human_review_mode",
+          "value": "\"human_review_records\".\"review_mode\" IN ('ADJUDICATION_ONLY', 'NEW_INFORMATION_INTRODUCED')"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.knowledge_manifests": {
@@ -6709,7 +7065,12 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "ck_policy_conflict_resolution_type": {
+          "name": "ck_policy_conflict_resolution_type",
+          "value": "\"policy_conflict_resolutions\".\"resolution_type\" IN ('HARD_DENY_OVERRIDES', 'HARD_REQUIREMENT_OVERRIDES', 'MORE_SPECIFIC_SCOPE', 'EXPLICIT_PRIORITY', 'AUTHORIZED_OVERRIDE', 'ESCALATE')"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.policy_overrides": {
@@ -7544,7 +7905,16 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "ck_perf_observation_pub_state": {
+          "name": "ck_perf_observation_pub_state",
+          "value": "\"performance_observations\".\"publication_state\" IN ('SINGLE_ARTIFACT', 'MIXED_PUBLICATION_STATE', 'UNRESOLVED_PUBLICATION_STATE')"
+        },
+        "ck_perf_observation_window": {
+          "name": "ck_perf_observation_window",
+          "value": "\"performance_observations\".\"measurement_window_end\" > \"performance_observations\".\"measurement_window_start\""
+        }
+      },
       "isRLSEnabled": false
     },
     "public.publication_lineages": {
@@ -7830,7 +8200,12 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "ck_published_artifact_origin": {
+          "name": "ck_published_artifact_origin",
+          "value": "\"published_artifacts\".\"origin\" IN ('CONTENTOS_EXECUTION', 'MANUAL_EXTERNAL')"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.replayability_statuses": {
@@ -7910,7 +8285,12 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "ck_replayability_status_value": {
+          "name": "ck_replayability_status_value",
+          "value": "\"replayability_statuses\".\"status\" IN ('FULL', 'PARTIAL_REDACTED', 'UNAVAILABLE_DUE_TO_RETENTION', 'INVALIDATED_BY_DELETION')"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.audit_events": {
@@ -8833,6 +9213,246 @@
           "columns": [
             "result_id",
             "link_id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.baseline_channel_profiles": {
+      "name": "baseline_channel_profiles",
+      "schema": "",
+      "columns": {
+        "baseline_snapshot_id": {
+          "name": "baseline_snapshot_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "channel_profile_revision_id": {
+          "name": "channel_profile_revision_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "baseline_channel_profiles_baseline_snapshot_id_baseline_knowledge_snapshots_baseline_snapshot_id_fk": {
+          "name": "baseline_channel_profiles_baseline_snapshot_id_baseline_knowledge_snapshots_baseline_snapshot_id_fk",
+          "tableFrom": "baseline_channel_profiles",
+          "tableTo": "baseline_knowledge_snapshots",
+          "columnsFrom": [
+            "baseline_snapshot_id"
+          ],
+          "columnsTo": [
+            "baseline_snapshot_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "baseline_channel_profiles_channel_profile_revision_id_channel_profile_revisions_channel_profile_revision_id_fk": {
+          "name": "baseline_channel_profiles_channel_profile_revision_id_channel_profile_revisions_channel_profile_revision_id_fk",
+          "tableFrom": "baseline_channel_profiles",
+          "tableTo": "channel_profile_revisions",
+          "columnsFrom": [
+            "channel_profile_revision_id"
+          ],
+          "columnsTo": [
+            "channel_profile_revision_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "baseline_channel_profiles_baseline_snapshot_id_channel_profile_revision_id_pk": {
+          "name": "baseline_channel_profiles_baseline_snapshot_id_channel_profile_revision_id_pk",
+          "columns": [
+            "baseline_snapshot_id",
+            "channel_profile_revision_id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.channel_profile_guidance_revisions": {
+      "name": "channel_profile_guidance_revisions",
+      "schema": "",
+      "columns": {
+        "channel_profile_revision_id": {
+          "name": "channel_profile_revision_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "guidance_revision_id": {
+          "name": "guidance_revision_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "channel_profile_guidance_revisions_channel_profile_revision_id_channel_profile_revisions_channel_profile_revision_id_fk": {
+          "name": "channel_profile_guidance_revisions_channel_profile_revision_id_channel_profile_revisions_channel_profile_revision_id_fk",
+          "tableFrom": "channel_profile_guidance_revisions",
+          "tableTo": "channel_profile_revisions",
+          "columnsFrom": [
+            "channel_profile_revision_id"
+          ],
+          "columnsTo": [
+            "channel_profile_revision_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "channel_profile_guidance_revisions_guidance_revision_id_guidance_revisions_guidance_revision_id_fk": {
+          "name": "channel_profile_guidance_revisions_guidance_revision_id_guidance_revisions_guidance_revision_id_fk",
+          "tableFrom": "channel_profile_guidance_revisions",
+          "tableTo": "guidance_revisions",
+          "columnsFrom": [
+            "guidance_revision_id"
+          ],
+          "columnsTo": [
+            "guidance_revision_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "channel_profile_guidance_revisions_channel_profile_revision_id_guidance_revision_id_pk": {
+          "name": "channel_profile_guidance_revisions_channel_profile_revision_id_guidance_revision_id_pk",
+          "columns": [
+            "channel_profile_revision_id",
+            "guidance_revision_id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.channel_profile_metric_revisions": {
+      "name": "channel_profile_metric_revisions",
+      "schema": "",
+      "columns": {
+        "channel_profile_revision_id": {
+          "name": "channel_profile_revision_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "metric_revision_id": {
+          "name": "metric_revision_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "channel_profile_metric_revisions_channel_profile_revision_id_channel_profile_revisions_channel_profile_revision_id_fk": {
+          "name": "channel_profile_metric_revisions_channel_profile_revision_id_channel_profile_revisions_channel_profile_revision_id_fk",
+          "tableFrom": "channel_profile_metric_revisions",
+          "tableTo": "channel_profile_revisions",
+          "columnsFrom": [
+            "channel_profile_revision_id"
+          ],
+          "columnsTo": [
+            "channel_profile_revision_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "channel_profile_metric_revisions_metric_revision_id_metric_definition_revisions_metric_revision_id_fk": {
+          "name": "channel_profile_metric_revisions_metric_revision_id_metric_definition_revisions_metric_revision_id_fk",
+          "tableFrom": "channel_profile_metric_revisions",
+          "tableTo": "metric_definition_revisions",
+          "columnsFrom": [
+            "metric_revision_id"
+          ],
+          "columnsTo": [
+            "metric_revision_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "channel_profile_metric_revisions_channel_profile_revision_id_metric_revision_id_pk": {
+          "name": "channel_profile_metric_revisions_channel_profile_revision_id_metric_revision_id_pk",
+          "columns": [
+            "channel_profile_revision_id",
+            "metric_revision_id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.channel_profile_rule_revisions": {
+      "name": "channel_profile_rule_revisions",
+      "schema": "",
+      "columns": {
+        "channel_profile_revision_id": {
+          "name": "channel_profile_revision_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "rule_revision_id": {
+          "name": "rule_revision_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "channel_profile_rule_revisions_channel_profile_revision_id_channel_profile_revisions_channel_profile_revision_id_fk": {
+          "name": "channel_profile_rule_revisions_channel_profile_revision_id_channel_profile_revisions_channel_profile_revision_id_fk",
+          "tableFrom": "channel_profile_rule_revisions",
+          "tableTo": "channel_profile_revisions",
+          "columnsFrom": [
+            "channel_profile_revision_id"
+          ],
+          "columnsTo": [
+            "channel_profile_revision_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "channel_profile_rule_revisions_rule_revision_id_normative_rule_revisions_rule_revision_id_fk": {
+          "name": "channel_profile_rule_revisions_rule_revision_id_normative_rule_revisions_rule_revision_id_fk",
+          "tableFrom": "channel_profile_rule_revisions",
+          "tableTo": "normative_rule_revisions",
+          "columnsFrom": [
+            "rule_revision_id"
+          ],
+          "columnsTo": [
+            "rule_revision_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "channel_profile_rule_revisions_channel_profile_revision_id_rule_revision_id_pk": {
+          "name": "channel_profile_rule_revisions_channel_profile_revision_id_rule_revision_id_pk",
+          "columns": [
+            "channel_profile_revision_id",
+            "rule_revision_id"
           ]
         }
       },
@@ -10351,8 +10971,8 @@
           "primaryKey": false,
           "notNull": true
         },
-        "rights_policy_revision_id": {
-          "name": "rights_policy_revision_id",
+        "rights_policy_id": {
+          "name": "rights_policy_id",
           "type": "text",
           "primaryKey": false,
           "notNull": true
@@ -10373,26 +10993,26 @@
           "onDelete": "no action",
           "onUpdate": "no action"
         },
-        "governance_snapshot_rights_rights_policy_revision_id_rights_policy_revisions_policy_revision_id_fk": {
-          "name": "governance_snapshot_rights_rights_policy_revision_id_rights_policy_revisions_policy_revision_id_fk",
+        "governance_snapshot_rights_rights_policy_id_rights_policies_rights_policy_id_fk": {
+          "name": "governance_snapshot_rights_rights_policy_id_rights_policies_rights_policy_id_fk",
           "tableFrom": "governance_snapshot_rights",
-          "tableTo": "rights_policy_revisions",
+          "tableTo": "rights_policies",
           "columnsFrom": [
-            "rights_policy_revision_id"
+            "rights_policy_id"
           ],
           "columnsTo": [
-            "policy_revision_id"
+            "rights_policy_id"
           ],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {
-        "governance_snapshot_rights_governance_snapshot_id_rights_policy_revision_id_pk": {
-          "name": "governance_snapshot_rights_governance_snapshot_id_rights_policy_revision_id_pk",
+        "governance_snapshot_rights_governance_snapshot_id_rights_policy_id_pk": {
+          "name": "governance_snapshot_rights_governance_snapshot_id_rights_policy_id_pk",
           "columns": [
             "governance_snapshot_id",
-            "rights_policy_revision_id"
+            "rights_policy_id"
           ]
         }
       },
@@ -10453,6 +11073,66 @@
           "columns": [
             "governance_snapshot_id",
             "rule_revision_id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.guidance_supporting_propositions": {
+      "name": "guidance_supporting_propositions",
+      "schema": "",
+      "columns": {
+        "guidance_revision_id": {
+          "name": "guidance_revision_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "proposition_id": {
+          "name": "proposition_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "guidance_supporting_propositions_guidance_revision_id_guidance_revisions_guidance_revision_id_fk": {
+          "name": "guidance_supporting_propositions_guidance_revision_id_guidance_revisions_guidance_revision_id_fk",
+          "tableFrom": "guidance_supporting_propositions",
+          "tableTo": "guidance_revisions",
+          "columnsFrom": [
+            "guidance_revision_id"
+          ],
+          "columnsTo": [
+            "guidance_revision_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "guidance_supporting_propositions_proposition_id_propositions_proposition_id_fk": {
+          "name": "guidance_supporting_propositions_proposition_id_propositions_proposition_id_fk",
+          "tableFrom": "guidance_supporting_propositions",
+          "tableTo": "propositions",
+          "columnsFrom": [
+            "proposition_id"
+          ],
+          "columnsTo": [
+            "proposition_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "guidance_supporting_propositions_guidance_revision_id_proposition_id_pk": {
+          "name": "guidance_supporting_propositions_guidance_revision_id_proposition_id_pk",
+          "columns": [
+            "guidance_revision_id",
+            "proposition_id"
           ]
         }
       },
@@ -10761,6 +11441,246 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.normative_rule_sources": {
+      "name": "normative_rule_sources",
+      "schema": "",
+      "columns": {
+        "rule_revision_id": {
+          "name": "rule_revision_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "source_id": {
+          "name": "source_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "normative_rule_sources_rule_revision_id_normative_rule_revisions_rule_revision_id_fk": {
+          "name": "normative_rule_sources_rule_revision_id_normative_rule_revisions_rule_revision_id_fk",
+          "tableFrom": "normative_rule_sources",
+          "tableTo": "normative_rule_revisions",
+          "columnsFrom": [
+            "rule_revision_id"
+          ],
+          "columnsTo": [
+            "rule_revision_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "normative_rule_sources_source_id_source_artifacts_source_id_fk": {
+          "name": "normative_rule_sources_source_id_source_artifacts_source_id_fk",
+          "tableFrom": "normative_rule_sources",
+          "tableTo": "source_artifacts",
+          "columnsFrom": [
+            "source_id"
+          ],
+          "columnsTo": [
+            "source_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "normative_rule_sources_rule_revision_id_source_id_pk": {
+          "name": "normative_rule_sources_rule_revision_id_source_id_pk",
+          "columns": [
+            "rule_revision_id",
+            "source_id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.outcome_edge_propositions": {
+      "name": "outcome_edge_propositions",
+      "schema": "",
+      "columns": {
+        "edge_id": {
+          "name": "edge_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "proposition_id": {
+          "name": "proposition_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "outcome_edge_propositions_edge_id_outcome_edges_edge_id_fk": {
+          "name": "outcome_edge_propositions_edge_id_outcome_edges_edge_id_fk",
+          "tableFrom": "outcome_edge_propositions",
+          "tableTo": "outcome_edges",
+          "columnsFrom": [
+            "edge_id"
+          ],
+          "columnsTo": [
+            "edge_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "outcome_edge_propositions_proposition_id_propositions_proposition_id_fk": {
+          "name": "outcome_edge_propositions_proposition_id_propositions_proposition_id_fk",
+          "tableFrom": "outcome_edge_propositions",
+          "tableTo": "propositions",
+          "columnsFrom": [
+            "proposition_id"
+          ],
+          "columnsTo": [
+            "proposition_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "outcome_edge_propositions_edge_id_proposition_id_pk": {
+          "name": "outcome_edge_propositions_edge_id_proposition_id_pk",
+          "columns": [
+            "edge_id",
+            "proposition_id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.outcome_model_content_metrics": {
+      "name": "outcome_model_content_metrics",
+      "schema": "",
+      "columns": {
+        "outcome_model_id": {
+          "name": "outcome_model_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "metric_revision_id": {
+          "name": "metric_revision_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "outcome_model_content_metrics_outcome_model_id_outcome_models_outcome_model_id_fk": {
+          "name": "outcome_model_content_metrics_outcome_model_id_outcome_models_outcome_model_id_fk",
+          "tableFrom": "outcome_model_content_metrics",
+          "tableTo": "outcome_models",
+          "columnsFrom": [
+            "outcome_model_id"
+          ],
+          "columnsTo": [
+            "outcome_model_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "outcome_model_content_metrics_metric_revision_id_metric_definition_revisions_metric_revision_id_fk": {
+          "name": "outcome_model_content_metrics_metric_revision_id_metric_definition_revisions_metric_revision_id_fk",
+          "tableFrom": "outcome_model_content_metrics",
+          "tableTo": "metric_definition_revisions",
+          "columnsFrom": [
+            "metric_revision_id"
+          ],
+          "columnsTo": [
+            "metric_revision_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "outcome_model_content_metrics_outcome_model_id_metric_revision_id_pk": {
+          "name": "outcome_model_content_metrics_outcome_model_id_metric_revision_id_pk",
+          "columns": [
+            "outcome_model_id",
+            "metric_revision_id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.outcome_model_diagnostic_metrics": {
+      "name": "outcome_model_diagnostic_metrics",
+      "schema": "",
+      "columns": {
+        "outcome_model_id": {
+          "name": "outcome_model_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "metric_revision_id": {
+          "name": "metric_revision_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "outcome_model_diagnostic_metrics_outcome_model_id_outcome_models_outcome_model_id_fk": {
+          "name": "outcome_model_diagnostic_metrics_outcome_model_id_outcome_models_outcome_model_id_fk",
+          "tableFrom": "outcome_model_diagnostic_metrics",
+          "tableTo": "outcome_models",
+          "columnsFrom": [
+            "outcome_model_id"
+          ],
+          "columnsTo": [
+            "outcome_model_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "outcome_model_diagnostic_metrics_metric_revision_id_metric_definition_revisions_metric_revision_id_fk": {
+          "name": "outcome_model_diagnostic_metrics_metric_revision_id_metric_definition_revisions_metric_revision_id_fk",
+          "tableFrom": "outcome_model_diagnostic_metrics",
+          "tableTo": "metric_definition_revisions",
+          "columnsFrom": [
+            "metric_revision_id"
+          ],
+          "columnsTo": [
+            "metric_revision_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "outcome_model_diagnostic_metrics_outcome_model_id_metric_revision_id_pk": {
+          "name": "outcome_model_diagnostic_metrics_outcome_model_id_metric_revision_id_pk",
+          "columns": [
+            "outcome_model_id",
+            "metric_revision_id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.outcome_model_edges": {
       "name": "outcome_model_edges",
       "schema": "",
@@ -10813,6 +11733,66 @@
           "columns": [
             "outcome_model_id",
             "edge_id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.outcome_model_guardrail_metrics": {
+      "name": "outcome_model_guardrail_metrics",
+      "schema": "",
+      "columns": {
+        "outcome_model_id": {
+          "name": "outcome_model_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "metric_revision_id": {
+          "name": "metric_revision_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "outcome_model_guardrail_metrics_outcome_model_id_outcome_models_outcome_model_id_fk": {
+          "name": "outcome_model_guardrail_metrics_outcome_model_id_outcome_models_outcome_model_id_fk",
+          "tableFrom": "outcome_model_guardrail_metrics",
+          "tableTo": "outcome_models",
+          "columnsFrom": [
+            "outcome_model_id"
+          ],
+          "columnsTo": [
+            "outcome_model_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "outcome_model_guardrail_metrics_metric_revision_id_metric_definition_revisions_metric_revision_id_fk": {
+          "name": "outcome_model_guardrail_metrics_metric_revision_id_metric_definition_revisions_metric_revision_id_fk",
+          "tableFrom": "outcome_model_guardrail_metrics",
+          "tableTo": "metric_definition_revisions",
+          "columnsFrom": [
+            "metric_revision_id"
+          ],
+          "columnsTo": [
+            "metric_revision_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "outcome_model_guardrail_metrics_outcome_model_id_metric_revision_id_pk": {
+          "name": "outcome_model_guardrail_metrics_outcome_model_id_metric_revision_id_pk",
+          "columns": [
+            "outcome_model_id",
+            "metric_revision_id"
           ]
         }
       },
@@ -11367,6 +12347,83 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.replayability_missing_refs": {
+      "name": "replayability_missing_refs",
+      "schema": "",
+      "columns": {
+        "decision_id": {
+          "name": "decision_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "ordinal": {
+          "name": "ordinal",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "ref_kind": {
+          "name": "ref_kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "entity_type": {
+          "name": "entity_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "entity_id": {
+          "name": "entity_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "stable_id": {
+          "name": "stable_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "revision_id": {
+          "name": "revision_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "replayability_missing_refs_decision_id_replayability_statuses_decision_id_fk": {
+          "name": "replayability_missing_refs_decision_id_replayability_statuses_decision_id_fk",
+          "tableFrom": "replayability_missing_refs",
+          "tableTo": "replayability_statuses",
+          "columnsFrom": [
+            "decision_id"
+          ],
+          "columnsTo": [
+            "decision_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "replayability_missing_refs_decision_id_ordinal_pk": {
+          "name": "replayability_missing_refs_decision_id_ordinal_pk",
+          "columns": [
+            "decision_id",
+            "ordinal"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.research_trace_evidence": {
       "name": "research_trace_evidence",
       "schema": "",
@@ -11419,6 +12476,288 @@
           "columns": [
             "research_trace_id",
             "evidence_id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.run_config_evaluator_revisions": {
+      "name": "run_config_evaluator_revisions",
+      "schema": "",
+      "columns": {
+        "run_config_id": {
+          "name": "run_config_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "revision_id": {
+          "name": "revision_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "run_config_evaluator_revisions_run_config_id_run_configs_run_config_id_fk": {
+          "name": "run_config_evaluator_revisions_run_config_id_run_configs_run_config_id_fk",
+          "tableFrom": "run_config_evaluator_revisions",
+          "tableTo": "run_configs",
+          "columnsFrom": [
+            "run_config_id"
+          ],
+          "columnsTo": [
+            "run_config_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "run_config_evaluator_revisions_run_config_id_revision_id_pk": {
+          "name": "run_config_evaluator_revisions_run_config_id_revision_id_pk",
+          "columns": [
+            "run_config_id",
+            "revision_id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.run_config_model_revisions": {
+      "name": "run_config_model_revisions",
+      "schema": "",
+      "columns": {
+        "run_config_id": {
+          "name": "run_config_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "revision_id": {
+          "name": "revision_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "run_config_model_revisions_run_config_id_run_configs_run_config_id_fk": {
+          "name": "run_config_model_revisions_run_config_id_run_configs_run_config_id_fk",
+          "tableFrom": "run_config_model_revisions",
+          "tableTo": "run_configs",
+          "columnsFrom": [
+            "run_config_id"
+          ],
+          "columnsTo": [
+            "run_config_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "run_config_model_revisions_run_config_id_revision_id_pk": {
+          "name": "run_config_model_revisions_run_config_id_revision_id_pk",
+          "columns": [
+            "run_config_id",
+            "revision_id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.run_config_prompt_revisions": {
+      "name": "run_config_prompt_revisions",
+      "schema": "",
+      "columns": {
+        "run_config_id": {
+          "name": "run_config_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "revision_id": {
+          "name": "revision_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "run_config_prompt_revisions_run_config_id_run_configs_run_config_id_fk": {
+          "name": "run_config_prompt_revisions_run_config_id_run_configs_run_config_id_fk",
+          "tableFrom": "run_config_prompt_revisions",
+          "tableTo": "run_configs",
+          "columnsFrom": [
+            "run_config_id"
+          ],
+          "columnsTo": [
+            "run_config_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "run_config_prompt_revisions_run_config_id_revision_id_pk": {
+          "name": "run_config_prompt_revisions_run_config_id_revision_id_pk",
+          "columns": [
+            "run_config_id",
+            "revision_id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.run_config_retriever_revisions": {
+      "name": "run_config_retriever_revisions",
+      "schema": "",
+      "columns": {
+        "run_config_id": {
+          "name": "run_config_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "revision_id": {
+          "name": "revision_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "run_config_retriever_revisions_run_config_id_run_configs_run_config_id_fk": {
+          "name": "run_config_retriever_revisions_run_config_id_run_configs_run_config_id_fk",
+          "tableFrom": "run_config_retriever_revisions",
+          "tableTo": "run_configs",
+          "columnsFrom": [
+            "run_config_id"
+          ],
+          "columnsTo": [
+            "run_config_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "run_config_retriever_revisions_run_config_id_revision_id_pk": {
+          "name": "run_config_retriever_revisions_run_config_id_revision_id_pk",
+          "columns": [
+            "run_config_id",
+            "revision_id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.run_config_schema_revisions": {
+      "name": "run_config_schema_revisions",
+      "schema": "",
+      "columns": {
+        "run_config_id": {
+          "name": "run_config_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "revision_id": {
+          "name": "revision_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "run_config_schema_revisions_run_config_id_run_configs_run_config_id_fk": {
+          "name": "run_config_schema_revisions_run_config_id_run_configs_run_config_id_fk",
+          "tableFrom": "run_config_schema_revisions",
+          "tableTo": "run_configs",
+          "columnsFrom": [
+            "run_config_id"
+          ],
+          "columnsTo": [
+            "run_config_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "run_config_schema_revisions_run_config_id_revision_id_pk": {
+          "name": "run_config_schema_revisions_run_config_id_revision_id_pk",
+          "columns": [
+            "run_config_id",
+            "revision_id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.run_config_tool_revisions": {
+      "name": "run_config_tool_revisions",
+      "schema": "",
+      "columns": {
+        "run_config_id": {
+          "name": "run_config_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "revision_id": {
+          "name": "revision_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "run_config_tool_revisions_run_config_id_run_configs_run_config_id_fk": {
+          "name": "run_config_tool_revisions_run_config_id_run_configs_run_config_id_fk",
+          "tableFrom": "run_config_tool_revisions",
+          "tableTo": "run_configs",
+          "columnsFrom": [
+            "run_config_id"
+          ],
+          "columnsTo": [
+            "run_config_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "run_config_tool_revisions_run_config_id_revision_id_pk": {
+          "name": "run_config_tool_revisions_run_config_id_revision_id_pk",
+          "columns": [
+            "run_config_id",
+            "revision_id"
           ]
         }
       },

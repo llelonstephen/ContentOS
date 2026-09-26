@@ -15,6 +15,7 @@
  *   - QualitativeEvaluation (§16)
  *   - RiskAssessment (§16)
  *   - UncertaintyAssessment (§16)
+ *   - RightsPolicy (§16)
  *   - RightsCheck (§16)
  */
 import {
@@ -24,12 +25,13 @@ import {
   boolean,
   integer,
   index,
+  check,
 } from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
 import {
   taskContractRevisions,
   runConfigs,
   evalContractRevisions,
-  rightsPolicyRevisions,
 } from './control-plane.js';
 import { propositions } from './epistemic.js';
 
@@ -64,6 +66,10 @@ export const audienceStates = pgTable(
   (table) => [
     index('idx_audience_state_tenant').on(table.tenant_id),
     index('idx_audience_state_task').on(table.task_revision_id),
+    check(
+      'ck_audience_state_stage',
+      sql`${table.state_stage} IN ('PROVISIONAL', 'REFINED', 'FINAL_FOR_DECISION')`,
+    ),
   ],
 );
 
@@ -76,13 +82,13 @@ export const applicabilityAssessments = pgTable(
     assessment_id: text('assessment_id').primaryKey(),
     tenant_id: text('tenant_id').notNull(),
     workspace_id: text('workspace_id'),
-    subject_type: text('subject_type').notNull(),
+    subject_type: text('subject_type').notNull(), // GUIDANCE | NORMATIVE_RULE
     subject_revision_id: text('subject_revision_id').notNull(),
     task_revision_id: text('task_revision_id')
       .notNull()
       .references(() => taskContractRevisions.task_revision_id),
-    assessment_stage: text('assessment_stage').notNull(),
-    result: text('result').notNull(),
+    assessment_stage: text('assessment_stage').notNull(), // PRE_GENERATION_PROVISIONAL | PRE_GENERATION_FINAL | CONTENT_LEVEL
+    result: text('result').notNull(), // APPLICABLE | PARTIALLY_APPLICABLE | NOT_APPLICABLE | UNCERTAIN
     applicability_strength: text('applicability_strength'),
     scope_matches: text('scope_matches').notNull(),
     reason_codes: text('reason_codes').notNull(),
@@ -97,6 +103,18 @@ export const applicabilityAssessments = pgTable(
   (table) => [
     index('idx_applicability_assessment_tenant').on(table.tenant_id),
     index('idx_applicability_assessment_task').on(table.task_revision_id),
+    check(
+      'ck_applicability_subject_type',
+      sql`${table.subject_type} IN ('GUIDANCE', 'NORMATIVE_RULE')`,
+    ),
+    check(
+      'ck_applicability_stage',
+      sql`${table.assessment_stage} IN ('PRE_GENERATION_PROVISIONAL', 'PRE_GENERATION_FINAL', 'CONTENT_LEVEL')`,
+    ),
+    check(
+      'ck_applicability_result',
+      sql`${table.result} IN ('APPLICABLE', 'PARTIALLY_APPLICABLE', 'NOT_APPLICABLE', 'UNCERTAIN')`,
+    ),
   ],
 );
 
@@ -151,9 +169,9 @@ export const contentArchitectures = pgTable(
     created_at: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
-    index('idx_content_architecture_tenant').on(table.tenant_id),
-    index('idx_content_architecture_task').on(table.task_revision_id),
-    index('idx_content_architecture_strategy').on(table.strategy_id),
+    index('idx_content_arch_tenant').on(table.tenant_id),
+    index('idx_content_arch_task').on(table.task_revision_id),
+    index('idx_content_arch_strategy').on(table.strategy_id),
   ],
 );
 
@@ -212,9 +230,7 @@ export const contentCandidates = pgTable(
   (table) => [
     index('idx_content_candidate_tenant').on(table.tenant_id),
     index('idx_content_candidate_task').on(table.task_revision_id),
-    index('idx_content_candidate_strategy').on(table.strategy_id),
-    index('idx_content_candidate_arch').on(table.architecture_id),
-    index('idx_content_candidate_run_config').on(table.run_config_id),
+    index('idx_content_candidate_run_cfg').on(table.run_config_id),
   ],
 );
 
@@ -227,8 +243,8 @@ export const contentAssertions = pgTable(
     assertion_id: text('assertion_id').primaryKey(),
     tenant_id: text('tenant_id').notNull(),
     workspace_id: text('workspace_id'),
-    artifact_entity_type: text('artifact_entity_type').notNull(),
-    artifact_entity_id: text('artifact_entity_id').notNull(),
+    artifact_ref_type: text('artifact_ref_type').notNull(),
+    artifact_ref_id: text('artifact_ref_id').notNull(),
     modality: text('modality').notNull(),
     explicitness: text('explicitness').notNull(),
     interpretation: text('interpretation').notNull(),
@@ -241,7 +257,7 @@ export const contentAssertions = pgTable(
   },
   (table) => [
     index('idx_content_assertion_tenant').on(table.tenant_id),
-    index('idx_content_assertion_artifact').on(table.artifact_entity_type, table.artifact_entity_id),
+    index('idx_content_assertion_artifact').on(table.artifact_ref_type, table.artifact_ref_id),
   ],
 );
 
@@ -266,8 +282,11 @@ export const assertionPropositionLinks = pgTable(
   },
   (table) => [
     index('idx_assertion_prop_link_tenant').on(table.tenant_id),
-    index('idx_assertion_prop_link_assertion').on(table.assertion_id),
-    index('idx_assertion_prop_link_prop').on(table.proposition_id),
+    index('idx_assertion_prop_link_pair').on(table.assertion_id, table.proposition_id),
+    check(
+      'ck_assertion_prop_relation',
+      sql`${table.relation} IN ('EQUIVALENT', 'NARROWER', 'BROADER', 'CONJUNCT', 'IMPLIES', 'CONTRADICTS')`,
+    ),
   ],
 );
 
@@ -286,14 +305,18 @@ export const assertionValidationResults = pgTable(
     status: text('status').notNull(),
     reason_codes: text('reason_codes').notNull(),
     required_qualification: text('required_qualification'),
-    evaluator_entity_type: text('evaluator_entity_type').notNull(),
-    evaluator_stable_id: text('evaluator_stable_id').notNull(),
-    evaluator_revision_id: text('evaluator_revision_id').notNull(),
+    evaluator_revision_ref_entity_type: text('evaluator_revision_ref_entity_type').notNull(),
+    evaluator_revision_ref_stable_id: text('evaluator_revision_ref_stable_id').notNull(),
+    evaluator_revision_ref_revision_id: text('evaluator_revision_ref_revision_id').notNull(),
     created_at: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
     index('idx_assertion_val_result_tenant').on(table.tenant_id),
     index('idx_assertion_val_result_assertion').on(table.assertion_id),
+    check(
+      'ck_assertion_validation_status',
+      sql`${table.status} IN ('SUPPORTED', 'SUPPORTED_WITH_QUALIFICATION', 'OVERCLAIM', 'UNSUPPORTED', 'CONTRADICTORY')`,
+    ),
   ],
 );
 
@@ -313,14 +336,18 @@ export const compositeImpressionAssessments = pgTable(
     misleading_risks: text('misleading_risks').notNull(),
     required_disclosures: text('required_disclosures').notNull(),
     status: text('status').notNull(),
-    evaluator_entity_type: text('evaluator_entity_type').notNull(),
-    evaluator_stable_id: text('evaluator_stable_id').notNull(),
-    evaluator_revision_id: text('evaluator_revision_id').notNull(),
+    evaluator_revision_ref_entity_type: text('evaluator_revision_ref_entity_type').notNull(),
+    evaluator_revision_ref_stable_id: text('evaluator_revision_ref_stable_id').notNull(),
+    evaluator_revision_ref_revision_id: text('evaluator_revision_ref_revision_id').notNull(),
     created_at: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
     index('idx_composite_assessment_tenant').on(table.tenant_id),
     index('idx_composite_assessment_candidate').on(table.candidate_id),
+    check(
+      'ck_composite_assessment_status',
+      sql`${table.status} IN ('STABLE', 'STABLE_WITH_REQUIREMENTS', 'INVALID', 'REVIEW_REQUIRED')`,
+    ),
   ],
 );
 
@@ -342,15 +369,15 @@ export const qualitativeEvaluations = pgTable(
     dimension_results: text('dimension_results').notNull(),
     hard_gate_results: text('hard_gate_results').notNull(),
     overall_state: text('overall_state'),
-    evaluator_entity_type: text('evaluator_entity_type').notNull(),
-    evaluator_stable_id: text('evaluator_stable_id').notNull(),
-    evaluator_revision_id: text('evaluator_revision_id').notNull(),
+    evaluator_revision_ref_entity_type: text('evaluator_revision_ref_entity_type').notNull(),
+    evaluator_revision_ref_stable_id: text('evaluator_revision_ref_stable_id').notNull(),
+    evaluator_revision_ref_revision_id: text('evaluator_revision_ref_revision_id').notNull(),
     created_at: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
-    index('idx_qual_evaluation_tenant').on(table.tenant_id),
-    index('idx_qual_evaluation_candidate').on(table.candidate_id),
-    index('idx_qual_evaluation_contract').on(table.eval_contract_revision_id),
+    index('idx_qual_eval_tenant').on(table.tenant_id),
+    index('idx_qual_eval_candidate').on(table.candidate_id),
+    index('idx_qual_eval_contract').on(table.eval_contract_revision_id),
   ],
 );
 
@@ -399,6 +426,39 @@ export const uncertaintyAssessments = pgTable(
 );
 
 /**
+ * RightsPolicy (SPEC02 §16)
+ * Immutable rights policy entity.
+ */
+export const rightsPolicies = pgTable(
+  'rights_policies',
+  {
+    rights_policy_id: text('rights_policy_id').primaryKey(),
+    tenant_id: text('tenant_id').notNull(),
+    workspace_id: text('workspace_id'),
+    copyright_status: text('copyright_status').notNull(),
+    license: text('license').notNull(),
+    analysis_use: boolean('analysis_use').notNull(),
+    generation_use: boolean('generation_use').notNull(),
+    quotation_use: boolean('quotation_use').notNull(),
+    transformation_permission: boolean('transformation_permission').notNull(),
+    redistribution_permission: boolean('redistribution_permission').notNull(),
+    commercial_use_permission: boolean('commercial_use_permission').notNull(),
+    attribution_requirements: text('attribution_requirements').notNull(),
+    effective_from: timestamp('effective_from', { withTimezone: true }).notNull(),
+    scheduled_expiration: timestamp('scheduled_expiration', { withTimezone: true }),
+    supersedes_rights_policy_id: text('supersedes_rights_policy_id'),
+    created_at: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index('idx_rights_policy_tenant').on(table.tenant_id),
+    check(
+      'ck_rights_policy_expiration',
+      sql`${table.scheduled_expiration} IS NULL OR ${table.scheduled_expiration} > ${table.effective_from}`,
+    ),
+  ],
+);
+
+/**
  * RightsCheck (SPEC02 §16)
  */
 export const rightsChecks = pgTable(
@@ -411,7 +471,7 @@ export const rightsChecks = pgTable(
     subject_entity_id: text('subject_entity_id').notNull(),
     rights_policy_id: text('rights_policy_id')
       .notNull()
-      .references(() => rightsPolicyRevisions.policy_revision_id),
+      .references(() => rightsPolicies.rights_policy_id),
     intended_use: text('intended_use').notNull(),
     status: text('status').notNull(),
     required_attributions: text('required_attributions').notNull(),
@@ -424,5 +484,9 @@ export const rightsChecks = pgTable(
     index('idx_rights_check_tenant').on(table.tenant_id),
     index('idx_rights_check_subject').on(table.subject_entity_type, table.subject_entity_id),
     index('idx_rights_check_policy').on(table.rights_policy_id),
+    check(
+      'ck_rights_check_status',
+      sql`${table.status} IN ('ALLOWED', 'ALLOWED_WITH_REQUIREMENTS', 'REVIEW_REQUIRED', 'BLOCKED')`,
+    ),
   ],
 );

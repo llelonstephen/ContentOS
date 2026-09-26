@@ -6,6 +6,7 @@
  *   - RevisionRegistry (§6)
  *   - CanonicalObjectReferenceSource (§19, §30)
  *   - ObjectRegistry (§19, §30)
+ *   - Tenant integrity composite keys (§4, §32)
  */
 import {
   pgTable,
@@ -15,8 +16,11 @@ import {
   integer,
   primaryKey,
   uniqueIndex,
+  unique,
   foreignKey,
+  check,
 } from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
 
 /**
  * ImmutableEntityRegistry (SPEC02 §5)
@@ -37,6 +41,11 @@ export const immutableEntityRegistry = pgTable(
   },
   (table) => [
     primaryKey({ columns: [table.entity_type, table.entity_id] }),
+    unique('uq_imm_entity_tenant_triple').on(table.tenant_id, table.entity_type, table.entity_id),
+    check(
+      'ck_imm_payload_state',
+      sql`${table.payload_state} IN ('AVAILABLE', 'REDACTED', 'DELETED')`,
+    ),
   ],
 );
 
@@ -60,10 +69,20 @@ export const revisionRegistry = pgTable(
   },
   (table) => [
     primaryKey({ columns: [table.entity_type, table.revision_id] }),
-    uniqueIndex('uq_revision_registry_triple').on(
+    unique('uq_revision_registry_triple').on(
       table.entity_type,
       table.stable_id,
       table.revision_id,
+    ),
+    unique('uq_revision_registry_tenant_triple').on(
+      table.tenant_id,
+      table.entity_type,
+      table.stable_id,
+      table.revision_id,
+    ),
+    check(
+      'ck_rev_payload_state',
+      sql`${table.payload_state} IN ('AVAILABLE', 'REDACTED', 'DELETED')`,
     ),
   ],
 );
@@ -116,6 +135,11 @@ export const objectRegistry = pgTable(
   (table) => [
     uniqueIndex('uq_object_registry_tenant_hash').on(table.tenant_id, table.content_hash),
     uniqueIndex('uq_object_registry_tenant_key').on(table.tenant_id, table.object_key),
+    unique('uq_object_registry_tenant_id').on(table.tenant_id, table.object_id),
+    check(
+      'ck_object_registry_state',
+      sql`${table.state} IN ('AVAILABLE', 'GC_CLAIMED', 'DELETED')`,
+    ),
   ],
 );
 

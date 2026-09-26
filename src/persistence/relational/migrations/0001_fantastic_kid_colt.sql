@@ -15,7 +15,9 @@ CREATE TABLE "immutable_entity_registry" (
 	"payload_state" text DEFAULT 'AVAILABLE' NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"deleted_at" timestamp with time zone,
-	CONSTRAINT "immutable_entity_registry_entity_type_entity_id_pk" PRIMARY KEY("entity_type","entity_id")
+	CONSTRAINT "immutable_entity_registry_entity_type_entity_id_pk" PRIMARY KEY("entity_type","entity_id"),
+	CONSTRAINT "uq_imm_entity_tenant_triple" UNIQUE("tenant_id","entity_type","entity_id"),
+	CONSTRAINT "ck_imm_payload_state" CHECK ("immutable_entity_registry"."payload_state" IN ('AVAILABLE', 'REDACTED', 'DELETED'))
 );
 --> statement-breakpoint
 CREATE TABLE "object_references" (
@@ -39,7 +41,9 @@ CREATE TABLE "object_registry" (
 	"gc_claim_token" text,
 	"gc_claimed_at" timestamp with time zone,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"deleted_at" timestamp with time zone
+	"deleted_at" timestamp with time zone,
+	CONSTRAINT "uq_object_registry_tenant_id" UNIQUE("tenant_id","object_id"),
+	CONSTRAINT "ck_object_registry_state" CHECK ("object_registry"."state" IN ('AVAILABLE', 'GC_CLAIMED', 'DELETED'))
 );
 --> statement-breakpoint
 CREATE TABLE "revision_registry" (
@@ -51,7 +55,10 @@ CREATE TABLE "revision_registry" (
 	"payload_state" text DEFAULT 'AVAILABLE' NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"deleted_at" timestamp with time zone,
-	CONSTRAINT "revision_registry_entity_type_revision_id_pk" PRIMARY KEY("entity_type","revision_id")
+	CONSTRAINT "revision_registry_entity_type_revision_id_pk" PRIMARY KEY("entity_type","revision_id"),
+	CONSTRAINT "uq_revision_registry_triple" UNIQUE("entity_type","stable_id","revision_id"),
+	CONSTRAINT "uq_revision_registry_tenant_triple" UNIQUE("tenant_id","entity_type","stable_id","revision_id"),
+	CONSTRAINT "ck_rev_payload_state" CHECK ("revision_registry"."payload_state" IN ('AVAILABLE', 'REDACTED', 'DELETED'))
 );
 --> statement-breakpoint
 CREATE TABLE "attribution_model_revisions" (
@@ -64,6 +71,21 @@ CREATE TABLE "attribution_model_revisions" (
 	"credit_assignment" text NOT NULL,
 	"assumptions" text NOT NULL,
 	"limitations" text NOT NULL,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"tenant_id" text NOT NULL,
+	"workspace_id" text
+);
+--> statement-breakpoint
+CREATE TABLE "channel_profile_revisions" (
+	"channel_profile_id" text NOT NULL,
+	"channel_profile_revision_id" text PRIMARY KEY NOT NULL,
+	"supersedes_channel_profile_revision_id" text,
+	"identity" text NOT NULL,
+	"platform_if_applicable" text,
+	"supported_formats" text NOT NULL,
+	"distribution_capabilities" text NOT NULL,
+	"technical_capabilities" text NOT NULL,
+	"content_capabilities" text NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"tenant_id" text NOT NULL,
 	"workspace_id" text
@@ -86,7 +108,8 @@ CREATE TABLE "content_program_revisions" (
 	"scheduled_expiration" timestamp with time zone,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"tenant_id" text NOT NULL,
-	"workspace_id" text
+	"workspace_id" text,
+	CONSTRAINT "ck_content_program_expiration" CHECK ("content_program_revisions"."scheduled_expiration" IS NULL OR "content_program_revisions"."scheduled_expiration" > "content_program_revisions"."effective_from")
 );
 --> statement-breakpoint
 CREATE TABLE "control_plane_activations" (
@@ -97,7 +120,8 @@ CREATE TABLE "control_plane_activations" (
 	"active_revision_id" text NOT NULL,
 	"effective_from" timestamp with time zone NOT NULL,
 	"effective_until" timestamp with time zone,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "ck_activation_effective_range" CHECK ("control_plane_activations"."effective_until" IS NULL OR "control_plane_activations"."effective_until" > "control_plane_activations"."effective_from")
 );
 --> statement-breakpoint
 CREATE TABLE "decision_policy_revisions" (
@@ -121,23 +145,11 @@ CREATE TABLE "eval_contract_revisions" (
 	"eval_contract_id" text NOT NULL,
 	"eval_contract_revision_id" text PRIMARY KEY NOT NULL,
 	"supersedes_eval_contract_revision_id" text,
-	"contract_name" text NOT NULL,
-	"target_artifact_type" text NOT NULL,
-	"rubric_definition" text NOT NULL,
-	"thresholds" text NOT NULL,
-	"effective_from" timestamp with time zone NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"tenant_id" text NOT NULL,
-	"workspace_id" text
-);
---> statement-breakpoint
-CREATE TABLE "execution_plan_revisions" (
-	"execution_plan_id" text NOT NULL,
-	"execution_plan_revision_id" text PRIMARY KEY NOT NULL,
-	"supersedes_plan_revision_id" text,
-	"task_revision_id" text NOT NULL,
-	"plan_definition" text NOT NULL,
-	"effective_from" timestamp with time zone NOT NULL,
+	"component" text NOT NULL,
+	"capability" text NOT NULL,
+	"required_dimensions" text NOT NULL,
+	"hard_gates" text NOT NULL,
+	"release_impact" text NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"tenant_id" text NOT NULL,
 	"workspace_id" text
@@ -147,12 +159,16 @@ CREATE TABLE "guidance_revisions" (
 	"guidance_id" text NOT NULL,
 	"guidance_revision_id" text PRIMARY KEY NOT NULL,
 	"supersedes_guidance_revision_id" text,
-	"title" text NOT NULL,
-	"body" text NOT NULL,
+	"guidance_type" text NOT NULL,
+	"recommendation" text NOT NULL,
+	"scope" text NOT NULL,
+	"limitations" text NOT NULL,
 	"effective_from" timestamp with time zone NOT NULL,
+	"scheduled_expiration" timestamp with time zone,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"tenant_id" text NOT NULL,
-	"workspace_id" text
+	"workspace_id" text,
+	CONSTRAINT "ck_guidance_expiration" CHECK ("guidance_revisions"."scheduled_expiration" IS NULL OR "guidance_revisions"."scheduled_expiration" > "guidance_revisions"."effective_from")
 );
 --> statement-breakpoint
 CREATE TABLE "metric_definition_revisions" (
@@ -170,7 +186,8 @@ CREATE TABLE "metric_definition_revisions" (
 	"scheduled_expiration" timestamp with time zone,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"tenant_id" text NOT NULL,
-	"workspace_id" text
+	"workspace_id" text,
+	CONSTRAINT "ck_metric_definition_expiration" CHECK ("metric_definition_revisions"."scheduled_expiration" IS NULL OR "metric_definition_revisions"."scheduled_expiration" > "metric_definition_revisions"."effective_from")
 );
 --> statement-breakpoint
 CREATE TABLE "normative_rule_revisions" (
@@ -178,11 +195,18 @@ CREATE TABLE "normative_rule_revisions" (
 	"rule_revision_id" text PRIMARY KEY NOT NULL,
 	"supersedes_rule_revision_id" text,
 	"rule_type" text NOT NULL,
-	"rule_definition" text NOT NULL,
-	"effective_from" timestamp with time zone NOT NULL,
+	"statement" text NOT NULL,
+	"jurisdiction" text NOT NULL,
+	"scope" text NOT NULL,
+	"applicability_conditions" text NOT NULL,
+	"enforcement_level" text NOT NULL,
+	"valid_from" timestamp with time zone NOT NULL,
+	"known_from" timestamp with time zone NOT NULL,
+	"scheduled_expiration" timestamp with time zone,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"tenant_id" text NOT NULL,
-	"workspace_id" text
+	"workspace_id" text,
+	CONSTRAINT "ck_normative_rule_expiration" CHECK ("normative_rule_revisions"."scheduled_expiration" IS NULL OR "normative_rule_revisions"."scheduled_expiration" > "normative_rule_revisions"."valid_from")
 );
 --> statement-breakpoint
 CREATE TABLE "outcome_edges" (
@@ -225,35 +249,18 @@ CREATE TABLE "registered_control_plane_revisions" (
 	"entity_type" text NOT NULL,
 	"stable_id" text NOT NULL,
 	"revision_id" text NOT NULL,
+	"supersedes_revision_id" text,
+	"payload_hash" text NOT NULL,
+	"payload_schema_revision_id" text NOT NULL,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"tenant_id" text NOT NULL,
 	"workspace_id" text,
-	"supersedes_revision_id" text,
-	"description" text NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "registered_control_plane_revisions_entity_type_revision_id_pk" PRIMARY KEY("entity_type","revision_id")
-);
---> statement-breakpoint
-CREATE TABLE "rights_policy_revisions" (
-	"policy_id" text NOT NULL,
-	"policy_revision_id" text PRIMARY KEY NOT NULL,
-	"supersedes_policy_revision_id" text,
-	"policy_type" text NOT NULL,
-	"policy_definition" text NOT NULL,
-	"effective_from" timestamp with time zone NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"tenant_id" text NOT NULL,
-	"workspace_id" text
+	CONSTRAINT "registered_control_plane_revisions_entity_type_revision_id_pk" PRIMARY KEY("entity_type","revision_id"),
+	CONSTRAINT "ck_cplane_entity_type" CHECK ("registered_control_plane_revisions"."entity_type" IN ('PromptConfig', 'ModelConfig', 'ToolConfig', 'RetrieverConfig', 'EvaluatorConfig', 'SchemaDefinition'))
 );
 --> statement-breakpoint
 CREATE TABLE "run_configs" (
 	"run_config_id" text PRIMARY KEY NOT NULL,
-	"task_revision_id" text NOT NULL,
-	"eval_contract_revision_id" text NOT NULL,
-	"prompt_config_revision_id" text NOT NULL,
-	"model_config_revision_id" text NOT NULL,
-	"retriever_config_revision_id" text NOT NULL,
-	"tool_config_revision_id" text NOT NULL,
-	"evaluator_config_revision_id" text NOT NULL,
 	"runtime_parameters" text NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"tenant_id" text NOT NULL,
@@ -264,16 +271,26 @@ CREATE TABLE "task_contract_revisions" (
 	"task_id" text NOT NULL,
 	"task_revision_id" text PRIMARY KEY NOT NULL,
 	"supersedes_task_revision_id" text,
-	"program_revision_id" text NOT NULL,
-	"task_name" text NOT NULL,
-	"primary_metric_revision_id" text NOT NULL,
-	"target_audience" text NOT NULL,
+	"program_revision_id" text,
+	"standalone_task" boolean NOT NULL,
+	"objective" text NOT NULL,
 	"channel" text NOT NULL,
-	"content_format" text NOT NULL,
-	"effective_from" timestamp with time zone NOT NULL,
+	"format" text NOT NULL,
+	"language" text NOT NULL,
+	"market" text NOT NULL,
+	"jurisdiction" text NOT NULL,
+	"brand_id" text NOT NULL,
+	"product_id" text NOT NULL,
+	"audience_context" text NOT NULL,
+	"success_metric_revision_id" text NOT NULL,
+	"constraints" text NOT NULL,
+	"risk_context" text NOT NULL,
+	"compute_budget" text NOT NULL,
+	"intended_publication_time" timestamp with time zone,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"tenant_id" text NOT NULL,
-	"workspace_id" text
+	"workspace_id" text,
+	CONSTRAINT "ck_task_contract_standalone_program" CHECK (("task_contract_revisions"."standalone_task" = TRUE AND "task_contract_revisions"."program_revision_id" IS NULL) OR ("task_contract_revisions"."standalone_task" = FALSE AND "task_contract_revisions"."program_revision_id" IS NOT NULL))
 );
 --> statement-breakpoint
 CREATE TABLE "epistemic_state_versions" (
@@ -317,7 +334,9 @@ CREATE TABLE "evidence_assessments" (
 	"limitations" text NOT NULL,
 	"uncertainty" text NOT NULL,
 	"assessed_at" timestamp with time zone NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "ck_evidence_compat_status" CHECK ("evidence_assessments"."compatibility_status" IN ('COMPATIBLE', 'COMPATIBLE_WITH_LIMITS', 'INCOMPATIBLE', 'UNCERTAIN')),
+	CONSTRAINT "ck_evidence_relationship" CHECK ("evidence_assessments"."relationship" IN ('SUPPORTS', 'PARTIALLY_SUPPORTS', 'QUALIFIES', 'CONTRADICTS', 'DOES_NOT_ADDRESS'))
 );
 --> statement-breakpoint
 CREATE TABLE "evidence_items" (
@@ -337,7 +356,9 @@ CREATE TABLE "evidence_items" (
 	"valid_from" timestamp with time zone NOT NULL,
 	"valid_until_if_known" timestamp with time zone,
 	"limitations" text NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "ck_evidence_item_origin_type" CHECK ("evidence_items"."origin_type" IN ('SOURCE_ARTIFACT', 'PERFORMANCE_OBSERVATION')),
+	CONSTRAINT "ck_evidence_item_domain" CHECK ("evidence_items"."evidence_domain" IN ('PRODUCT_DOCUMENTATION', 'FIRST_PARTY_OBSERVATION', 'CUSTOMER_REPORT', 'EXPERT_SOURCE', 'ACADEMIC_STUDY', 'REGULATORY_SOURCE', 'PLATFORM_POLICY', 'PLATFORM_ANALYTICS', 'OBSERVATIONAL_PERFORMANCE', 'RANDOMIZED_EXPERIMENT', 'QUASI_EXPERIMENT', 'MARKET_DATA'))
 );
 --> statement-breakpoint
 CREATE TABLE "evidence_proposition_links" (
@@ -363,7 +384,8 @@ CREATE TABLE "knowledge_gaps" (
 	"assumption_allowed" boolean NOT NULL,
 	"risk_if_wrong" text NOT NULL,
 	"status" text NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "ck_knowledge_gap_status" CHECK ("knowledge_gaps"."status" IN ('OPEN', 'RESOLVED_BY_RESEARCH', 'RESOLVED_BY_USER', 'EXPLICIT_ASSUMPTION', 'UNRESOLVED_NON_BLOCKING', 'BLOCKING'))
 );
 --> statement-breakpoint
 CREATE TABLE "propositions" (
@@ -380,7 +402,8 @@ CREATE TABLE "propositions" (
 	"population_scope" text NOT NULL,
 	"jurisdiction_scope" text NOT NULL,
 	"supersedes_proposition_id" text,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "ck_proposition_type" CHECK ("propositions"."proposition_type" IN ('FACTUAL', 'CAUSAL', 'PREDICTIVE', 'STRATEGIC', 'PERFORMANCE', 'AUDIENCE', 'MEASUREMENT', 'DEFINITIONAL'))
 );
 --> statement-breakpoint
 CREATE TABLE "research_traces" (
@@ -398,7 +421,8 @@ CREATE TABLE "research_traces" (
 	"outcome" text NOT NULL,
 	"stop_reason" text NOT NULL,
 	"started_at" timestamp with time zone NOT NULL,
-	"completed_at" timestamp with time zone NOT NULL
+	"completed_at" timestamp with time zone NOT NULL,
+	CONSTRAINT "ck_research_trace_outcome" CHECK ("research_traces"."outcome" IN ('FOUND_RELEVANT_EVIDENCE', 'NO_EVIDENCE_FOUND', 'SEARCH_INCOMPLETE', 'SEARCH_FAILED'))
 );
 --> statement-breakpoint
 CREATE TABLE "source_artifacts" (
@@ -415,7 +439,8 @@ CREATE TABLE "source_artifacts" (
 	"snapshot_reference" text NOT NULL,
 	"rights_policy_id" text NOT NULL,
 	"data_scope" text NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "ck_source_artifact_data_scope" CHECK ("source_artifacts"."data_scope" IN ('TENANT_PRIVATE', 'WORKSPACE_SHARED', 'AUTHORIZED_AGGREGATE', 'GLOBAL_PUBLIC'))
 );
 --> statement-breakpoint
 CREATE TABLE "applicability_assessments" (
@@ -436,7 +461,10 @@ CREATE TABLE "applicability_assessments" (
 	"dependency_fingerprint" text NOT NULL,
 	"target_valid_time" timestamp with time zone NOT NULL,
 	"knowledge_cutoff_time" timestamp with time zone NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "ck_applicability_subject_type" CHECK ("applicability_assessments"."subject_type" IN ('GUIDANCE', 'NORMATIVE_RULE')),
+	CONSTRAINT "ck_applicability_stage" CHECK ("applicability_assessments"."assessment_stage" IN ('PRE_GENERATION_PROVISIONAL', 'PRE_GENERATION_FINAL', 'CONTENT_LEVEL')),
+	CONSTRAINT "ck_applicability_result" CHECK ("applicability_assessments"."result" IN ('APPLICABLE', 'PARTIALLY_APPLICABLE', 'NOT_APPLICABLE', 'UNCERTAIN'))
 );
 --> statement-breakpoint
 CREATE TABLE "assertion_proposition_links" (
@@ -447,7 +475,8 @@ CREATE TABLE "assertion_proposition_links" (
 	"proposition_id" text NOT NULL,
 	"relation" text NOT NULL,
 	"mapping_uncertainty" text NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "ck_assertion_prop_relation" CHECK ("assertion_proposition_links"."relation" IN ('EQUIVALENT', 'NARROWER', 'BROADER', 'CONJUNCT', 'IMPLIES', 'CONTRADICTS'))
 );
 --> statement-breakpoint
 CREATE TABLE "assertion_validation_results" (
@@ -458,10 +487,11 @@ CREATE TABLE "assertion_validation_results" (
 	"status" text NOT NULL,
 	"reason_codes" text NOT NULL,
 	"required_qualification" text,
-	"evaluator_entity_type" text NOT NULL,
-	"evaluator_stable_id" text NOT NULL,
-	"evaluator_revision_id" text NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+	"evaluator_revision_ref_entity_type" text NOT NULL,
+	"evaluator_revision_ref_stable_id" text NOT NULL,
+	"evaluator_revision_ref_revision_id" text NOT NULL,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "ck_assertion_validation_status" CHECK ("assertion_validation_results"."status" IN ('SUPPORTED', 'SUPPORTED_WITH_QUALIFICATION', 'OVERCLAIM', 'UNSUPPORTED', 'CONTRADICTORY'))
 );
 --> statement-breakpoint
 CREATE TABLE "audience_states" (
@@ -483,7 +513,8 @@ CREATE TABLE "audience_states" (
 	"prior_exposure" text NOT NULL,
 	"origin" text NOT NULL,
 	"uncertainty" text NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "ck_audience_state_stage" CHECK ("audience_states"."state_stage" IN ('PROVISIONAL', 'REFINED', 'FINAL_FOR_DECISION'))
 );
 --> statement-breakpoint
 CREATE TABLE "composite_impression_assessments" (
@@ -495,10 +526,11 @@ CREATE TABLE "composite_impression_assessments" (
 	"misleading_risks" text NOT NULL,
 	"required_disclosures" text NOT NULL,
 	"status" text NOT NULL,
-	"evaluator_entity_type" text NOT NULL,
-	"evaluator_stable_id" text NOT NULL,
-	"evaluator_revision_id" text NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+	"evaluator_revision_ref_entity_type" text NOT NULL,
+	"evaluator_revision_ref_stable_id" text NOT NULL,
+	"evaluator_revision_ref_revision_id" text NOT NULL,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "ck_composite_assessment_status" CHECK ("composite_impression_assessments"."status" IN ('STABLE', 'STABLE_WITH_REQUIREMENTS', 'INVALID', 'REVIEW_REQUIRED'))
 );
 --> statement-breakpoint
 CREATE TABLE "content_architectures" (
@@ -515,8 +547,8 @@ CREATE TABLE "content_assertions" (
 	"assertion_id" text PRIMARY KEY NOT NULL,
 	"tenant_id" text NOT NULL,
 	"workspace_id" text,
-	"artifact_entity_type" text NOT NULL,
-	"artifact_entity_id" text NOT NULL,
+	"artifact_ref_type" text NOT NULL,
+	"artifact_ref_id" text NOT NULL,
 	"modality" text NOT NULL,
 	"explicitness" text NOT NULL,
 	"interpretation" text NOT NULL,
@@ -568,9 +600,9 @@ CREATE TABLE "qualitative_evaluations" (
 	"dimension_results" text NOT NULL,
 	"hard_gate_results" text NOT NULL,
 	"overall_state" text,
-	"evaluator_entity_type" text NOT NULL,
-	"evaluator_stable_id" text NOT NULL,
-	"evaluator_revision_id" text NOT NULL,
+	"evaluator_revision_ref_entity_type" text NOT NULL,
+	"evaluator_revision_ref_stable_id" text NOT NULL,
+	"evaluator_revision_ref_revision_id" text NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
@@ -587,7 +619,28 @@ CREATE TABLE "rights_checks" (
 	"reason_codes" text NOT NULL,
 	"target_use_time" text NOT NULL,
 	"knowledge_cutoff_time" timestamp with time zone NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "ck_rights_check_status" CHECK ("rights_checks"."status" IN ('ALLOWED', 'ALLOWED_WITH_REQUIREMENTS', 'REVIEW_REQUIRED', 'BLOCKED'))
+);
+--> statement-breakpoint
+CREATE TABLE "rights_policies" (
+	"rights_policy_id" text PRIMARY KEY NOT NULL,
+	"tenant_id" text NOT NULL,
+	"workspace_id" text,
+	"copyright_status" text NOT NULL,
+	"license" text NOT NULL,
+	"analysis_use" boolean NOT NULL,
+	"generation_use" boolean NOT NULL,
+	"quotation_use" boolean NOT NULL,
+	"transformation_permission" boolean NOT NULL,
+	"redistribution_permission" boolean NOT NULL,
+	"commercial_use_permission" boolean NOT NULL,
+	"attribution_requirements" text NOT NULL,
+	"effective_from" timestamp with time zone NOT NULL,
+	"scheduled_expiration" timestamp with time zone,
+	"supersedes_rights_policy_id" text,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "ck_rights_policy_expiration" CHECK ("rights_policies"."scheduled_expiration" IS NULL OR "rights_policies"."scheduled_expiration" > "rights_policies"."effective_from")
 );
 --> statement-breakpoint
 CREATE TABLE "risk_assessments" (
@@ -654,7 +707,8 @@ CREATE TABLE "decision_records" (
 	"selected_candidate_id" text,
 	"release_status" text NOT NULL,
 	"human_review_id" text,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "ck_decision_record_release_status" CHECK ("decision_records"."release_status" IN ('READY', 'READY_WITH_WARNINGS', 'HUMAN_REVIEW_REQUIRED', 'BLOCKED'))
 );
 --> statement-breakpoint
 CREATE TABLE "decision_snapshots" (
@@ -668,7 +722,8 @@ CREATE TABLE "decision_snapshots" (
 	"task_revision_id" text NOT NULL,
 	"audience_state_id" text NOT NULL,
 	"uncertainty_assessment_id" text,
-	"frozen_at" timestamp with time zone NOT NULL
+	"frozen_at" timestamp with time zone NOT NULL,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
 CREATE TABLE "final_content_packages" (
@@ -706,7 +761,8 @@ CREATE TABLE "human_review_records" (
 	"review_scope" text NOT NULL,
 	"review_decision" text NOT NULL,
 	"reason_codes" text NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "ck_human_review_mode" CHECK ("human_review_records"."review_mode" IN ('ADJUDICATION_ONLY', 'NEW_INFORMATION_INTRODUCED'))
 );
 --> statement-breakpoint
 CREATE TABLE "knowledge_manifests" (
@@ -726,7 +782,8 @@ CREATE TABLE "policy_conflict_resolutions" (
 	"resolution_type" text NOT NULL,
 	"override_id" text,
 	"reason_codes" text NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "ck_policy_conflict_resolution_type" CHECK ("policy_conflict_resolutions"."resolution_type" IN ('HARD_DENY_OVERRIDES', 'HARD_REQUIREMENT_OVERRIDES', 'MORE_SPECIFIC_SCOPE', 'EXPLICIT_PRIORITY', 'AUTHORIZED_OVERRIDE', 'ESCALATE'))
 );
 --> statement-breakpoint
 CREATE TABLE "policy_overrides" (
@@ -814,7 +871,9 @@ CREATE TABLE "performance_observations" (
 	"source_reference" text NOT NULL,
 	"supersedes_observation_id" text,
 	"observed_at" timestamp with time zone NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "ck_perf_observation_pub_state" CHECK ("performance_observations"."publication_state" IN ('SINGLE_ARTIFACT', 'MIXED_PUBLICATION_STATE', 'UNRESOLVED_PUBLICATION_STATE')),
+	CONSTRAINT "ck_perf_observation_window" CHECK ("performance_observations"."measurement_window_end" > "performance_observations"."measurement_window_start")
 );
 --> statement-breakpoint
 CREATE TABLE "publication_lineages" (
@@ -840,7 +899,8 @@ CREATE TABLE "published_artifacts" (
 	"effective_from" timestamp with time zone NOT NULL,
 	"supersedes_published_artifact_id" text,
 	"platform_metadata" text NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "ck_published_artifact_origin" CHECK ("published_artifacts"."origin" IN ('CONTENTOS_EXECUTION', 'MANUAL_EXTERNAL'))
 );
 --> statement-breakpoint
 CREATE TABLE "replayability_statuses" (
@@ -849,7 +909,8 @@ CREATE TABLE "replayability_statuses" (
 	"workspace_id" text,
 	"status" text NOT NULL,
 	"reason_codes" text NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "ck_replayability_status_value" CHECK ("replayability_statuses"."status" IN ('FULL', 'PARTIAL_REDACTED', 'UNAVAILABLE_DUE_TO_RETENTION', 'INVALIDATED_BY_DELETION'))
 );
 --> statement-breakpoint
 CREATE TABLE "audit_events" (
@@ -942,6 +1003,30 @@ CREATE TABLE "assertion_validation_links" (
 	"result_id" text NOT NULL,
 	"link_id" text NOT NULL,
 	CONSTRAINT "assertion_validation_links_result_id_link_id_pk" PRIMARY KEY("result_id","link_id")
+);
+--> statement-breakpoint
+CREATE TABLE "baseline_channel_profiles" (
+	"baseline_snapshot_id" text NOT NULL,
+	"channel_profile_revision_id" text NOT NULL,
+	CONSTRAINT "baseline_channel_profiles_baseline_snapshot_id_channel_profile_revision_id_pk" PRIMARY KEY("baseline_snapshot_id","channel_profile_revision_id")
+);
+--> statement-breakpoint
+CREATE TABLE "channel_profile_guidance_revisions" (
+	"channel_profile_revision_id" text NOT NULL,
+	"guidance_revision_id" text NOT NULL,
+	CONSTRAINT "pk_channel_profile_guidance_revisions" PRIMARY KEY("channel_profile_revision_id","guidance_revision_id")
+);
+--> statement-breakpoint
+CREATE TABLE "channel_profile_metric_revisions" (
+	"channel_profile_revision_id" text NOT NULL,
+	"metric_revision_id" text NOT NULL,
+	CONSTRAINT "channel_profile_metric_revisions_channel_profile_revision_id_metric_revision_id_pk" PRIMARY KEY("channel_profile_revision_id","metric_revision_id")
+);
+--> statement-breakpoint
+CREATE TABLE "channel_profile_rule_revisions" (
+	"channel_profile_revision_id" text NOT NULL,
+	"rule_revision_id" text NOT NULL,
+	CONSTRAINT "channel_profile_rule_revisions_channel_profile_revision_id_rule_revision_id_pk" PRIMARY KEY("channel_profile_revision_id","rule_revision_id")
 );
 --> statement-breakpoint
 CREATE TABLE "composite_implied_assertions" (
@@ -1096,14 +1181,20 @@ CREATE TABLE "governance_snapshot_policies" (
 --> statement-breakpoint
 CREATE TABLE "governance_snapshot_rights" (
 	"governance_snapshot_id" text NOT NULL,
-	"rights_policy_revision_id" text NOT NULL,
-	CONSTRAINT "governance_snapshot_rights_governance_snapshot_id_rights_policy_revision_id_pk" PRIMARY KEY("governance_snapshot_id","rights_policy_revision_id")
+	"rights_policy_id" text NOT NULL,
+	CONSTRAINT "governance_snapshot_rights_governance_snapshot_id_rights_policy_id_pk" PRIMARY KEY("governance_snapshot_id","rights_policy_id")
 );
 --> statement-breakpoint
 CREATE TABLE "governance_snapshot_rules" (
 	"governance_snapshot_id" text NOT NULL,
 	"rule_revision_id" text NOT NULL,
 	CONSTRAINT "governance_snapshot_rules_governance_snapshot_id_rule_revision_id_pk" PRIMARY KEY("governance_snapshot_id","rule_revision_id")
+);
+--> statement-breakpoint
+CREATE TABLE "guidance_supporting_propositions" (
+	"guidance_revision_id" text NOT NULL,
+	"proposition_id" text NOT NULL,
+	CONSTRAINT "guidance_supporting_propositions_guidance_revision_id_proposition_id_pk" PRIMARY KEY("guidance_revision_id","proposition_id")
 );
 --> statement-breakpoint
 CREATE TABLE "human_review_policy_results" (
@@ -1136,10 +1227,40 @@ CREATE TABLE "knowledge_manifest_sources" (
 	CONSTRAINT "knowledge_manifest_sources_knowledge_manifest_id_source_id_pk" PRIMARY KEY("knowledge_manifest_id","source_id")
 );
 --> statement-breakpoint
+CREATE TABLE "normative_rule_sources" (
+	"rule_revision_id" text NOT NULL,
+	"source_id" text NOT NULL,
+	CONSTRAINT "normative_rule_sources_rule_revision_id_source_id_pk" PRIMARY KEY("rule_revision_id","source_id")
+);
+--> statement-breakpoint
+CREATE TABLE "outcome_edge_propositions" (
+	"edge_id" text NOT NULL,
+	"proposition_id" text NOT NULL,
+	CONSTRAINT "outcome_edge_propositions_edge_id_proposition_id_pk" PRIMARY KEY("edge_id","proposition_id")
+);
+--> statement-breakpoint
+CREATE TABLE "outcome_model_content_metrics" (
+	"outcome_model_id" text NOT NULL,
+	"metric_revision_id" text NOT NULL,
+	CONSTRAINT "outcome_model_content_metrics_outcome_model_id_metric_revision_id_pk" PRIMARY KEY("outcome_model_id","metric_revision_id")
+);
+--> statement-breakpoint
+CREATE TABLE "outcome_model_diagnostic_metrics" (
+	"outcome_model_id" text NOT NULL,
+	"metric_revision_id" text NOT NULL,
+	CONSTRAINT "outcome_model_diagnostic_metrics_outcome_model_id_metric_revision_id_pk" PRIMARY KEY("outcome_model_id","metric_revision_id")
+);
+--> statement-breakpoint
 CREATE TABLE "outcome_model_edges" (
 	"outcome_model_id" text NOT NULL,
 	"edge_id" text NOT NULL,
 	CONSTRAINT "outcome_model_edges_outcome_model_id_edge_id_pk" PRIMARY KEY("outcome_model_id","edge_id")
+);
+--> statement-breakpoint
+CREATE TABLE "outcome_model_guardrail_metrics" (
+	"outcome_model_id" text NOT NULL,
+	"metric_revision_id" text NOT NULL,
+	CONSTRAINT "outcome_model_guardrail_metrics_outcome_model_id_metric_revision_id_pk" PRIMARY KEY("outcome_model_id","metric_revision_id")
 );
 --> statement-breakpoint
 CREATE TABLE "outcome_model_metrics" (
@@ -1197,10 +1318,57 @@ CREATE TABLE "policy_override_results" (
 	CONSTRAINT "policy_override_results_override_id_policy_result_id_pk" PRIMARY KEY("override_id","policy_result_id")
 );
 --> statement-breakpoint
+CREATE TABLE "replayability_missing_refs" (
+	"decision_id" text NOT NULL,
+	"ordinal" integer NOT NULL,
+	"ref_kind" text NOT NULL,
+	"entity_type" text NOT NULL,
+	"entity_id" text,
+	"stable_id" text,
+	"revision_id" text,
+	CONSTRAINT "replayability_missing_refs_decision_id_ordinal_pk" PRIMARY KEY("decision_id","ordinal")
+);
+--> statement-breakpoint
 CREATE TABLE "research_trace_evidence" (
 	"research_trace_id" text NOT NULL,
 	"evidence_id" text NOT NULL,
 	CONSTRAINT "research_trace_evidence_research_trace_id_evidence_id_pk" PRIMARY KEY("research_trace_id","evidence_id")
+);
+--> statement-breakpoint
+CREATE TABLE "run_config_evaluator_revisions" (
+	"run_config_id" text NOT NULL,
+	"revision_id" text NOT NULL,
+	CONSTRAINT "run_config_evaluator_revisions_run_config_id_revision_id_pk" PRIMARY KEY("run_config_id","revision_id")
+);
+--> statement-breakpoint
+CREATE TABLE "run_config_model_revisions" (
+	"run_config_id" text NOT NULL,
+	"revision_id" text NOT NULL,
+	CONSTRAINT "run_config_model_revisions_run_config_id_revision_id_pk" PRIMARY KEY("run_config_id","revision_id")
+);
+--> statement-breakpoint
+CREATE TABLE "run_config_prompt_revisions" (
+	"run_config_id" text NOT NULL,
+	"revision_id" text NOT NULL,
+	CONSTRAINT "run_config_prompt_revisions_run_config_id_revision_id_pk" PRIMARY KEY("run_config_id","revision_id")
+);
+--> statement-breakpoint
+CREATE TABLE "run_config_retriever_revisions" (
+	"run_config_id" text NOT NULL,
+	"revision_id" text NOT NULL,
+	CONSTRAINT "run_config_retriever_revisions_run_config_id_revision_id_pk" PRIMARY KEY("run_config_id","revision_id")
+);
+--> statement-breakpoint
+CREATE TABLE "run_config_schema_revisions" (
+	"run_config_id" text NOT NULL,
+	"revision_id" text NOT NULL,
+	CONSTRAINT "run_config_schema_revisions_run_config_id_revision_id_pk" PRIMARY KEY("run_config_id","revision_id")
+);
+--> statement-breakpoint
+CREATE TABLE "run_config_tool_revisions" (
+	"run_config_id" text NOT NULL,
+	"revision_id" text NOT NULL,
+	CONSTRAINT "run_config_tool_revisions_run_config_id_revision_id_pk" PRIMARY KEY("run_config_id","revision_id")
 );
 --> statement-breakpoint
 CREATE TABLE "run_delta_epistemic_states" (
@@ -1294,12 +1462,11 @@ CREATE TABLE "deleted_target_tombstones" (
 --> statement-breakpoint
 ALTER TABLE "object_references" ADD CONSTRAINT "object_references_object_id_object_registry_object_id_fk" FOREIGN KEY ("object_id") REFERENCES "public"."object_registry"("object_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "object_references" ADD CONSTRAINT "object_references_owner_entity_type_owner_entity_id_immutable_entity_registry_entity_type_entity_id_fk" FOREIGN KEY ("owner_entity_type","owner_entity_id") REFERENCES "public"."immutable_entity_registry"("entity_type","entity_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "execution_plan_revisions" ADD CONSTRAINT "execution_plan_revisions_task_revision_id_task_contract_revisions_task_revision_id_fk" FOREIGN KEY ("task_revision_id") REFERENCES "public"."task_contract_revisions"("task_revision_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "registered_control_plane_revision_payloads" ADD CONSTRAINT "registered_control_plane_revision_payloads_object_id_object_registry_object_id_fk" FOREIGN KEY ("object_id") REFERENCES "public"."object_registry"("object_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "run_configs" ADD CONSTRAINT "run_configs_task_revision_id_task_contract_revisions_task_revision_id_fk" FOREIGN KEY ("task_revision_id") REFERENCES "public"."task_contract_revisions"("task_revision_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "run_configs" ADD CONSTRAINT "run_configs_eval_contract_revision_id_eval_contract_revisions_eval_contract_revision_id_fk" FOREIGN KEY ("eval_contract_revision_id") REFERENCES "public"."eval_contract_revisions"("eval_contract_revision_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "control_plane_activations" ADD CONSTRAINT "control_plane_activations_component_type_stable_id_active_revision_id_revision_registry_entity_type_stable_id_revision_id_fk" FOREIGN KEY ("component_type","stable_id","active_revision_id") REFERENCES "public"."revision_registry"("entity_type","stable_id","revision_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "registered_control_plane_revision_payloads" ADD CONSTRAINT "registered_control_plane_revision_payloads_tenant_id_entity_type_stable_id_revision_id_revision_registry_tenant_id_entity_type_stable_id_revision_id_fk" FOREIGN KEY ("tenant_id","entity_type","stable_id","revision_id") REFERENCES "public"."revision_registry"("tenant_id","entity_type","stable_id","revision_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "registered_control_plane_revision_payloads" ADD CONSTRAINT "registered_control_plane_revision_payloads_tenant_id_object_id_object_registry_tenant_id_object_id_fk" FOREIGN KEY ("tenant_id","object_id") REFERENCES "public"."object_registry"("tenant_id","object_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "task_contract_revisions" ADD CONSTRAINT "task_contract_revisions_program_revision_id_content_program_revisions_program_revision_id_fk" FOREIGN KEY ("program_revision_id") REFERENCES "public"."content_program_revisions"("program_revision_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "task_contract_revisions" ADD CONSTRAINT "task_contract_revisions_primary_metric_revision_id_metric_definition_revisions_metric_revision_id_fk" FOREIGN KEY ("primary_metric_revision_id") REFERENCES "public"."metric_definition_revisions"("metric_revision_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "task_contract_revisions" ADD CONSTRAINT "task_contract_revisions_success_metric_revision_id_metric_definition_revisions_metric_revision_id_fk" FOREIGN KEY ("success_metric_revision_id") REFERENCES "public"."metric_definition_revisions"("metric_revision_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "epistemic_state_versions" ADD CONSTRAINT "epistemic_state_versions_proposition_id_propositions_proposition_id_fk" FOREIGN KEY ("proposition_id") REFERENCES "public"."propositions"("proposition_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "evidence_assessments" ADD CONSTRAINT "evidence_assessments_link_id_evidence_proposition_links_link_id_fk" FOREIGN KEY ("link_id") REFERENCES "public"."evidence_proposition_links"("link_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "evidence_proposition_links" ADD CONSTRAINT "evidence_proposition_links_evidence_id_evidence_items_evidence_id_fk" FOREIGN KEY ("evidence_id") REFERENCES "public"."evidence_items"("evidence_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
@@ -1307,6 +1474,7 @@ ALTER TABLE "evidence_proposition_links" ADD CONSTRAINT "evidence_proposition_li
 ALTER TABLE "knowledge_gaps" ADD CONSTRAINT "knowledge_gaps_task_revision_id_task_contract_revisions_task_revision_id_fk" FOREIGN KEY ("task_revision_id") REFERENCES "public"."task_contract_revisions"("task_revision_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "research_traces" ADD CONSTRAINT "research_traces_gap_id_knowledge_gaps_gap_id_fk" FOREIGN KEY ("gap_id") REFERENCES "public"."knowledge_gaps"("gap_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "source_artifacts" ADD CONSTRAINT "source_artifacts_snapshot_reference_object_registry_object_id_fk" FOREIGN KEY ("snapshot_reference") REFERENCES "public"."object_registry"("object_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "source_artifacts" ADD CONSTRAINT "source_artifacts_rights_policy_id_rights_policies_rights_policy_id_fk" FOREIGN KEY ("rights_policy_id") REFERENCES "public"."rights_policies"("rights_policy_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "applicability_assessments" ADD CONSTRAINT "applicability_assessments_task_revision_id_task_contract_revisions_task_revision_id_fk" FOREIGN KEY ("task_revision_id") REFERENCES "public"."task_contract_revisions"("task_revision_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "assertion_proposition_links" ADD CONSTRAINT "assertion_proposition_links_assertion_id_content_assertions_assertion_id_fk" FOREIGN KEY ("assertion_id") REFERENCES "public"."content_assertions"("assertion_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "assertion_proposition_links" ADD CONSTRAINT "assertion_proposition_links_proposition_id_propositions_proposition_id_fk" FOREIGN KEY ("proposition_id") REFERENCES "public"."propositions"("proposition_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
@@ -1321,7 +1489,7 @@ ALTER TABLE "content_candidates" ADD CONSTRAINT "content_candidates_architecture
 ALTER TABLE "content_candidates" ADD CONSTRAINT "content_candidates_run_config_id_run_configs_run_config_id_fk" FOREIGN KEY ("run_config_id") REFERENCES "public"."run_configs"("run_config_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "qualitative_evaluations" ADD CONSTRAINT "qualitative_evaluations_candidate_id_content_candidates_candidate_id_fk" FOREIGN KEY ("candidate_id") REFERENCES "public"."content_candidates"("candidate_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "qualitative_evaluations" ADD CONSTRAINT "qualitative_evaluations_eval_contract_revision_id_eval_contract_revisions_eval_contract_revision_id_fk" FOREIGN KEY ("eval_contract_revision_id") REFERENCES "public"."eval_contract_revisions"("eval_contract_revision_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "rights_checks" ADD CONSTRAINT "rights_checks_rights_policy_id_rights_policy_revisions_policy_revision_id_fk" FOREIGN KEY ("rights_policy_id") REFERENCES "public"."rights_policy_revisions"("policy_revision_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "rights_checks" ADD CONSTRAINT "rights_checks_rights_policy_id_rights_policies_rights_policy_id_fk" FOREIGN KEY ("rights_policy_id") REFERENCES "public"."rights_policies"("rights_policy_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "strategy_hypotheses" ADD CONSTRAINT "strategy_hypotheses_task_revision_id_task_contract_revisions_task_revision_id_fk" FOREIGN KEY ("task_revision_id") REFERENCES "public"."task_contract_revisions"("task_revision_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "strategy_hypotheses" ADD CONSTRAINT "strategy_hypotheses_audience_state_id_audience_states_audience_state_id_fk" FOREIGN KEY ("audience_state_id") REFERENCES "public"."audience_states"("audience_state_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "baseline_knowledge_snapshots" ADD CONSTRAINT "baseline_knowledge_snapshots_knowledge_manifest_id_knowledge_manifests_knowledge_manifest_id_fk" FOREIGN KEY ("knowledge_manifest_id") REFERENCES "public"."knowledge_manifests"("knowledge_manifest_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
@@ -1369,6 +1537,14 @@ ALTER TABLE "stage_executions" ADD CONSTRAINT "stage_executions_run_id_runs_run_
 ALTER TABLE "stage_executions" ADD CONSTRAINT "stage_executions_decision_cycle_id_decision_cycles_decision_cycle_id_fk" FOREIGN KEY ("decision_cycle_id") REFERENCES "public"."decision_cycles"("decision_cycle_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "assertion_validation_links" ADD CONSTRAINT "assertion_validation_links_result_id_assertion_validation_results_result_id_fk" FOREIGN KEY ("result_id") REFERENCES "public"."assertion_validation_results"("result_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "assertion_validation_links" ADD CONSTRAINT "assertion_validation_links_link_id_assertion_proposition_links_link_id_fk" FOREIGN KEY ("link_id") REFERENCES "public"."assertion_proposition_links"("link_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "baseline_channel_profiles" ADD CONSTRAINT "baseline_channel_profiles_baseline_snapshot_id_baseline_knowledge_snapshots_baseline_snapshot_id_fk" FOREIGN KEY ("baseline_snapshot_id") REFERENCES "public"."baseline_knowledge_snapshots"("baseline_snapshot_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "baseline_channel_profiles" ADD CONSTRAINT "baseline_channel_profiles_channel_profile_revision_id_channel_profile_revisions_channel_profile_revision_id_fk" FOREIGN KEY ("channel_profile_revision_id") REFERENCES "public"."channel_profile_revisions"("channel_profile_revision_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "channel_profile_guidance_revisions" ADD CONSTRAINT "channel_profile_guidance_revisions_channel_profile_revision_id_channel_profile_revisions_channel_profile_revision_id_fk" FOREIGN KEY ("channel_profile_revision_id") REFERENCES "public"."channel_profile_revisions"("channel_profile_revision_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "channel_profile_guidance_revisions" ADD CONSTRAINT "channel_profile_guidance_revisions_guidance_revision_id_guidance_revisions_guidance_revision_id_fk" FOREIGN KEY ("guidance_revision_id") REFERENCES "public"."guidance_revisions"("guidance_revision_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "channel_profile_metric_revisions" ADD CONSTRAINT "channel_profile_metric_revisions_channel_profile_revision_id_channel_profile_revisions_channel_profile_revision_id_fk" FOREIGN KEY ("channel_profile_revision_id") REFERENCES "public"."channel_profile_revisions"("channel_profile_revision_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "channel_profile_metric_revisions" ADD CONSTRAINT "channel_profile_metric_revisions_metric_revision_id_metric_definition_revisions_metric_revision_id_fk" FOREIGN KEY ("metric_revision_id") REFERENCES "public"."metric_definition_revisions"("metric_revision_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "channel_profile_rule_revisions" ADD CONSTRAINT "channel_profile_rule_revisions_channel_profile_revision_id_channel_profile_revisions_channel_profile_revision_id_fk" FOREIGN KEY ("channel_profile_revision_id") REFERENCES "public"."channel_profile_revisions"("channel_profile_revision_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "channel_profile_rule_revisions" ADD CONSTRAINT "channel_profile_rule_revisions_rule_revision_id_normative_rule_revisions_rule_revision_id_fk" FOREIGN KEY ("rule_revision_id") REFERENCES "public"."normative_rule_revisions"("rule_revision_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "composite_implied_assertions" ADD CONSTRAINT "composite_implied_assertions_assessment_id_composite_impression_assessments_assessment_id_fk" FOREIGN KEY ("assessment_id") REFERENCES "public"."composite_impression_assessments"("assessment_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "composite_implied_assertions" ADD CONSTRAINT "composite_implied_assertions_assertion_id_content_assertions_assertion_id_fk" FOREIGN KEY ("assertion_id") REFERENCES "public"."content_assertions"("assertion_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "composite_input_assertions" ADD CONSTRAINT "composite_input_assertions_assessment_id_composite_impression_assessments_assessment_id_fk" FOREIGN KEY ("assessment_id") REFERENCES "public"."composite_impression_assessments"("assessment_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
@@ -1420,9 +1596,11 @@ ALTER TABLE "governance_snapshot_metrics" ADD CONSTRAINT "governance_snapshot_me
 ALTER TABLE "governance_snapshot_policies" ADD CONSTRAINT "governance_snapshot_policies_governance_snapshot_id_governance_snapshots_governance_snapshot_id_fk" FOREIGN KEY ("governance_snapshot_id") REFERENCES "public"."governance_snapshots"("governance_snapshot_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "governance_snapshot_policies" ADD CONSTRAINT "governance_snapshot_policies_policy_revision_id_decision_policy_revisions_policy_revision_id_fk" FOREIGN KEY ("policy_revision_id") REFERENCES "public"."decision_policy_revisions"("policy_revision_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "governance_snapshot_rights" ADD CONSTRAINT "governance_snapshot_rights_governance_snapshot_id_governance_snapshots_governance_snapshot_id_fk" FOREIGN KEY ("governance_snapshot_id") REFERENCES "public"."governance_snapshots"("governance_snapshot_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "governance_snapshot_rights" ADD CONSTRAINT "governance_snapshot_rights_rights_policy_revision_id_rights_policy_revisions_policy_revision_id_fk" FOREIGN KEY ("rights_policy_revision_id") REFERENCES "public"."rights_policy_revisions"("policy_revision_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "governance_snapshot_rights" ADD CONSTRAINT "governance_snapshot_rights_rights_policy_id_rights_policies_rights_policy_id_fk" FOREIGN KEY ("rights_policy_id") REFERENCES "public"."rights_policies"("rights_policy_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "governance_snapshot_rules" ADD CONSTRAINT "governance_snapshot_rules_governance_snapshot_id_governance_snapshots_governance_snapshot_id_fk" FOREIGN KEY ("governance_snapshot_id") REFERENCES "public"."governance_snapshots"("governance_snapshot_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "governance_snapshot_rules" ADD CONSTRAINT "governance_snapshot_rules_rule_revision_id_normative_rule_revisions_rule_revision_id_fk" FOREIGN KEY ("rule_revision_id") REFERENCES "public"."normative_rule_revisions"("rule_revision_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "guidance_supporting_propositions" ADD CONSTRAINT "guidance_supporting_propositions_guidance_revision_id_guidance_revisions_guidance_revision_id_fk" FOREIGN KEY ("guidance_revision_id") REFERENCES "public"."guidance_revisions"("guidance_revision_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "guidance_supporting_propositions" ADD CONSTRAINT "guidance_supporting_propositions_proposition_id_propositions_proposition_id_fk" FOREIGN KEY ("proposition_id") REFERENCES "public"."propositions"("proposition_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "human_review_policy_results" ADD CONSTRAINT "human_review_policy_results_review_id_human_review_records_review_id_fk" FOREIGN KEY ("review_id") REFERENCES "public"."human_review_records"("review_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "human_review_policy_results" ADD CONSTRAINT "human_review_policy_results_policy_result_id_policy_results_policy_result_id_fk" FOREIGN KEY ("policy_result_id") REFERENCES "public"."policy_results"("policy_result_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "knowledge_manifest_epistemic_states" ADD CONSTRAINT "knowledge_manifest_epistemic_states_knowledge_manifest_id_knowledge_manifests_knowledge_manifest_id_fk" FOREIGN KEY ("knowledge_manifest_id") REFERENCES "public"."knowledge_manifests"("knowledge_manifest_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
@@ -1433,8 +1611,18 @@ ALTER TABLE "knowledge_manifest_propositions" ADD CONSTRAINT "knowledge_manifest
 ALTER TABLE "knowledge_manifest_propositions" ADD CONSTRAINT "knowledge_manifest_propositions_proposition_id_propositions_proposition_id_fk" FOREIGN KEY ("proposition_id") REFERENCES "public"."propositions"("proposition_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "knowledge_manifest_sources" ADD CONSTRAINT "knowledge_manifest_sources_knowledge_manifest_id_knowledge_manifests_knowledge_manifest_id_fk" FOREIGN KEY ("knowledge_manifest_id") REFERENCES "public"."knowledge_manifests"("knowledge_manifest_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "knowledge_manifest_sources" ADD CONSTRAINT "knowledge_manifest_sources_source_id_source_artifacts_source_id_fk" FOREIGN KEY ("source_id") REFERENCES "public"."source_artifacts"("source_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "normative_rule_sources" ADD CONSTRAINT "normative_rule_sources_rule_revision_id_normative_rule_revisions_rule_revision_id_fk" FOREIGN KEY ("rule_revision_id") REFERENCES "public"."normative_rule_revisions"("rule_revision_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "normative_rule_sources" ADD CONSTRAINT "normative_rule_sources_source_id_source_artifacts_source_id_fk" FOREIGN KEY ("source_id") REFERENCES "public"."source_artifacts"("source_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "outcome_edge_propositions" ADD CONSTRAINT "outcome_edge_propositions_edge_id_outcome_edges_edge_id_fk" FOREIGN KEY ("edge_id") REFERENCES "public"."outcome_edges"("edge_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "outcome_edge_propositions" ADD CONSTRAINT "outcome_edge_propositions_proposition_id_propositions_proposition_id_fk" FOREIGN KEY ("proposition_id") REFERENCES "public"."propositions"("proposition_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "outcome_model_content_metrics" ADD CONSTRAINT "outcome_model_content_metrics_outcome_model_id_outcome_models_outcome_model_id_fk" FOREIGN KEY ("outcome_model_id") REFERENCES "public"."outcome_models"("outcome_model_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "outcome_model_content_metrics" ADD CONSTRAINT "outcome_model_content_metrics_metric_revision_id_metric_definition_revisions_metric_revision_id_fk" FOREIGN KEY ("metric_revision_id") REFERENCES "public"."metric_definition_revisions"("metric_revision_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "outcome_model_diagnostic_metrics" ADD CONSTRAINT "outcome_model_diagnostic_metrics_outcome_model_id_outcome_models_outcome_model_id_fk" FOREIGN KEY ("outcome_model_id") REFERENCES "public"."outcome_models"("outcome_model_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "outcome_model_diagnostic_metrics" ADD CONSTRAINT "outcome_model_diagnostic_metrics_metric_revision_id_metric_definition_revisions_metric_revision_id_fk" FOREIGN KEY ("metric_revision_id") REFERENCES "public"."metric_definition_revisions"("metric_revision_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "outcome_model_edges" ADD CONSTRAINT "outcome_model_edges_outcome_model_id_outcome_models_outcome_model_id_fk" FOREIGN KEY ("outcome_model_id") REFERENCES "public"."outcome_models"("outcome_model_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "outcome_model_edges" ADD CONSTRAINT "outcome_model_edges_edge_id_outcome_edges_edge_id_fk" FOREIGN KEY ("edge_id") REFERENCES "public"."outcome_edges"("edge_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "outcome_model_guardrail_metrics" ADD CONSTRAINT "outcome_model_guardrail_metrics_outcome_model_id_outcome_models_outcome_model_id_fk" FOREIGN KEY ("outcome_model_id") REFERENCES "public"."outcome_models"("outcome_model_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "outcome_model_guardrail_metrics" ADD CONSTRAINT "outcome_model_guardrail_metrics_metric_revision_id_metric_definition_revisions_metric_revision_id_fk" FOREIGN KEY ("metric_revision_id") REFERENCES "public"."metric_definition_revisions"("metric_revision_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "outcome_model_metrics" ADD CONSTRAINT "outcome_model_metrics_outcome_model_id_outcome_models_outcome_model_id_fk" FOREIGN KEY ("outcome_model_id") REFERENCES "public"."outcome_models"("outcome_model_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "outcome_model_metrics" ADD CONSTRAINT "outcome_model_metrics_metric_revision_id_metric_definition_revisions_metric_revision_id_fk" FOREIGN KEY ("metric_revision_id") REFERENCES "public"."metric_definition_revisions"("metric_revision_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "package_alternative_candidates" ADD CONSTRAINT "package_alternative_candidates_package_id_final_content_packages_package_id_fk" FOREIGN KEY ("package_id") REFERENCES "public"."final_content_packages"("package_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
@@ -1453,8 +1641,15 @@ ALTER TABLE "policy_conflict_results" ADD CONSTRAINT "policy_conflict_results_re
 ALTER TABLE "policy_conflict_results" ADD CONSTRAINT "policy_conflict_results_policy_result_id_policy_results_policy_result_id_fk" FOREIGN KEY ("policy_result_id") REFERENCES "public"."policy_results"("policy_result_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "policy_override_results" ADD CONSTRAINT "policy_override_results_override_id_policy_overrides_override_id_fk" FOREIGN KEY ("override_id") REFERENCES "public"."policy_overrides"("override_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "policy_override_results" ADD CONSTRAINT "policy_override_results_policy_result_id_policy_results_policy_result_id_fk" FOREIGN KEY ("policy_result_id") REFERENCES "public"."policy_results"("policy_result_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "replayability_missing_refs" ADD CONSTRAINT "replayability_missing_refs_decision_id_replayability_statuses_decision_id_fk" FOREIGN KEY ("decision_id") REFERENCES "public"."replayability_statuses"("decision_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "research_trace_evidence" ADD CONSTRAINT "research_trace_evidence_research_trace_id_research_traces_research_trace_id_fk" FOREIGN KEY ("research_trace_id") REFERENCES "public"."research_traces"("research_trace_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "research_trace_evidence" ADD CONSTRAINT "research_trace_evidence_evidence_id_evidence_items_evidence_id_fk" FOREIGN KEY ("evidence_id") REFERENCES "public"."evidence_items"("evidence_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "run_config_evaluator_revisions" ADD CONSTRAINT "run_config_evaluator_revisions_run_config_id_run_configs_run_config_id_fk" FOREIGN KEY ("run_config_id") REFERENCES "public"."run_configs"("run_config_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "run_config_model_revisions" ADD CONSTRAINT "run_config_model_revisions_run_config_id_run_configs_run_config_id_fk" FOREIGN KEY ("run_config_id") REFERENCES "public"."run_configs"("run_config_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "run_config_prompt_revisions" ADD CONSTRAINT "run_config_prompt_revisions_run_config_id_run_configs_run_config_id_fk" FOREIGN KEY ("run_config_id") REFERENCES "public"."run_configs"("run_config_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "run_config_retriever_revisions" ADD CONSTRAINT "run_config_retriever_revisions_run_config_id_run_configs_run_config_id_fk" FOREIGN KEY ("run_config_id") REFERENCES "public"."run_configs"("run_config_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "run_config_schema_revisions" ADD CONSTRAINT "run_config_schema_revisions_run_config_id_run_configs_run_config_id_fk" FOREIGN KEY ("run_config_id") REFERENCES "public"."run_configs"("run_config_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "run_config_tool_revisions" ADD CONSTRAINT "run_config_tool_revisions_run_config_id_run_configs_run_config_id_fk" FOREIGN KEY ("run_config_id") REFERENCES "public"."run_configs"("run_config_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "run_delta_epistemic_states" ADD CONSTRAINT "run_delta_epistemic_states_delta_id_run_knowledge_deltas_delta_id_fk" FOREIGN KEY ("delta_id") REFERENCES "public"."run_knowledge_deltas"("delta_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "run_delta_epistemic_states" ADD CONSTRAINT "run_delta_epistemic_states_epistemic_state_id_epistemic_state_versions_epistemic_state_id_fk" FOREIGN KEY ("epistemic_state_id") REFERENCES "public"."epistemic_state_versions"("epistemic_state_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "run_delta_evidence" ADD CONSTRAINT "run_delta_evidence_delta_id_run_knowledge_deltas_delta_id_fk" FOREIGN KEY ("delta_id") REFERENCES "public"."run_knowledge_deltas"("delta_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
@@ -1480,18 +1675,17 @@ ALTER TABLE "task_secondary_metrics" ADD CONSTRAINT "task_secondary_metrics_metr
 CREATE UNIQUE INDEX "uq_obj_ref_source_table_column" ON "canonical_object_reference_sources" USING btree ("source_table","object_id_column");--> statement-breakpoint
 CREATE UNIQUE INDEX "uq_object_registry_tenant_hash" ON "object_registry" USING btree ("tenant_id","content_hash");--> statement-breakpoint
 CREATE UNIQUE INDEX "uq_object_registry_tenant_key" ON "object_registry" USING btree ("tenant_id","object_key");--> statement-breakpoint
-CREATE UNIQUE INDEX "uq_revision_registry_triple" ON "revision_registry" USING btree ("entity_type","stable_id","revision_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "uq_attrib_rev_stable" ON "attribution_model_revisions" USING btree ("attribution_model_id","attribution_model_revision_id");--> statement-breakpoint
+CREATE UNIQUE INDEX "uq_channel_profile_rev_stable" ON "channel_profile_revisions" USING btree ("channel_profile_id","channel_profile_revision_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "uq_prog_rev_stable" ON "content_program_revisions" USING btree ("program_id","program_revision_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "uq_activation_interval_start" ON "control_plane_activations" USING btree ("deployment_scope","component_type","stable_id","effective_from");--> statement-breakpoint
 CREATE UNIQUE INDEX "uq_decision_policy_rev_stable" ON "decision_policy_revisions" USING btree ("policy_id","policy_revision_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "uq_eval_contract_rev_stable" ON "eval_contract_revisions" USING btree ("eval_contract_id","eval_contract_revision_id");--> statement-breakpoint
-CREATE UNIQUE INDEX "uq_plan_rev_stable" ON "execution_plan_revisions" USING btree ("execution_plan_id","execution_plan_revision_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "uq_guidance_rev_stable" ON "guidance_revisions" USING btree ("guidance_id","guidance_revision_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "uq_metric_rev_stable" ON "metric_definition_revisions" USING btree ("metric_id","metric_revision_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "uq_rule_rev_stable" ON "normative_rule_revisions" USING btree ("rule_id","rule_revision_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "uq_cplane_payload_triple" ON "registered_control_plane_revision_payloads" USING btree ("entity_type","stable_id","revision_id");--> statement-breakpoint
-CREATE UNIQUE INDEX "uq_rights_rev_stable" ON "rights_policy_revisions" USING btree ("policy_id","policy_revision_id");--> statement-breakpoint
+CREATE UNIQUE INDEX "uq_cplane_rev_triple" ON "registered_control_plane_revisions" USING btree ("entity_type","stable_id","revision_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "uq_task_rev_stable" ON "task_contract_revisions" USING btree ("task_id","task_revision_id");--> statement-breakpoint
 CREATE INDEX "idx_epistemic_state_prop" ON "epistemic_state_versions" USING btree ("proposition_id");--> statement-breakpoint
 CREATE INDEX "idx_epistemic_state_tenant" ON "epistemic_state_versions" USING btree ("tenant_id");--> statement-breakpoint
@@ -1515,31 +1709,29 @@ CREATE INDEX "idx_source_artifact_snapshot_ref" ON "source_artifacts" USING btre
 CREATE INDEX "idx_applicability_assessment_tenant" ON "applicability_assessments" USING btree ("tenant_id");--> statement-breakpoint
 CREATE INDEX "idx_applicability_assessment_task" ON "applicability_assessments" USING btree ("task_revision_id");--> statement-breakpoint
 CREATE INDEX "idx_assertion_prop_link_tenant" ON "assertion_proposition_links" USING btree ("tenant_id");--> statement-breakpoint
-CREATE INDEX "idx_assertion_prop_link_assertion" ON "assertion_proposition_links" USING btree ("assertion_id");--> statement-breakpoint
-CREATE INDEX "idx_assertion_prop_link_prop" ON "assertion_proposition_links" USING btree ("proposition_id");--> statement-breakpoint
+CREATE INDEX "idx_assertion_prop_link_pair" ON "assertion_proposition_links" USING btree ("assertion_id","proposition_id");--> statement-breakpoint
 CREATE INDEX "idx_assertion_val_result_tenant" ON "assertion_validation_results" USING btree ("tenant_id");--> statement-breakpoint
 CREATE INDEX "idx_assertion_val_result_assertion" ON "assertion_validation_results" USING btree ("assertion_id");--> statement-breakpoint
 CREATE INDEX "idx_audience_state_tenant" ON "audience_states" USING btree ("tenant_id");--> statement-breakpoint
 CREATE INDEX "idx_audience_state_task" ON "audience_states" USING btree ("task_revision_id");--> statement-breakpoint
 CREATE INDEX "idx_composite_assessment_tenant" ON "composite_impression_assessments" USING btree ("tenant_id");--> statement-breakpoint
 CREATE INDEX "idx_composite_assessment_candidate" ON "composite_impression_assessments" USING btree ("candidate_id");--> statement-breakpoint
-CREATE INDEX "idx_content_architecture_tenant" ON "content_architectures" USING btree ("tenant_id");--> statement-breakpoint
-CREATE INDEX "idx_content_architecture_task" ON "content_architectures" USING btree ("task_revision_id");--> statement-breakpoint
-CREATE INDEX "idx_content_architecture_strategy" ON "content_architectures" USING btree ("strategy_id");--> statement-breakpoint
+CREATE INDEX "idx_content_arch_tenant" ON "content_architectures" USING btree ("tenant_id");--> statement-breakpoint
+CREATE INDEX "idx_content_arch_task" ON "content_architectures" USING btree ("task_revision_id");--> statement-breakpoint
+CREATE INDEX "idx_content_arch_strategy" ON "content_architectures" USING btree ("strategy_id");--> statement-breakpoint
 CREATE INDEX "idx_content_assertion_tenant" ON "content_assertions" USING btree ("tenant_id");--> statement-breakpoint
-CREATE INDEX "idx_content_assertion_artifact" ON "content_assertions" USING btree ("artifact_entity_type","artifact_entity_id");--> statement-breakpoint
+CREATE INDEX "idx_content_assertion_artifact" ON "content_assertions" USING btree ("artifact_ref_type","artifact_ref_id");--> statement-breakpoint
 CREATE INDEX "idx_content_candidate_tenant" ON "content_candidates" USING btree ("tenant_id");--> statement-breakpoint
 CREATE INDEX "idx_content_candidate_task" ON "content_candidates" USING btree ("task_revision_id");--> statement-breakpoint
-CREATE INDEX "idx_content_candidate_strategy" ON "content_candidates" USING btree ("strategy_id");--> statement-breakpoint
-CREATE INDEX "idx_content_candidate_arch" ON "content_candidates" USING btree ("architecture_id");--> statement-breakpoint
-CREATE INDEX "idx_content_candidate_run_config" ON "content_candidates" USING btree ("run_config_id");--> statement-breakpoint
+CREATE INDEX "idx_content_candidate_run_cfg" ON "content_candidates" USING btree ("run_config_id");--> statement-breakpoint
 CREATE INDEX "idx_content_unit_tenant" ON "content_units" USING btree ("tenant_id");--> statement-breakpoint
-CREATE INDEX "idx_qual_evaluation_tenant" ON "qualitative_evaluations" USING btree ("tenant_id");--> statement-breakpoint
-CREATE INDEX "idx_qual_evaluation_candidate" ON "qualitative_evaluations" USING btree ("candidate_id");--> statement-breakpoint
-CREATE INDEX "idx_qual_evaluation_contract" ON "qualitative_evaluations" USING btree ("eval_contract_revision_id");--> statement-breakpoint
+CREATE INDEX "idx_qual_eval_tenant" ON "qualitative_evaluations" USING btree ("tenant_id");--> statement-breakpoint
+CREATE INDEX "idx_qual_eval_candidate" ON "qualitative_evaluations" USING btree ("candidate_id");--> statement-breakpoint
+CREATE INDEX "idx_qual_eval_contract" ON "qualitative_evaluations" USING btree ("eval_contract_revision_id");--> statement-breakpoint
 CREATE INDEX "idx_rights_check_tenant" ON "rights_checks" USING btree ("tenant_id");--> statement-breakpoint
 CREATE INDEX "idx_rights_check_subject" ON "rights_checks" USING btree ("subject_entity_type","subject_entity_id");--> statement-breakpoint
 CREATE INDEX "idx_rights_check_policy" ON "rights_checks" USING btree ("rights_policy_id");--> statement-breakpoint
+CREATE INDEX "idx_rights_policy_tenant" ON "rights_policies" USING btree ("tenant_id");--> statement-breakpoint
 CREATE INDEX "idx_risk_assessment_tenant" ON "risk_assessments" USING btree ("tenant_id");--> statement-breakpoint
 CREATE INDEX "idx_risk_assessment_subject" ON "risk_assessments" USING btree ("subject_entity_type","subject_entity_id");--> statement-breakpoint
 CREATE INDEX "idx_strategy_hypothesis_tenant" ON "strategy_hypotheses" USING btree ("tenant_id");--> statement-breakpoint
@@ -1610,3 +1802,506 @@ CREATE INDEX "idx_stage_exec_run_cycle" ON "stage_executions" USING btree ("run_
 CREATE INDEX "idx_deleted_rev_triple" ON "deleted_revision_tombstones" USING btree ("entity_type","stable_id","revision_id");--> statement-breakpoint
 CREATE INDEX "idx_deleted_rev_tenant" ON "deleted_revision_tombstones" USING btree ("tenant_id");--> statement-breakpoint
 CREATE INDEX "idx_deleted_target_tenant" ON "deleted_target_tombstones" USING btree ("tenant_id");
+--> statement-breakpoint
+CREATE OR REPLACE FUNCTION prevent_immutable_mutation()
+RETURNS TRIGGER AS $$
+BEGIN
+  IF current_setting('contentos.privileged_deletion', true) = 'on' THEN
+    IF TG_OP = 'DELETE' THEN
+      RETURN OLD;
+    ELSE
+      RETURN NEW;
+    END IF;
+  END IF;
+  RAISE EXCEPTION 'MUTATION_FORBIDDEN: Immutable table % cannot be modified by UPDATE or DELETE', TG_TABLE_NAME
+    USING ERRCODE = '55000';
+END;
+$$ LANGUAGE plpgsql;
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_immutable_entity_registry
+BEFORE UPDATE OR DELETE ON "immutable_entity_registry"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_revision_registry
+BEFORE UPDATE OR DELETE ON "revision_registry"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_registered_control_plane_revisions
+BEFORE UPDATE OR DELETE ON "registered_control_plane_revisions"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_registered_control_plane_revision_payloads
+BEFORE UPDATE OR DELETE ON "registered_control_plane_revision_payloads"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_content_program_revisions
+BEFORE UPDATE OR DELETE ON "content_program_revisions"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_outcome_models
+BEFORE UPDATE OR DELETE ON "outcome_models"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_outcome_edges
+BEFORE UPDATE OR DELETE ON "outcome_edges"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_attribution_model_revisions
+BEFORE UPDATE OR DELETE ON "attribution_model_revisions"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_metric_definition_revisions
+BEFORE UPDATE OR DELETE ON "metric_definition_revisions"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_eval_contract_revisions
+BEFORE UPDATE OR DELETE ON "eval_contract_revisions"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_channel_profile_revisions
+BEFORE UPDATE OR DELETE ON "channel_profile_revisions"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_task_contract_revisions
+BEFORE UPDATE OR DELETE ON "task_contract_revisions"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_run_configs
+BEFORE UPDATE OR DELETE ON "run_configs"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_guidance_revisions
+BEFORE UPDATE OR DELETE ON "guidance_revisions"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_normative_rule_revisions
+BEFORE UPDATE OR DELETE ON "normative_rule_revisions"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_decision_policy_revisions
+BEFORE UPDATE OR DELETE ON "decision_policy_revisions"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_audience_states
+BEFORE UPDATE OR DELETE ON "audience_states"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_applicability_assessments
+BEFORE UPDATE OR DELETE ON "applicability_assessments"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_strategy_hypotheses
+BEFORE UPDATE OR DELETE ON "strategy_hypotheses"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_content_architectures
+BEFORE UPDATE OR DELETE ON "content_architectures"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_content_units
+BEFORE UPDATE OR DELETE ON "content_units"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_content_candidates
+BEFORE UPDATE OR DELETE ON "content_candidates"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_content_assertions
+BEFORE UPDATE OR DELETE ON "content_assertions"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_assertion_proposition_links
+BEFORE UPDATE OR DELETE ON "assertion_proposition_links"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_assertion_validation_results
+BEFORE UPDATE OR DELETE ON "assertion_validation_results"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_composite_impression_assessments
+BEFORE UPDATE OR DELETE ON "composite_impression_assessments"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_qualitative_evaluations
+BEFORE UPDATE OR DELETE ON "qualitative_evaluations"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_risk_assessments
+BEFORE UPDATE OR DELETE ON "risk_assessments"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_uncertainty_assessments
+BEFORE UPDATE OR DELETE ON "uncertainty_assessments"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_rights_policies
+BEFORE UPDATE OR DELETE ON "rights_policies"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_rights_checks
+BEFORE UPDATE OR DELETE ON "rights_checks"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_knowledge_manifests
+BEFORE UPDATE OR DELETE ON "knowledge_manifests"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_baseline_knowledge_snapshots
+BEFORE UPDATE OR DELETE ON "baseline_knowledge_snapshots"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_run_knowledge_deltas
+BEFORE UPDATE OR DELETE ON "run_knowledge_deltas"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_governance_snapshots
+BEFORE UPDATE OR DELETE ON "governance_snapshots"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_decision_snapshots
+BEFORE UPDATE OR DELETE ON "decision_snapshots"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_policy_results
+BEFORE UPDATE OR DELETE ON "policy_results"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_policy_overrides
+BEFORE UPDATE OR DELETE ON "policy_overrides"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_policy_conflict_resolutions
+BEFORE UPDATE OR DELETE ON "policy_conflict_resolutions"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_human_review_records
+BEFORE UPDATE OR DELETE ON "human_review_records"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_decision_records
+BEFORE UPDATE OR DELETE ON "decision_records"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_final_content_packages
+BEFORE UPDATE OR DELETE ON "final_content_packages"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_publication_lineages
+BEFORE UPDATE OR DELETE ON "publication_lineages"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_execution_artifacts
+BEFORE UPDATE OR DELETE ON "execution_artifacts"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_published_artifacts
+BEFORE UPDATE OR DELETE ON "published_artifacts"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_measurement_states
+BEFORE UPDATE OR DELETE ON "measurement_states"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_performance_observations
+BEFORE UPDATE OR DELETE ON "performance_observations"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_change_proposals
+BEFORE UPDATE OR DELETE ON "change_proposals"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_deleted_target_tombstones
+BEFORE UPDATE OR DELETE ON "deleted_target_tombstones"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_deleted_revision_tombstones
+BEFORE UPDATE OR DELETE ON "deleted_revision_tombstones"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_content_program_success_metrics
+BEFORE UPDATE OR DELETE ON "content_program_success_metrics"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_content_program_guardrail_metrics
+BEFORE UPDATE OR DELETE ON "content_program_guardrail_metrics"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_outcome_model_metrics
+BEFORE UPDATE OR DELETE ON "outcome_model_metrics"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_outcome_model_edges
+BEFORE UPDATE OR DELETE ON "outcome_model_edges"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_task_secondary_metrics
+BEFORE UPDATE OR DELETE ON "task_secondary_metrics"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_task_guardrail_metrics
+BEFORE UPDATE OR DELETE ON "task_guardrail_metrics"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_research_trace_evidence
+BEFORE UPDATE OR DELETE ON "research_trace_evidence"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_epistemic_state_assessments
+BEFORE UPDATE OR DELETE ON "epistemic_state_assessments"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_strategy_required_propositions
+BEFORE UPDATE OR DELETE ON "strategy_required_propositions"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_content_architecture_units
+BEFORE UPDATE OR DELETE ON "content_architecture_units"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_content_unit_propositions
+BEFORE UPDATE OR DELETE ON "content_unit_propositions"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_assertion_validation_links
+BEFORE UPDATE OR DELETE ON "assertion_validation_links"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_composite_input_assertions
+BEFORE UPDATE OR DELETE ON "composite_input_assertions"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_composite_implied_assertions
+BEFORE UPDATE OR DELETE ON "composite_implied_assertions"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_knowledge_manifest_sources
+BEFORE UPDATE OR DELETE ON "knowledge_manifest_sources"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_knowledge_manifest_evidence
+BEFORE UPDATE OR DELETE ON "knowledge_manifest_evidence"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_knowledge_manifest_propositions
+BEFORE UPDATE OR DELETE ON "knowledge_manifest_propositions"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_knowledge_manifest_epistemic_states
+BEFORE UPDATE OR DELETE ON "knowledge_manifest_epistemic_states"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_run_delta_sources
+BEFORE UPDATE OR DELETE ON "run_delta_sources"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_run_delta_evidence
+BEFORE UPDATE OR DELETE ON "run_delta_evidence"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_run_delta_propositions
+BEFORE UPDATE OR DELETE ON "run_delta_propositions"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_run_delta_evidence_proposition_links
+BEFORE UPDATE OR DELETE ON "run_delta_evidence_proposition_links"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_run_delta_evidence_assessments
+BEFORE UPDATE OR DELETE ON "run_delta_evidence_assessments"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_run_delta_epistemic_states
+BEFORE UPDATE OR DELETE ON "run_delta_epistemic_states"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_run_delta_knowledge_gaps
+BEFORE UPDATE OR DELETE ON "run_delta_knowledge_gaps"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_run_delta_research_traces
+BEFORE UPDATE OR DELETE ON "run_delta_research_traces"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_governance_snapshot_guidance
+BEFORE UPDATE OR DELETE ON "governance_snapshot_guidance"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_governance_snapshot_rules
+BEFORE UPDATE OR DELETE ON "governance_snapshot_rules"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_governance_snapshot_policies
+BEFORE UPDATE OR DELETE ON "governance_snapshot_policies"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_governance_snapshot_metrics
+BEFORE UPDATE OR DELETE ON "governance_snapshot_metrics"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_governance_snapshot_attributions
+BEFORE UPDATE OR DELETE ON "governance_snapshot_attributions"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_governance_snapshot_rights
+BEFORE UPDATE OR DELETE ON "governance_snapshot_rights"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_decision_snapshot_candidates
+BEFORE UPDATE OR DELETE ON "decision_snapshot_candidates"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_decision_snapshot_strategies
+BEFORE UPDATE OR DELETE ON "decision_snapshot_strategies"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_decision_snapshot_architectures
+BEFORE UPDATE OR DELETE ON "decision_snapshot_architectures"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_decision_snapshot_knowledge_gaps
+BEFORE UPDATE OR DELETE ON "decision_snapshot_knowledge_gaps"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_decision_snapshot_research_traces
+BEFORE UPDATE OR DELETE ON "decision_snapshot_research_traces"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_decision_snapshot_assertions
+BEFORE UPDATE OR DELETE ON "decision_snapshot_assertions"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_decision_snapshot_assertion_validation_results
+BEFORE UPDATE OR DELETE ON "decision_snapshot_assertion_validation_results"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_decision_snapshot_composite_assessments
+BEFORE UPDATE OR DELETE ON "decision_snapshot_composite_assessments"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_decision_snapshot_qualitative_evaluations
+BEFORE UPDATE OR DELETE ON "decision_snapshot_qualitative_evaluations"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_decision_snapshot_applicability_assessments
+BEFORE UPDATE OR DELETE ON "decision_snapshot_applicability_assessments"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_decision_snapshot_risk_assessments
+BEFORE UPDATE OR DELETE ON "decision_snapshot_risk_assessments"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_decision_snapshot_rights_checks
+BEFORE UPDATE OR DELETE ON "decision_snapshot_rights_checks"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_policy_override_results
+BEFORE UPDATE OR DELETE ON "policy_override_results"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_policy_conflict_results
+BEFORE UPDATE OR DELETE ON "policy_conflict_results"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_human_review_policy_results
+BEFORE UPDATE OR DELETE ON "human_review_policy_results"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_decision_policy_results
+BEFORE UPDATE OR DELETE ON "decision_policy_results"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_decision_conflict_resolutions
+BEFORE UPDATE OR DELETE ON "decision_conflict_resolutions"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_package_alternative_candidates
+BEFORE UPDATE OR DELETE ON "package_alternative_candidates"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_package_assertions
+BEFORE UPDATE OR DELETE ON "package_assertions"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_package_propositions
+BEFORE UPDATE OR DELETE ON "package_propositions"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_package_risks
+BEFORE UPDATE OR DELETE ON "package_risks"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_package_rights
+BEFORE UPDATE OR DELETE ON "package_rights"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_performance_observation_artifacts
+BEFORE UPDATE OR DELETE ON "performance_observation_artifacts"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_channel_profile_rule_revisions
+BEFORE UPDATE OR DELETE ON "channel_profile_rule_revisions"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_channel_profile_guidance_revisions
+BEFORE UPDATE OR DELETE ON "channel_profile_guidance_revisions"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_channel_profile_metric_revisions
+BEFORE UPDATE OR DELETE ON "channel_profile_metric_revisions"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_baseline_channel_profiles
+BEFORE UPDATE OR DELETE ON "baseline_channel_profiles"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_guidance_supporting_propositions
+BEFORE UPDATE OR DELETE ON "guidance_supporting_propositions"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_normative_rule_sources
+BEFORE UPDATE OR DELETE ON "normative_rule_sources"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_run_config_prompt_revisions
+BEFORE UPDATE OR DELETE ON "run_config_prompt_revisions"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_run_config_model_revisions
+BEFORE UPDATE OR DELETE ON "run_config_model_revisions"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_run_config_tool_revisions
+BEFORE UPDATE OR DELETE ON "run_config_tool_revisions"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_run_config_schema_revisions
+BEFORE UPDATE OR DELETE ON "run_config_schema_revisions"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_run_config_retriever_revisions
+BEFORE UPDATE OR DELETE ON "run_config_retriever_revisions"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_run_config_evaluator_revisions
+BEFORE UPDATE OR DELETE ON "run_config_evaluator_revisions"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_outcome_model_content_metrics
+BEFORE UPDATE OR DELETE ON "outcome_model_content_metrics"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_outcome_model_diagnostic_metrics
+BEFORE UPDATE OR DELETE ON "outcome_model_diagnostic_metrics"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_outcome_model_guardrail_metrics
+BEFORE UPDATE OR DELETE ON "outcome_model_guardrail_metrics"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_outcome_edge_propositions
+BEFORE UPDATE OR DELETE ON "outcome_edge_propositions"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
+--> statement-breakpoint
+CREATE TRIGGER trg_immutable_replayability_missing_refs
+BEFORE UPDATE OR DELETE ON "replayability_missing_refs"
+FOR EACH ROW EXECUTE FUNCTION prevent_immutable_mutation();
