@@ -12,7 +12,7 @@
  */
 import postgres from 'postgres';
 import { RegistryValidationError } from '../../../domain/services/registry-validator.js';
-import { GovernanceActivationAuthority } from '../../../domain/services/governance-authority.js';
+import { GovernanceActivationAuthority } from '../../../control-plane/authority/control-plane-authority.js';
 
 export interface RegisterTypedRevisionParams {
   entityType: string;

@@ -19,7 +19,7 @@ import { PublicationPersistenceService } from '../../persistence/relational/serv
 import { EpistemicPersistenceService } from '../../persistence/relational/services/epistemic-persistence-service.js';
 import { MeasurementPersistenceService } from '../../persistence/relational/services/measurement-persistence-service.js';
 import { DecisionPersistenceService } from '../../persistence/relational/services/decision-persistence-service.js';
-import { GovernanceControlPlaneGateway } from '../../domain/services/governance-authority.js';
+import { GovernanceControlPlaneGateway } from '../../control-plane/authority/control-plane-authority.js';
 
 function assertTestDatabase(url: string): void {
   const parsed = new URL(url);

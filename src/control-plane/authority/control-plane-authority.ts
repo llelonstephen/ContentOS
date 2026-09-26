@@ -4,10 +4,10 @@
  * Implements SPEC01 §90, SPEC02 §18, SPEC07 §75, SPEC10 §68:
  * Non-forgeable server-side capability boundary for Control Plane revision activation.
  *
- * Prevents Runtime execution context from constructing, spoofing, or directly activating
- * Control Plane revisions.
+ * Lives strictly behind a trusted composition-root / control-plane-only boundary.
+ * Runtime and application execution modules MUST NOT import or call this module.
  */
-import { RegistryValidationError } from './registry-validator.js';
+import { RegistryValidationError } from '../../domain/services/registry-validator.js';
 
 const GOVERNANCE_INTERNAL_SECRET = Symbol('CONTENTOS_GOVERNANCE_INTERNAL_SECRET');
 
@@ -40,7 +40,8 @@ export class GovernanceActivationAuthority {
 
 /**
  * Trusted production gateway for Control Plane / Governance authority.
- * Runtime code cannot construct GovernanceActivationAuthority without this gateway.
+ * Kept strictly inside the Control Plane composition root.
+ * Runtime application code cannot import or invoke this gateway.
  */
 export class GovernanceControlPlaneGateway {
   /**

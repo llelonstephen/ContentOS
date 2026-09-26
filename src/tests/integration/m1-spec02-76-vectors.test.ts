@@ -10,6 +10,8 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import postgres from 'postgres';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import { ControlPlanePersistenceService } from '../../persistence/relational/services/control-plane-persistence-service.js';
 import { PublicationPersistenceService } from '../../persistence/relational/services/publication-persistence-service.js';
 import { EpistemicPersistenceService } from '../../persistence/relational/services/epistemic-persistence-service.js';
@@ -17,7 +19,7 @@ import { MeasurementPersistenceService } from '../../persistence/relational/serv
 import { DecisionPersistenceService } from '../../persistence/relational/services/decision-persistence-service.js';
 import { RetentionDeletionService } from '../../persistence/relational/services/retention-deletion-service.js';
 import { claimObjectForGC } from '../../persistence/relational/services/object-registry-service.js';
-import { GovernanceControlPlaneGateway } from '../../domain/services/governance-authority.js';
+import { GovernanceControlPlaneGateway, GovernanceActivationAuthority } from '../../control-plane/authority/control-plane-authority.js';
 import {
   RegistryValidationError,
   validateSupersession,
@@ -94,6 +96,41 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
   beforeAll(async () => {
     assertTestDatabase(DB_URL);
     sql = postgres(DB_URL, { max: 5 });
+
+    // Provision non-login roles and separate test credentials outside migration
+    await sql`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'contentos_control_plane_role') THEN
+          CREATE ROLE contentos_control_plane_role NOLOGIN;
+        END IF;
+        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'contentos_runtime_role') THEN
+          CREATE ROLE contentos_runtime_role NOLOGIN;
+        END IF;
+        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'test_cp_user') THEN
+          CREATE ROLE test_cp_user WITH LOGIN PASSWORD 'test_cp_secret';
+        END IF;
+        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'test_rt_user') THEN
+          CREATE ROLE test_rt_user WITH LOGIN PASSWORD 'test_rt_secret';
+        END IF;
+        IF NOT pg_has_role('test_cp_user', 'contentos_control_plane_role', 'MEMBER') THEN
+          GRANT contentos_control_plane_role TO test_cp_user;
+        END IF;
+        IF NOT pg_has_role('test_rt_user', 'contentos_runtime_role', 'MEMBER') THEN
+          GRANT contentos_runtime_role TO test_rt_user;
+        END IF;
+        IF pg_has_role('test_rt_user', 'contentos_control_plane_role', 'MEMBER') THEN
+          REVOKE contentos_control_plane_role FROM test_rt_user;
+        END IF;
+      END $$;
+    `;
+    await sql`GRANT USAGE ON SCHEMA public TO contentos_runtime_role, contentos_control_plane_role`;
+    await sql`GRANT ALL ON ALL TABLES IN SCHEMA public TO contentos_control_plane_role`;
+    await sql`GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO contentos_control_plane_role`;
+    await sql`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO contentos_runtime_role`;
+    await sql`GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO contentos_runtime_role`;
+    await sql`REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON control_plane_activations FROM contentos_runtime_role`;
+    await sql`GRANT SELECT ON control_plane_activations TO contentos_runtime_role`;
 
     cpService = new ControlPlanePersistenceService(sql);
     pubService = new PublicationPersistenceService(sql);
@@ -2143,63 +2180,189 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
   });
 
   it('Vector 60: runtime ChangeProposal directly activates revision', async () => {
-    const propId = uid('cp-60');
+    // Two genuinely separate database principals/connections
+    const dbUrlObj = new URL(DB_URL);
+    const cpHostPort = dbUrlObj.host;
+    const cpDbName = dbUrlObj.pathname;
+    const cpSql = postgres(`postgresql://test_cp_user:test_cp_secret@${cpHostPort}${cpDbName}`);
+    const rtSql = postgres(`postgresql://test_rt_user:test_rt_secret@${cpHostPort}${cpDbName}`);
+    const cpRoleService = new ControlPlanePersistenceService(cpSql);
+
     const targetStable = uid('prompt-target-60');
     const targetRev = uid('rev-target-60');
 
-    // 1. Seed target revision in revision_registry
+    // 0. Seed target revision in revision_registry
     await sql`
       INSERT INTO revision_registry (entity_type, stable_id, revision_id, tenant_id)
       VALUES ('PromptConfig', ${targetStable}, ${targetRev}, ${tenantA})
     `;
 
-    // 2. Runtime creates ChangeProposal
-    await sql`
-      INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id)
-      VALUES ('ChangeProposal', ${propId}, ${tenantA})
-    `;
-    await sql`
-      INSERT INTO change_proposals (
-        proposal_id, tenant_id, proposal_type, target_entity_type,
-        target_stable_id, target_revision_id, proposed_change, uncertainty
-      ) VALUES (
-        ${propId}, ${tenantA}, 'POLICY_AMENDMENT', 'PromptConfig',
-        ${targetStable}, ${targetRev}, 'Upgrade prompt', 'LOW'
-      )
-    `;
+    // 1. Governance/Control Plane connection creates a valid activation -> SUCCEEDS
+    const validGovAuthority = GovernanceControlPlaneGateway.issueGovernanceAuthority();
+    const legitActId = uid('act-60-legit');
+    await cpRoleService.activateRevision({
+      activationId: legitActId,
+      deploymentScope: 'TENANT_DEFAULT',
+      componentType: 'PromptConfig',
+      stableId: targetStable,
+      activeRevisionId: targetRev,
+      effectiveFrom: new Date('2026-01-01T00:00:00Z'),
+      effectiveUntil: new Date('2026-12-31T23:59:59Z'),
+      authority: validGovAuthority,
+    });
 
-    // Proof 1: Runtime connection/context attempts to activate a valid registered revision -> REJECTED
-    const runtimeSql = postgres('postgresql://contentos_runtime_user:runtime_secret@localhost:5432/contentos_test');
-    let errRuntimeDb: any;
+    const [legitRow] = await cpSql`
+      SELECT * FROM control_plane_activations WHERE activation_id = ${legitActId}
+    `;
+    expect(legitRow).toBeDefined();
+    expect(legitRow?.['active_revision_id']).toBe(targetRev);
+
+    // 2. Runtime connection attempts INSERT -> REJECTED
+    let errRtInsert: any;
     try {
-      await runtimeSql`
+      await rtSql`
         INSERT INTO control_plane_activations (
           activation_id, deployment_scope, component_type, stable_id, active_revision_id, effective_from
         ) VALUES (
-          ${uid('act-rt-direct')}, 'TENANT_DEFAULT', 'PromptConfig', ${targetStable}, ${targetRev}, now()
+          ${uid('act-rt-bad')}, 'TENANT_DEFAULT', 'PromptConfig', ${targetStable}, ${targetRev}, now()
         )
       `;
     } catch (e) {
-      errRuntimeDb = e;
+      errRtInsert = e;
     }
-    expect(errRuntimeDb).toBeDefined();
-    expect(errRuntimeDb.code).toBe('42501'); // PostgreSQL permission denied for table control_plane_activations
+    expect(errRtInsert).toBeDefined();
+    expect(errRtInsert.code).toBe('42501'); // PostgreSQL permission denied for table control_plane_activations
 
-    // Proof 2: Runtime attempts activation while claiming/spoofing Governance authority -> still REJECTED
-    // 2a. Database level role spoofing
-    let errSpoofRole: any;
+    // 3. Runtime connection attempts UPDATE active_revision_id on the valid activation -> REJECTED
+    let errRtUpdateRev: any;
     try {
-      await runtimeSql`SET ROLE contentos_control_plane_user`;
+      await rtSql`
+        UPDATE control_plane_activations
+        SET active_revision_id = 'rogue-revision-id'
+        WHERE activation_id = ${legitActId}
+      `;
     } catch (e) {
-      errSpoofRole = e;
+      errRtUpdateRev = e;
     }
-    expect(errSpoofRole).toBeDefined();
-    expect(errSpoofRole.code).toBe('42501'); // PostgreSQL permission denied to set role
+    expect(errRtUpdateRev).toBeDefined();
+    expect(errRtUpdateRev.code).toBe('42501'); // PostgreSQL permission denied
 
-    // 2b. Service level spoofing via string claiming governance
+    // 4. Runtime connection attempts UPDATE activation timing -> REJECTED
+    let errRtUpdateTiming: any;
+    try {
+      await rtSql`
+        UPDATE control_plane_activations
+        SET effective_until = now()
+        WHERE activation_id = ${legitActId}
+      `;
+    } catch (e) {
+      errRtUpdateTiming = e;
+    }
+    expect(errRtUpdateTiming).toBeDefined();
+    expect(errRtUpdateTiming.code).toBe('42501'); // PostgreSQL permission denied
+
+    // 5. Runtime connection attempts DELETE -> REJECTED
+    let errRtDelete: any;
+    try {
+      await rtSql`
+        DELETE FROM control_plane_activations
+        WHERE activation_id = ${legitActId}
+      `;
+    } catch (e) {
+      errRtDelete = e;
+    }
+    expect(errRtDelete).toBeDefined();
+    expect(errRtDelete.code).toBe('42501'); // PostgreSQL permission denied
+
+    // 6. Runtime cannot SET ROLE into Control Plane identity
+    let errSetRole: any;
+    try {
+      await rtSql`SET ROLE contentos_control_plane_role`;
+    } catch (e) {
+      errSetRole = e;
+    }
+    expect(errSetRole).toBeDefined();
+    expect(errSetRole.code).toBe('42501'); // PostgreSQL permission denied to set role
+
+    // 7. Runtime/application code cannot mint/import the privileged authority issuer
+    // 7a. Direct construction without internal secret fails
+    let errDirectConstruct: any;
+    try {
+      new (GovernanceActivationAuthority as any)(Symbol('FORGED_SECRET'));
+    } catch (e: any) {
+      errDirectConstruct = e;
+    }
+    expect(errDirectConstruct).toBeDefined();
+    expect(errDirectConstruct.code).toBe('FORGED_AUTHORITY_REJECTED');
+
+    // 7b. Static regression: prove Runtime-layer modules cannot import the Control Plane
+    // authority issuer or privileged activation adapter
+    const projectRoot = path.resolve(import.meta.dirname, '../../');
+    const runtimeLayerDirs = [
+      path.join(projectRoot, 'application'),
+      path.join(projectRoot, 'domain'),
+      path.join(projectRoot, 'workflow'),
+      path.join(projectRoot, 'api'),
+    ];
+
+    function getAllTsFiles(dir: string): string[] {
+      const results: string[] = [];
+      if (!fs.existsSync(dir)) return results;
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          results.push(...getAllTsFiles(fullPath));
+        } else if (entry.isFile() && entry.name.endsWith('.ts') && !entry.name.endsWith('.d.ts')) {
+          results.push(fullPath);
+        }
+      }
+      return results;
+    }
+
+    const forbiddenTokens = [
+      'control-plane-authority',
+      'GovernanceControlPlaneGateway',
+      'ControlPlanePersistenceService',
+      'control-plane-persistence-service',
+    ];
+
+    const violations: { file: string; token: string }[] = [];
+    for (const dir of runtimeLayerDirs) {
+      const files = getAllTsFiles(dir);
+      for (const file of files) {
+        const content = fs.readFileSync(file, 'utf-8');
+        for (const token of forbiddenTokens) {
+          if (content.includes(token)) {
+            violations.push({ file: path.relative(projectRoot, file), token });
+          }
+        }
+      }
+    }
+    expect(violations).toEqual([]);
+
+    // 8. Missing/string/ad-hoc-object authority remains rejected if the capability layer is retained
+    // 8a. Omitted authority -> REJECTED (fail-closed)
+    let errOmitted: any;
+    try {
+      await cpRoleService.activateRevision({
+        activationId: uid('act-60-omitted'),
+        deploymentScope: 'TENANT_DEFAULT',
+        componentType: 'PromptConfig',
+        stableId: targetStable,
+        activeRevisionId: targetRev,
+        effectiveFrom: new Date(),
+      } as any);
+    } catch (e: any) {
+      errOmitted = e;
+    }
+    expect(errOmitted).toBeDefined();
+    expect(errOmitted.code).toBe('AUTHORIZATION_REQUIRED');
+
+    // 8b. String spoofing -> REJECTED
     let errSpoofString: any;
     try {
-      await cpService.activateRevision({
+      await cpRoleService.activateRevision({
         activationId: uid('act-60-spoof-str'),
         deploymentScope: 'TENANT_DEFAULT',
         componentType: 'PromptConfig',
@@ -2214,17 +2377,17 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
     expect(errSpoofString).toBeDefined();
     expect(errSpoofString.code).toBe('FORGED_AUTHORITY_REJECTED');
 
-    // 2c. Service level spoofing via fake object
+    // 8c. Fake object spoofing -> REJECTED
     let errSpoofObj: any;
     try {
-      await cpService.activateRevision({
+      await cpRoleService.activateRevision({
         activationId: uid('act-60-spoof-obj'),
         deploymentScope: 'TENANT_DEFAULT',
         componentType: 'PromptConfig',
         stableId: targetStable,
         activeRevisionId: targetRev,
         effectiveFrom: new Date(),
-        authority: { role: 'GOVERNANCE_CONTROL_PLANE' } as any,
+        authority: { role: 'GOVERNANCE_CONTROL_PLANE', isValid: () => true } as any,
       });
     } catch (e) {
       errSpoofObj = e;
@@ -2232,28 +2395,24 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
     expect(errSpoofObj).toBeDefined();
     expect(errSpoofObj.code).toBe('FORGED_AUTHORITY_REJECTED');
 
-    // Proof 3: Runtime omits authorization metadata -> REJECTED (fail-closed)
-    let errOmitted: any;
-    try {
-      await cpService.activateRevision({
-        activationId: uid('act-60-omitted'),
-        deploymentScope: 'TENANT_DEFAULT',
-        componentType: 'PromptConfig',
-        stableId: targetStable,
-        activeRevisionId: targetRev,
-        effectiveFrom: new Date(),
-      } as any);
-    } catch (e) {
-      errOmitted = e;
-    }
-    expect(errOmitted).toBeDefined();
-    expect(errOmitted.code).toBe('AUTHORIZATION_REQUIRED');
-
-    // Proof 5: ChangeProposal ID still cannot be activated directly as a revision (SPEC10 §68)
-    const validGovAuthority = GovernanceControlPlaneGateway.issueGovernanceAuthority();
+    // 9. ChangeProposal ID cannot self-activate
+    const propId = uid('cp-60');
+    await sql`
+      INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id)
+      VALUES ('ChangeProposal', ${propId}, ${tenantA})
+    `;
+    await sql`
+      INSERT INTO change_proposals (
+        proposal_id, tenant_id, proposal_type, target_entity_type,
+        target_stable_id, target_revision_id, proposed_change, uncertainty
+      ) VALUES (
+        ${propId}, ${tenantA}, 'POLICY_AMENDMENT', 'PromptConfig',
+        ${targetStable}, ${targetRev}, 'Upgrade prompt', 'LOW'
+      )
+    `;
     let errProposalId: any;
     try {
-      await cpService.activateRevision({
+      await cpRoleService.activateRevision({
         activationId: uid('act-60-proposal'),
         deploymentScope: 'TENANT_DEFAULT',
         componentType: 'PromptConfig',
@@ -2268,31 +2427,25 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
     expect(errProposalId).toBeDefined();
     expect(errProposalId.code).toBe('PROPOSAL_CANNOT_SELF_ACTIVATE');
 
-    // Proof 6: Rejected attempts create zero control_plane_activations rows
-    const activationsCount = await sql`
-      SELECT count(*) as count FROM control_plane_activations WHERE stable_id = ${targetStable}
+    // 10. Rejected attempts leave the legitimate activation unchanged
+    const [persistedRow] = await rtSql`
+      SELECT * FROM control_plane_activations WHERE activation_id = ${legitActId}
     `;
-    expect(Number(activationsCount[0]?.['count'])).toBe(0);
+    expect(persistedRow).toBeDefined();
+    expect(persistedRow['active_revision_id']).toBe(targetRev);
+    expect(new Date(persistedRow['effective_from']).toISOString()).toBe('2026-01-01T00:00:00.000Z');
+    expect(new Date(persistedRow['effective_until']).toISOString()).toBe('2026-12-31T23:59:59.000Z');
 
-    // Proof 4: Authorized Control Plane context activates the same valid revision -> SUCCEEDS
-    const actIdAuthorized = uid('act-60-authorized');
-    await cpService.activateRevision({
-      activationId: actIdAuthorized,
-      deploymentScope: 'TENANT_DEFAULT',
-      componentType: 'PromptConfig',
-      stableId: targetStable,
-      activeRevisionId: targetRev,
-      effectiveFrom: new Date('2026-01-01T00:00:00Z'),
-      effectiveUntil: new Date('2026-12-31T23:59:59Z'),
-      authority: validGovAuthority,
-    });
-
-    const [activatedRow] = await sql`
-      SELECT active_revision_id FROM control_plane_activations WHERE activation_id = ${actIdAuthorized}
+    // And verify that no other activations were created for this stable_id
+    const allActivations = await rtSql`
+      SELECT activation_id, active_revision_id FROM control_plane_activations WHERE stable_id = ${targetStable}
     `;
-    expect(activatedRow?.['active_revision_id']).toBe(targetRev);
+    expect(allActivations.length).toBe(1);
+    expect(allActivations[0]?.['activation_id']).toBe(legitActId);
+    expect(allActivations[0]?.['active_revision_id']).toBe(targetRev);
 
-    await runtimeSql.end();
+    await cpSql.end();
+    await rtSql.end();
   });
 
   // 61-76: Deep Relational & Storage Invariants

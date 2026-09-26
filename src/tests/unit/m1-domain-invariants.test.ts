@@ -10,6 +10,9 @@
  * - Decision closure (snapshot consistency, candidate validation, release status ownership)
  */
 import { describe, it, expect } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
+import { GovernanceActivationAuthority } from '../../control-plane/authority/control-plane-authority.js';
 import {
   validateSupersession,
   validateActivationInterval,
@@ -425,3 +428,58 @@ describe('M1 Domain Invariants: Decision Closure & Release Status Ownership', ()
     );
   });
 });
+
+describe('M1 Domain Invariants: Control Plane & Authority Boundary Isolation', () => {
+  it('should enforce that GovernanceActivationAuthority rejects direct construction without secret', () => {
+    expect(() => {
+      new (GovernanceActivationAuthority as any)(Symbol('FORGED'));
+    }).toThrowError(RegistryValidationError);
+  });
+
+  it('dependency/static regression: runtime-layer modules cannot import authority issuer or privileged activation adapter', () => {
+    const projectRoot = path.resolve(import.meta.dirname, '../../');
+    const runtimeLayerDirs = [
+      path.join(projectRoot, 'application'),
+      path.join(projectRoot, 'domain'),
+      path.join(projectRoot, 'workflow'),
+      path.join(projectRoot, 'api'),
+    ];
+
+    function getAllTsFiles(dir: string): string[] {
+      const results: string[] = [];
+      if (!fs.existsSync(dir)) return results;
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          results.push(...getAllTsFiles(fullPath));
+        } else if (entry.isFile() && entry.name.endsWith('.ts') && !entry.name.endsWith('.d.ts')) {
+          results.push(fullPath);
+        }
+      }
+      return results;
+    }
+
+    const forbiddenTokens = [
+      'control-plane-authority',
+      'GovernanceControlPlaneGateway',
+      'ControlPlanePersistenceService',
+      'control-plane-persistence-service',
+    ];
+
+    const violations: { file: string; token: string }[] = [];
+    for (const dir of runtimeLayerDirs) {
+      const files = getAllTsFiles(dir);
+      for (const file of files) {
+        const content = fs.readFileSync(file, 'utf-8');
+        for (const token of forbiddenTokens) {
+          if (content.includes(token)) {
+            violations.push({ file: path.relative(projectRoot, file), token });
+          }
+        }
+      }
+    }
+    expect(violations).toEqual([]);
+  });
+});
+

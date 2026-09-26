@@ -2753,23 +2753,25 @@ FOR EACH ROW EXECUTE FUNCTION enforce_object_reference_integrity();
 --> statement-breakpoint
 DO $$
 BEGIN
-  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'contentos_control_plane_user') THEN
-    CREATE ROLE contentos_control_plane_user WITH LOGIN PASSWORD 'control_plane_secret';
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'contentos_control_plane_role') THEN
+    CREATE ROLE contentos_control_plane_role NOLOGIN;
   END IF;
-  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'contentos_runtime_user') THEN
-    CREATE ROLE contentos_runtime_user WITH LOGIN PASSWORD 'runtime_secret';
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'contentos_runtime_role') THEN
+    CREATE ROLE contentos_runtime_role NOLOGIN;
   END IF;
 END $$;
 --> statement-breakpoint
-GRANT USAGE ON SCHEMA public TO contentos_runtime_user, contentos_control_plane_user;
+GRANT USAGE ON SCHEMA public TO contentos_runtime_role, contentos_control_plane_role;
 --> statement-breakpoint
-GRANT ALL ON ALL TABLES IN SCHEMA public TO contentos_control_plane_user;
+GRANT ALL ON ALL TABLES IN SCHEMA public TO contentos_control_plane_role;
 --> statement-breakpoint
-GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO contentos_control_plane_user;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO contentos_control_plane_role;
 --> statement-breakpoint
-GRANT ALL ON ALL TABLES IN SCHEMA public TO contentos_runtime_user;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO contentos_runtime_role;
 --> statement-breakpoint
-GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO contentos_runtime_user;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO contentos_runtime_role;
 --> statement-breakpoint
-REVOKE INSERT ON control_plane_activations FROM contentos_runtime_user;
+REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON control_plane_activations FROM contentos_runtime_role;
+--> statement-breakpoint
+GRANT SELECT ON control_plane_activations TO contentos_runtime_role;
 
