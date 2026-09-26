@@ -1,16 +1,18 @@
 /**
  * ContentOS — Drizzle Schema: Outbox Events
  *
- * Implements SPEC01 §76-81:
+ * Implements SPEC01 §76-81, SPEC02 §19:
  *   - Transactional outbox pattern
  *   - OutboxEvent entity
  *   - ConsumerReceipt deduplication
  *   - At-least-once delivery
+ *   - PRIMARY KEY(consumer_name, event_id)
+ *   - FK(event_id) → OutboxEvent(event_id)
  */
-import { pgTable, text, timestamp, uuid, uniqueIndex } from 'drizzle-orm/pg-core';
+import { pgTable, text, timestamp, uuid, primaryKey } from 'drizzle-orm/pg-core';
 
 /**
- * OutboxEvent (SPEC01 §77)
+ * OutboxEvent (SPEC01 §77, SPEC02 §19)
  *
  * Domain state + outbox event committed atomically.
  * Never publish event before domain commit (SPEC01 §76).
@@ -27,15 +29,22 @@ export const outboxEvents = pgTable('outbox_events', {
 });
 
 /**
- * ConsumerReceipt (SPEC01 §79)
+ * ConsumerReceipt (SPEC01 §79, SPEC02 §19)
  *
  * Deduplication for event consumers.
- * UNIQUE(consumer_name, event_id) prevents double-processing.
+ * PRIMARY KEY(consumer_name, event_id) prevents double-processing.
+ * FK(event_id) → OutboxEvent(event_id).
  */
-export const consumerReceipts = pgTable('consumer_receipts', {
-  consumer_name: text('consumer_name').notNull(),
-  event_id: uuid('event_id').notNull().references(() => outboxEvents.event_id),
-  processed_at: timestamp('processed_at', { withTimezone: true }).notNull().defaultNow(),
-}, (table) => [
-  uniqueIndex('uq_consumer_event').on(table.consumer_name, table.event_id),
-]);
+export const consumerReceipts = pgTable(
+  'consumer_receipts',
+  {
+    consumer_name: text('consumer_name').notNull(),
+    event_id: uuid('event_id')
+      .notNull()
+      .references(() => outboxEvents.event_id),
+    processed_at: timestamp('processed_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.consumer_name, table.event_id] }),
+  ],
+);

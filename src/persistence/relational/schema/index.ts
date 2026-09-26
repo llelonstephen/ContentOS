@@ -7,4 +7,4 @@
 
 // M0: Infrastructure schemas
 export { outboxEvents, consumerReceipts } from './outbox-schema.js';
-export { idempotencyRecords } from './idempotency-schema.js';
+export { apiIdempotencyRecords, idempotencyRecords } from './idempotency-schema.js';

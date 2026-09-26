@@ -1,9 +1,73 @@
 {
-  "id": "296472f5-b0dd-4212-ab99-ab7ffd006af4",
+  "id": "3a7275ba-8328-43bf-a785-8297e904e190",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
+    "public.api_idempotency_records": {
+      "name": "api_idempotency_records",
+      "schema": "",
+      "columns": {
+        "command_scope": {
+          "name": "command_scope",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "idempotency_key": {
+          "name": "idempotency_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "request_hash": {
+          "name": "request_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "response_ref": {
+          "name": "response_ref",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "completed_at": {
+          "name": "completed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {
+        "api_idempotency_records_command_scope_idempotency_key_pk": {
+          "name": "api_idempotency_records_command_scope_idempotency_key_pk",
+          "columns": [
+            "command_scope",
+            "idempotency_key"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.consumer_receipts": {
       "name": "consumer_receipts",
       "schema": "",
@@ -28,29 +92,7 @@
           "default": "now()"
         }
       },
-      "indexes": {
-        "uq_consumer_event": {
-          "name": "uq_consumer_event",
-          "columns": [
-            {
-              "expression": "consumer_name",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "event_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
+      "indexes": {},
       "foreignKeys": {
         "consumer_receipts_event_id_outbox_events_event_id_fk": {
           "name": "consumer_receipts_event_id_outbox_events_event_id_fk",
@@ -66,61 +108,15 @@
           "onUpdate": "no action"
         }
       },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.idempotency_records": {
-      "name": "idempotency_records",
-      "schema": "",
-      "columns": {
-        "idempotency_key": {
-          "name": "idempotency_key",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "request_hash": {
-          "name": "request_hash",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "response_ref": {
-          "name": "response_ref",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "uq_idempotency_key": {
-          "name": "uq_idempotency_key",
+      "compositePrimaryKeys": {
+        "consumer_receipts_consumer_name_event_id_pk": {
+          "name": "consumer_receipts_consumer_name_event_id_pk",
           "columns": [
-            {
-              "expression": "idempotency_key",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
+            "consumer_name",
+            "event_id"
+          ]
         }
       },
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
