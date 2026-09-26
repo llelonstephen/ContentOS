@@ -1,0 +1,476 @@
+/**
+ * ContentOS — Domain Registry & Invariant Validator Service
+ *
+ * Implements SPEC02:
+ *   - §5, §6: RevisionRef & ImmutableEntityRef validation
+ *   - §10, §21: Supersession integrity (same stable ID, same entity type, no self-supersession)
+ *   - §19, §29: ControlPlaneActivation interval non-overlap validation
+ *   - §18: PublicationLineage DAG integrity (acyclic, single lineage, strictly increasing time)
+ *   - §13, §28: Epistemic state chain integrity (acyclic, strictly increasing known_from)
+ *   - §18: MeasurementState & PerformanceObservation correction integrity
+ *   - §17: Decision closure validation
+ */
+
+export interface RevisionRefInput {
+  entity_type: string;
+  stable_id: string;
+  revision_id: string;
+}
+
+export interface ImmutableEntityRefInput {
+  entity_type: string;
+  entity_id: string;
+}
+
+export interface RevisionRow {
+  entity_type: string;
+  stable_id: string;
+  revision_id: string;
+  supersedes_revision_id?: string | null;
+}
+
+export interface ActivationInterval {
+  activation_id: string;
+  deployment_scope: string;
+  component_type: string;
+  stable_id: string;
+  active_revision_id: string;
+  effective_from: Date;
+  effective_until?: Date | null;
+}
+
+export interface PublishedArtifactNode {
+  published_artifact_id: string;
+  publication_lineage_id: string;
+  supersedes_published_artifact_id?: string | null;
+  effective_from: Date;
+}
+
+export interface EpistemicStateNode {
+  epistemic_state_id: string;
+  proposition_id: string;
+  supersedes_epistemic_state_id?: string | null;
+  known_from: Date;
+}
+
+export interface PerformanceObservationNode {
+  observation_id: string;
+  metric_revision_id: string;
+  publication_state: 'SINGLE_ARTIFACT' | 'MIXED';
+  covered_published_artifact_ids: string[];
+  supersedes_observation_id?: string | null;
+  observed_at: Date;
+}
+
+export interface DecisionSnapshotData {
+  snapshot_id: string;
+  task_revision_id: string;
+  candidate_ids: string[];
+}
+
+export interface DecisionRecordData {
+  decision_id: string;
+  snapshot_id: string;
+  task_revision_id: string;
+  selected_action: string;
+  selected_candidate_id?: string | null;
+  release_status: string;
+  policy_result_ids: string[];
+  conflict_resolution_ids: string[];
+}
+
+export interface FinalContentPackageData {
+  package_id: string;
+  task_revision_id: string;
+  decision_id: string;
+  decision_snapshot_id: string;
+  selected_candidate_id: string;
+  release_status?: unknown; // MUST NOT exist on package
+}
+
+export class RegistryValidationError extends Error {
+  constructor(
+    public readonly code: string,
+    message: string,
+  ) {
+    super(`[${code}] ${message}`);
+    this.name = 'RegistryValidationError';
+  }
+}
+
+/**
+ * Validates supersession invariants between predecessor and successor revisions (SPEC02 §10, §21).
+ */
+export function validateSupersession(
+  predecessor: RevisionRow,
+  successor: RevisionRow,
+): void {
+  if (successor.entity_type !== predecessor.entity_type) {
+    throw new RegistryValidationError(
+      'SUPERSEDED_ENTITY_TYPE_MISMATCH',
+      `Successor entity_type '${successor.entity_type}' must match predecessor entity_type '${predecessor.entity_type}'`,
+    );
+  }
+
+  if (successor.stable_id !== predecessor.stable_id) {
+    throw new RegistryValidationError(
+      'SUPERSEDED_STABLE_ID_MISMATCH',
+      `Successor stable_id '${successor.stable_id}' must match predecessor stable_id '${predecessor.stable_id}'`,
+    );
+  }
+
+  if (successor.revision_id === predecessor.revision_id) {
+    throw new RegistryValidationError(
+      'SELF_SUPERSEDED_REVISION',
+      `Revision '${successor.revision_id}' cannot supersede itself`,
+    );
+  }
+
+  if (successor.supersedes_revision_id !== predecessor.revision_id) {
+    throw new RegistryValidationError(
+      'SUPERSEDED_REVISION_MISMATCH',
+      `Successor declares superseding '${successor.supersedes_revision_id}' but predecessor is '${predecessor.revision_id}'`,
+    );
+  }
+}
+
+/**
+ * Validates activation intervals for single-active semantics (SPEC02 §19, §29).
+ * Ensures no overlapping intervals for the same (deployment_scope, component_type, stable_id).
+ */
+export function validateActivationInterval(
+  existingActivations: ActivationInterval[],
+  newActivation: ActivationInterval,
+): void {
+  const newFrom = newActivation.effective_from.getTime();
+  const newUntil = newActivation.effective_until ? newActivation.effective_until.getTime() : Infinity;
+
+  if (newUntil <= newFrom) {
+    throw new RegistryValidationError(
+      'INVALID_INTERVAL_RANGE',
+      `effective_until (${newActivation.effective_until?.toISOString()}) must be strictly greater than effective_from (${newActivation.effective_from.toISOString()})`,
+    );
+  }
+
+  for (const existing of existingActivations) {
+    if (existing.activation_id === newActivation.activation_id) continue;
+
+    if (
+      existing.deployment_scope === newActivation.deployment_scope &&
+      existing.component_type === newActivation.component_type &&
+      existing.stable_id === newActivation.stable_id
+    ) {
+      const exFrom = existing.effective_from.getTime();
+      const exUntil = existing.effective_until ? existing.effective_until.getTime() : Infinity;
+
+      // Intervals [newFrom, newUntil) and [exFrom, exUntil) overlap if newFrom < exUntil && exFrom < newUntil
+      const overlaps = newFrom < exUntil && exFrom < newUntil;
+      if (overlaps) {
+        throw new RegistryValidationError(
+          'ACTIVATION_INTERVAL_OVERLAP',
+          `Activation interval [${newActivation.effective_from.toISOString()}, ${newActivation.effective_until?.toISOString() ?? 'inf'}) overlaps with existing activation '${existing.activation_id}' [${existing.effective_from.toISOString()}, ${existing.effective_until?.toISOString() ?? 'inf'}) for scope '${newActivation.deployment_scope}', component '${newActivation.component_type}', stable_id '${newActivation.stable_id}'`,
+        );
+      }
+    }
+  }
+}
+
+/**
+ * Validates publication lineage invariants (SPEC02 §18):
+ * - Exactly one root per lineage
+ * - Maximum one direct successor per artifact
+ * - Successor remains in same lineage
+ * - Strictly increasing effective_from
+ * - Acyclic supersession
+ */
+export function validatePublicationLineage(
+  lineageArtifacts: PublishedArtifactNode[],
+  newArtifact: PublishedArtifactNode,
+): void {
+  if (!newArtifact.supersedes_published_artifact_id) {
+    // Root artifact check: lineage must not already have a root
+    const existingRoot = lineageArtifacts.find(
+      (a) =>
+        a.publication_lineage_id === newArtifact.publication_lineage_id &&
+        !a.supersedes_published_artifact_id &&
+        a.published_artifact_id !== newArtifact.published_artifact_id,
+    );
+    if (existingRoot) {
+      throw new RegistryValidationError(
+        'MULTIPLE_LINEAGE_ROOTS',
+        `PublicationLineage '${newArtifact.publication_lineage_id}' already has a root '${existingRoot.published_artifact_id}'`,
+      );
+    }
+    return;
+  }
+
+  const predecessor = lineageArtifacts.find(
+    (a) => a.published_artifact_id === newArtifact.supersedes_published_artifact_id,
+  );
+  if (!predecessor) {
+    throw new RegistryValidationError(
+      'MISSING_PREDECESSOR',
+      `Predecessor '${newArtifact.supersedes_published_artifact_id}' not found in lineage`,
+    );
+  }
+
+  if (predecessor.publication_lineage_id !== newArtifact.publication_lineage_id) {
+    throw new RegistryValidationError(
+      'CROSS_LINEAGE_SUPERSEDED',
+      `Successor artifact '${newArtifact.published_artifact_id}' in lineage '${newArtifact.publication_lineage_id}' cannot supersede artifact '${predecessor.published_artifact_id}' from lineage '${predecessor.publication_lineage_id}'`,
+    );
+  }
+
+  // At most one direct successor check
+  const existingSuccessor = lineageArtifacts.find(
+    (a) =>
+      a.supersedes_published_artifact_id === predecessor.published_artifact_id &&
+      a.published_artifact_id !== newArtifact.published_artifact_id,
+  );
+  if (existingSuccessor) {
+    throw new RegistryValidationError(
+      'BRANCHED_LINEAGE_SUCCESSOR',
+      `Predecessor '${predecessor.published_artifact_id}' already has successor '${existingSuccessor.published_artifact_id}'`,
+    );
+  }
+
+  // Strictly increasing effective_from
+  if (newArtifact.effective_from.getTime() <= predecessor.effective_from.getTime()) {
+    throw new RegistryValidationError(
+      'NON_INCREASING_EFFECTIVE_TIME',
+      `Successor effective_from (${newArtifact.effective_from.toISOString()}) must be strictly greater than predecessor effective_from (${predecessor.effective_from.toISOString()})`,
+    );
+  }
+
+  // Cycle check: trace backwards from predecessor
+  const visited = new Set<string>([newArtifact.published_artifact_id]);
+  let current: PublishedArtifactNode | undefined = predecessor;
+  while (current) {
+    if (visited.has(current.published_artifact_id)) {
+      throw new RegistryValidationError(
+        'LINEAGE_CYCLE_DETECTED',
+        `Cycle detected in publication lineage at '${current.published_artifact_id}'`,
+      );
+    }
+    visited.add(current.published_artifact_id);
+    current = current.supersedes_published_artifact_id
+      ? lineageArtifacts.find((a) => a.published_artifact_id === current?.supersedes_published_artifact_id)
+      : undefined;
+  }
+}
+
+/**
+ * Validates epistemic chain invariants (SPEC02 §13, §28):
+ * - Successor proposition_id MUST equal predecessor proposition_id
+ * - At most one direct successor per predecessor
+ * - Successor known_from MUST be greater than predecessor known_from
+ * - Supersession graph MUST be acyclic
+ */
+export function validateEpistemicChain(
+  existingStates: EpistemicStateNode[],
+  newState: EpistemicStateNode,
+): void {
+  if (!newState.supersedes_epistemic_state_id) {
+    // Root state for this proposition
+    const existingRoot = existingStates.find(
+      (s) =>
+        s.proposition_id === newState.proposition_id &&
+        !s.supersedes_epistemic_state_id &&
+        s.epistemic_state_id !== newState.epistemic_state_id,
+    );
+    if (existingRoot) {
+      throw new RegistryValidationError(
+        'MULTIPLE_EPISTEMIC_ROOTS',
+        `Proposition '${newState.proposition_id}' already has a root epistemic state '${existingRoot.epistemic_state_id}'`,
+      );
+    }
+    return;
+  }
+
+  const predecessor = existingStates.find(
+    (s) => s.epistemic_state_id === newState.supersedes_epistemic_state_id,
+  );
+  if (!predecessor) {
+    throw new RegistryValidationError(
+      'MISSING_EPISTEMIC_PREDECESSOR',
+      `Predecessor epistemic state '${newState.supersedes_epistemic_state_id}' not found`,
+    );
+  }
+
+  if (predecessor.proposition_id !== newState.proposition_id) {
+    throw new RegistryValidationError(
+      'CROSS_PROPOSITION_SUPERSEDED',
+      `Successor proposition_id '${newState.proposition_id}' must equal predecessor proposition_id '${predecessor.proposition_id}'`,
+    );
+  }
+
+  const existingSuccessor = existingStates.find(
+    (s) =>
+      s.supersedes_epistemic_state_id === predecessor.epistemic_state_id &&
+      s.epistemic_state_id !== newState.epistemic_state_id,
+  );
+  if (existingSuccessor) {
+    throw new RegistryValidationError(
+      'BRANCHED_EPISTEMIC_SUCCESSOR',
+      `Epistemic predecessor '${predecessor.epistemic_state_id}' already has successor '${existingSuccessor.epistemic_state_id}'`,
+    );
+  }
+
+  if (newState.known_from.getTime() <= predecessor.known_from.getTime()) {
+    throw new RegistryValidationError(
+      'NON_INCREASING_KNOWN_FROM',
+      `Successor known_from (${newState.known_from.toISOString()}) must be strictly greater than predecessor known_from (${predecessor.known_from.toISOString()})`,
+    );
+  }
+
+  // Cycle check
+  const visited = new Set<string>([newState.epistemic_state_id]);
+  let current: EpistemicStateNode | undefined = predecessor;
+  while (current) {
+    if (visited.has(current.epistemic_state_id)) {
+      throw new RegistryValidationError(
+        'EPISTEMIC_CYCLE_DETECTED',
+        `Cycle detected in epistemic history at '${current.epistemic_state_id}'`,
+      );
+    }
+    visited.add(current.epistemic_state_id);
+    current = current.supersedes_epistemic_state_id
+      ? existingStates.find((s) => s.epistemic_state_id === current?.supersedes_epistemic_state_id)
+      : undefined;
+  }
+}
+
+/**
+ * Validates measurement correction invariants (SPEC02 §18):
+ * - Correction preserves metric_revision_id and semantic measurement scope
+ * - At most one direct successor per predecessor
+ * - SINGLE_ARTIFACT requires exactly 1 covered artifact; MIXED requires at least 2
+ */
+export function validateMeasurementCorrection(
+  existingObservations: PerformanceObservationNode[],
+  newObservation: PerformanceObservationNode,
+): void {
+  // Scope check
+  if (newObservation.publication_state === 'SINGLE_ARTIFACT') {
+    if (newObservation.covered_published_artifact_ids.length !== 1) {
+      throw new RegistryValidationError(
+        'INVALID_SINGLE_ARTIFACT_COUNT',
+        `SINGLE_ARTIFACT requires exactly 1 covered published artifact, received ${newObservation.covered_published_artifact_ids.length}`,
+      );
+    }
+  } else if (newObservation.publication_state === 'MIXED') {
+    if (newObservation.covered_published_artifact_ids.length < 2) {
+      throw new RegistryValidationError(
+        'INVALID_MIXED_ARTIFACT_COUNT',
+        `MIXED publication state requires at least 2 covered published artifacts, received ${newObservation.covered_published_artifact_ids.length}`,
+      );
+    }
+  }
+
+  if (!newObservation.supersedes_observation_id) return;
+
+  const predecessor = existingObservations.find(
+    (o) => o.observation_id === newObservation.supersedes_observation_id,
+  );
+  if (!predecessor) {
+    throw new RegistryValidationError(
+      'MISSING_MEASUREMENT_PREDECESSOR',
+      `Predecessor observation '${newObservation.supersedes_observation_id}' not found`,
+    );
+  }
+
+  if (newObservation.metric_revision_id !== predecessor.metric_revision_id) {
+    throw new RegistryValidationError(
+      'METRIC_REVISION_PRESERVATION_VIOLATION',
+      `Measurement correction cannot change metric_revision_id from '${predecessor.metric_revision_id}' to '${newObservation.metric_revision_id}'`,
+    );
+  }
+
+  const existingSuccessor = existingObservations.find(
+    (o) =>
+      o.supersedes_observation_id === predecessor.observation_id &&
+      o.observation_id !== newObservation.observation_id,
+  );
+  if (existingSuccessor) {
+    throw new RegistryValidationError(
+      'BRANCHED_MEASUREMENT_SUCCESSOR',
+      `Observation '${predecessor.observation_id}' already has correction successor '${existingSuccessor.observation_id}'`,
+    );
+  }
+}
+
+/**
+ * Validates decision closure invariants (SPEC02 §17):
+ * - DecisionRecord owns canonical release_status
+ * - FinalContentPackage does NOT duplicate release_status
+ * - Selected candidate belongs to DecisionSnapshot candidate_ids
+ * - Transitive references match between DecisionRecord and FinalContentPackage
+ */
+export function validateDecisionClosure(
+  snapshot: DecisionSnapshotData,
+  decisionRecord: DecisionRecordData,
+  contentPackage?: FinalContentPackageData,
+): void {
+  if (decisionRecord.snapshot_id !== snapshot.snapshot_id) {
+    throw new RegistryValidationError(
+      'DECISION_SNAPSHOT_MISMATCH',
+      `DecisionRecord snapshot_id '${decisionRecord.snapshot_id}' does not match DecisionSnapshot '${snapshot.snapshot_id}'`,
+    );
+  }
+
+  if (decisionRecord.task_revision_id !== snapshot.task_revision_id) {
+    throw new RegistryValidationError(
+      'DECISION_TASK_REVISION_MISMATCH',
+      `DecisionRecord task_revision_id '${decisionRecord.task_revision_id}' does not match DecisionSnapshot '${snapshot.task_revision_id}'`,
+    );
+  }
+
+  if (decisionRecord.selected_candidate_id) {
+    if (!snapshot.candidate_ids.includes(decisionRecord.selected_candidate_id)) {
+      throw new RegistryValidationError(
+        'SELECTED_CANDIDATE_NOT_IN_SNAPSHOT',
+        `Selected candidate '${decisionRecord.selected_candidate_id}' is not present in DecisionSnapshot candidates`,
+      );
+    }
+  }
+
+  if (contentPackage) {
+    if ('release_status' in contentPackage && contentPackage.release_status !== undefined) {
+      throw new RegistryValidationError(
+        'PACKAGE_OWNS_RELEASE_STATUS_ERROR',
+        'FinalContentPackage MUST NOT duplicate release_status; DecisionRecord is the sole canonical owner',
+      );
+    }
+
+    if (contentPackage.decision_id !== decisionRecord.decision_id) {
+      throw new RegistryValidationError(
+        'PACKAGE_DECISION_ID_MISMATCH',
+        `Package decision_id '${contentPackage.decision_id}' does not match DecisionRecord '${decisionRecord.decision_id}'`,
+      );
+    }
+
+    if (contentPackage.decision_snapshot_id !== decisionRecord.snapshot_id) {
+      throw new RegistryValidationError(
+        'PACKAGE_SNAPSHOT_ID_MISMATCH',
+        `Package decision_snapshot_id '${contentPackage.decision_snapshot_id}' does not match DecisionRecord snapshot_id '${decisionRecord.snapshot_id}'`,
+      );
+    }
+
+    if (contentPackage.task_revision_id !== decisionRecord.task_revision_id) {
+      throw new RegistryValidationError(
+        'PACKAGE_TASK_REVISION_MISMATCH',
+        `Package task_revision_id '${contentPackage.task_revision_id}' does not match DecisionRecord task_revision_id '${decisionRecord.task_revision_id}'`,
+      );
+    }
+
+    if (
+      decisionRecord.selected_candidate_id &&
+      contentPackage.selected_candidate_id !== decisionRecord.selected_candidate_id
+    ) {
+      throw new RegistryValidationError(
+        'PACKAGE_CANDIDATE_MISMATCH',
+        `Package selected_candidate_id '${contentPackage.selected_candidate_id}' does not match DecisionRecord '${decisionRecord.selected_candidate_id}'`,
+      );
+    }
+  }
+}
