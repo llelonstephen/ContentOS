@@ -8,7 +8,9 @@
  *   - Enforces lease owner and expiration
  *   - Prohibits omitting stage authorization when writing within a DecisionCycle
  */
+import type postgres from 'postgres';
 import { RegistryValidationError } from '../../../domain/services/registry-validator.js';
+import { StandaloneIngestionAdapter } from './standalone-ingestion-adapter.js';
 
 export interface StageFencingContext {
   decisionCycleId?: string | null;
@@ -19,8 +21,23 @@ export interface StageFencingContext {
 
 export type WriteMode = 'STANDALONE' | 'DECISION_CYCLE';
 
-export const TRUSTED_STANDALONE_CAPABILITY: unique symbol = Symbol('TRUSTED_STANDALONE_CAPABILITY');
-export type TrustedWriteCapability = typeof TRUSTED_STANDALONE_CAPABILITY;
+const STANDALONE_AUTHORITY: unique symbol = Symbol('ContentOS.Private.StandaloneAuthority');
+
+/**
+ * Trusted factory to construct StandaloneIngestionAdapter with the module-private authority.
+ * Decision-cycle runtime modules are statically prohibited from importing this factory.
+ */
+export function createStandaloneIngestionAdapter(
+  sql: ReturnType<typeof postgres>,
+  services?: {
+    evService?: any;
+    propService?: any;
+    epiService?: any;
+    gapService?: any;
+  },
+): StandaloneIngestionAdapter {
+  return new StandaloneIngestionAdapter(sql, STANDALONE_AUTHORITY, services);
+}
 
 export async function verifyStageFencing(
   sqlTx: any,
@@ -30,10 +47,10 @@ export async function verifyStageFencing(
     workspaceId?: string | null;
     requireCycleContext?: boolean;
     writeMode?: WriteMode;
-    trustedCapability?: TrustedWriteCapability;
+    _standaloneAuthority?: unknown;
   },
 ): Promise<void> {
-  const { fencingContext, tenantId, workspaceId, requireCycleContext, writeMode, trustedCapability } = params;
+  const { fencingContext, tenantId, workspaceId, requireCycleContext, writeMode, _standaloneAuthority } = params;
 
   const hasCycleContext = !!fencingContext?.decisionCycleId;
   const isCycleMode = writeMode === 'DECISION_CYCLE' || requireCycleContext || hasCycleContext;
@@ -45,7 +62,7 @@ export async function verifyStageFencing(
     );
   }
 
-  if (!isCycleMode && trustedCapability !== TRUSTED_STANDALONE_CAPABILITY) {
+  if (!isCycleMode && _standaloneAuthority !== STANDALONE_AUTHORITY) {
     throw new RegistryValidationError(
       'WRITE_AUTHORITY_REQUIRED',
       'Direct invocation of canonical knowledge persistence without verified write authority is forbidden. Decision-cycle writes require DecisionCycle and StageExecution fencing context; standalone writes require trusted StandaloneIngestionAdapter capability.',

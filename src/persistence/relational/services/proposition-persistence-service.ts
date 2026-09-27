@@ -21,9 +21,10 @@ import {
   verifyStageFencing,
   type StageFencingContext,
   type WriteMode,
-  type TrustedWriteCapability,
 } from './stage-fencing-coordinator.js';
 import { RegistryValidationError } from '../../../domain/services/registry-validator.js';
+
+export type FingerprintProvider = (identity: PropositionSemanticIdentity) => string;
 
 export interface ResolveOrCreatePropositionParams {
   propositionId: string;
@@ -41,7 +42,6 @@ export interface ResolveOrCreatePropositionParams {
   supersedesPropositionId?: string | null;
   fencingContext?: StageFencingContext | null;
   writeMode?: WriteMode;
-  trustedCapability?: TrustedWriteCapability;
 }
 
 export interface PropositionResolutionResult {
@@ -51,7 +51,10 @@ export interface PropositionResolutionResult {
 }
 
 export class PropositionPersistenceService {
-  constructor(private readonly sql: ReturnType<typeof postgres>) {}
+  constructor(
+    private readonly sql: ReturnType<typeof postgres>,
+    private readonly fingerprintProvider?: FingerprintProvider,
+  ) {}
 
   /**
    * Resolves an accessible equivalent Proposition or creates a new one in a concurrency-safe transaction.
@@ -76,8 +79,8 @@ export class PropositionPersistenceService {
       supersedesPropositionId,
       fencingContext,
       writeMode,
-      trustedCapability,
     } = params;
+    const _standaloneAuthority = (params as any)._standaloneAuthority;
 
     const identity: PropositionSemanticIdentity = {
       propositionType,
@@ -91,7 +94,7 @@ export class PropositionPersistenceService {
       jurisdictionScope,
     };
 
-    const fingerprint = computeSemanticFingerprint(identity);
+    const fingerprint = (this.fingerprintProvider ?? computeSemanticFingerprint)(identity);
     const lockKey = computeAdvisoryLockKey(fingerprint);
 
     return await this.sql.begin(async (sqlTx) => {
@@ -102,7 +105,7 @@ export class PropositionPersistenceService {
         workspaceId,
         requireCycleContext: writeMode === 'DECISION_CYCLE' || !!fencingContext?.decisionCycleId,
         writeMode,
-        trustedCapability,
+        _standaloneAuthority,
       });
 
       // 1. Acquire transaction-level advisory lock on derived semantic fingerprint (SPEC03 §34)

@@ -322,7 +322,47 @@ describe('SPEC03 §146 Static Contract Preflight Suite (28 Checks)', () => {
     expect(coordinatorContent).toContain('STALE_WORKER_COMMIT_REJECTED');
     expect(coordinatorContent).toContain('WRITE_AUTHORITY_REQUIRED');
 
-    // AST / import-graph analysis: Prove decision-cycle runtime modules cannot import StandaloneIngestionAdapter or TRUSTED_STANDALONE_CAPABILITY
+    // 1. AST check: coordinator does NOT export standalone capability or authority secrets
+    const coordinatorSf = ts.createSourceFile(coordinatorPath, coordinatorContent, ts.ScriptTarget.Latest, true);
+    ts.forEachChild(coordinatorSf, (node) => {
+      if (ts.isVariableStatement(node) && node.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)) {
+        for (const decl of node.declarationList.declarations) {
+          const name = decl.name.getText(coordinatorSf);
+          expect(name).not.toBe('TRUSTED_STANDALONE_CAPABILITY');
+          expect(name).not.toBe('STANDALONE_AUTHORITY');
+          expect(name).not.toMatch(/CAPABILITY/i);
+          expect(name).not.toMatch(/AUTHORITY_TOKEN/i);
+        }
+      }
+    });
+
+    // 2. AST check: Base canonical persistence interfaces do NOT expose public authority parameters
+    const persistenceServiceFiles = [
+      'evidence-persistence-service.ts',
+      'proposition-persistence-service.ts',
+      'epistemic-persistence-service.ts',
+      'knowledge-gap-persistence-service.ts',
+    ];
+    for (const serviceFile of persistenceServiceFiles) {
+      const fullPath = path.resolve(import.meta.dirname, '../../persistence/relational/services', serviceFile);
+      const code = fs.readFileSync(fullPath, 'utf-8');
+      const sf = ts.createSourceFile(fullPath, code, ts.ScriptTarget.Latest, true);
+      ts.forEachChild(sf, (node) => {
+        if (ts.isInterfaceDeclaration(node) && node.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)) {
+          for (const member of node.members) {
+            if (ts.isPropertySignature(member) && member.name) {
+              const propName = member.name.getText(sf);
+              expect(propName).not.toBe('trustedCapability');
+              expect(propName).not.toBe('standaloneCapability');
+              expect(propName).not.toBe('trustedStandaloneCapability');
+              expect(propName).not.toBe('_standaloneAuthority');
+            }
+          }
+        }
+      });
+    }
+
+    // 3. Import-graph analysis: Detect namespace imports, dynamic imports, re-exports, and privileged adapter imports
     const srcDir = path.resolve(import.meta.dirname, '../..');
     const allFiles: string[] = [];
     function walk(dir: string) {
@@ -346,21 +386,46 @@ describe('SPEC03 §146 Static Contract Preflight Suite (28 Checks)', () => {
       }
       const code = fs.readFileSync(file, 'utf-8');
       const sf = ts.createSourceFile(file, code, ts.ScriptTarget.Latest, true);
-      ts.forEachChild(sf, (node) => {
+
+      const checkNode = (node: ts.Node) => {
+        // Detect static imports
         if (ts.isImportDeclaration(node)) {
-          const namedBindings = node.importClause?.namedBindings;
-          if (namedBindings && ts.isNamedImports(namedBindings)) {
-            for (const spec of namedBindings.elements) {
-              const name = spec.name.text;
-              expect(name).not.toBe('StandaloneIngestionAdapter');
-              expect(name).not.toBe('TRUSTED_STANDALONE_CAPABILITY');
+          const modSpecifier = node.moduleSpecifier.getText(sf);
+          if (modSpecifier.includes('standalone-ingestion-adapter') || modSpecifier.includes('stage-fencing-coordinator')) {
+            const namedBindings = node.importClause?.namedBindings;
+            if (namedBindings && ts.isNamespaceImport(namedBindings)) {
+              throw new Error(`Namespace import of privileged module detected in ${file}`);
+            }
+            if (namedBindings && ts.isNamedImports(namedBindings)) {
+              for (const spec of namedBindings.elements) {
+                const name = spec.name.text;
+                expect(name).not.toBe('StandaloneIngestionAdapter');
+                expect(name).not.toBe('TRUSTED_STANDALONE_CAPABILITY');
+                expect(name).not.toBe('createStandaloneIngestionAdapter');
+              }
             }
           }
         }
-      });
+        // Detect dynamic imports
+        if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+          const arg = node.arguments[0]?.getText(sf) ?? '';
+          if (arg.includes('standalone-ingestion-adapter') || arg.includes('stage-fencing-coordinator')) {
+            throw new Error(`Dynamic import of privileged module detected in ${file}`);
+          }
+        }
+        // Detect re-exports
+        if (ts.isExportDeclaration(node)) {
+          const modSpecifier = node.moduleSpecifier?.getText(sf) ?? '';
+          if (modSpecifier.includes('standalone-ingestion-adapter')) {
+            throw new Error(`Re-export of StandaloneIngestionAdapter detected in ${file}`);
+          }
+        }
+        ts.forEachChild(node, checkNode);
+      };
+      checkNode(sf);
     }
 
-    // AST analysis: DecisionCycleKnowledgeAdapter requires StageExecution/fencing on all methods
+    // 4. AST analysis: DecisionCycleKnowledgeAdapter requires StageExecution/fencing on all methods
     const adapterPath = path.resolve(
       import.meta.dirname,
       '../../persistence/relational/services/decision-cycle-knowledge-adapter.ts',
@@ -513,7 +578,7 @@ describe('SPEC03 §146 Static Contract Preflight Suite (28 Checks)', () => {
     );
   });
 
-  it('Check 28: no duplicate source of epistemic truth and no caller-controlled truth path', () => {
+  it('Check 28: no duplicate source of epistemic truth, mechanical derivation, exact registered revision, and RunConfig pin', () => {
     const schemaContent = fs.readFileSync(
       path.resolve(import.meta.dirname, '../../persistence/relational/schema/epistemic.ts'),
       'utf-8',
@@ -542,24 +607,39 @@ describe('SPEC03 §146 Static Contract Preflight Suite (28 Checks)', () => {
     expect(epiService).toContain('deriveEpistemicState');
     expect(epiService).toContain('INVALID_EPISTEMIC_STATUS');
     expect(epiService).toContain('INVALID_CAUSAL_STATUS');
+    expect(epiService).toContain('RESEARCH_TRACE_CANNOT_BE_DERIVATION_REVISION');
+    expect(epiService).toContain('RESEARCH_TRACE_NOT_FOUND');
+    expect(epiService).toContain('TENANT_ISOLATION_VIOLATION');
+    expect(epiService).toContain('WORKSPACE_ISOLATION_VIOLATION');
 
-    // AST check: verify EXPERIMENTAL derivation path is mechanically validated and caller assertions cannot be trusted
-    let experimentalValidated = false;
+    // AST check: verify EpistemicPersistenceService strictly enforces mechanical derivation,
+    // exact registered revision, RunConfig pin, rejects ResearchTrace as revision, and allows no caller-controlled truth path
+    let appendMethodFound = false;
     ts.forEachChild(sf, (node) => {
       if (ts.isClassDeclaration(node) && node.name?.text === 'EpistemicPersistenceService') {
         for (const member of node.members) {
           if (ts.isMethodDeclaration(member) && member.name && ts.isIdentifier(member.name) && member.name.text === 'appendEpistemicState') {
+            appendMethodFound = true;
             const body = member.body?.getText(sf) ?? '';
+            // 1. Mechanical derivation enforced
+            expect(body).toContain('deriveEpistemicState');
+            expect(body).toContain('DERIVED_STATE_MISMATCH');
+            // 2. Exact registered derivation revision verified
+            expect(body).toContain('FROM revision_registry');
+            expect(body).toContain('DERIVATION_REVISION_NOT_FOUND');
+            // 3. Valid RunConfig / stage pin
+            expect(body).toContain('DERIVATION_REVISION_NOT_PINNED');
+            // 4. No ResearchTrace-as-revision branch
+            expect(body).toContain("derivationEntityType === 'ResearchTrace'");
+            expect(body).toContain('RESEARCH_TRACE_CANNOT_BE_DERIVATION_REVISION');
+            // 5. No caller-controlled truth path for EXPERIMENTAL
             expect(body).toContain("derivationMethod === 'EXPERIMENTAL'");
-            expect(body).toContain("trace.outcome === 'NO_EVIDENCE_FOUND'");
-            expect(body).toContain("deriveEpistemicState");
-            expect(body).toContain("DERIVED_STATE_MISMATCH");
-            experimentalValidated = true;
+            expect(body).toContain("researchTrace.outcome === 'NO_EVIDENCE_FOUND'");
           }
         }
       }
     });
-    expect(experimentalValidated).toBe(true);
+    expect(appendMethodFound).toBe(true);
   });
 });
 

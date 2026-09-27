@@ -20,7 +20,7 @@ import { DecisionPersistenceService } from '../../persistence/relational/service
 import { RetentionDeletionService } from '../../persistence/relational/services/retention-deletion-service.js';
 import { claimObjectForGC } from '../../persistence/relational/services/object-registry-service.js';
 import { GovernanceControlPlaneGateway, GovernanceActivationAuthority } from '../../control-plane/authority/control-plane-authority.js';
-import { TRUSTED_STANDALONE_CAPABILITY } from '../../persistence/relational/services/stage-fencing-coordinator.js';
+import { createStandaloneIngestionAdapter } from '../../persistence/relational/services/stage-fencing-coordinator.js';
 import {
   RegistryValidationError,
   validateSupersession,
@@ -74,6 +74,7 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
   let measService: MeasurementPersistenceService;
   let decService: DecisionPersistenceService;
   let retService: RetentionDeletionService;
+  let standaloneAdapter: any;
 
   const progStable = uid('prog-76');
   const progRev1 = uid('prog-rev-76-1');
@@ -139,6 +140,7 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
     measService = new MeasurementPersistenceService(sql);
     decService = new DecisionPersistenceService(sql);
     retService = new RetentionDeletionService(sql);
+    standaloneAdapter = createStandaloneIngestionAdapter(sql);
 
     // Seed baseline RevisionRegistry
     await sql`
@@ -147,7 +149,8 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
         ('ContentProgramRevision', ${progStable}, ${progRev1}, ${tenantA}),
         ('MetricDefinitionRevision', ${metricStable}, ${metricRev1}, ${tenantA}),
         ('TaskContractRevision', ${taskStable}, ${taskRev1}, ${tenantA}),
-        ('EvalContractRevision', ${evalStable}, ${evalRev1}, ${tenantA})
+        ('EvalContractRevision', ${evalStable}, ${evalRev1}, ${tenantA}),
+        ('EvaluatorConfig', ${evalStable}, ${evalRev1}, ${tenantA})
       ON CONFLICT DO NOTHING
     `;
 
@@ -442,38 +445,36 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
       )
     `;
 
-    await epiService.appendEpistemicState({
+    await standaloneAdapter.appendStandaloneEpistemicState({
       epistemicStateId: uid('eps-root-11'),
       propositionId: propId,
       supportStatus: 'UNKNOWN',
       causalStatus: 'NOT_APPLICABLE',
       uncertainty: 'NONE',
-      derivationMethod: 'EXPERIMENTAL',
-      derivationEntityType: 'ResearchTrace',
-      derivationStableId: 'trace-1',
-      derivationRevisionId: 'rev-1',
+      derivationMethod: 'RULE_BASED',
+      derivationEntityType: 'EvaluatorConfig',
+      derivationStableId: evalStable,
+      derivationRevisionId: evalRev1,
       validFrom: new Date('2026-01-01T00:00:00Z'),
       knownFrom: new Date('2026-01-01T00:00:00Z'),
       tenantId: tenantA,
-      trustedCapability: TRUSTED_STANDALONE_CAPABILITY,
     });
 
     let err: any;
     try {
-      await epiService.appendEpistemicState({
+      await standaloneAdapter.appendStandaloneEpistemicState({
         epistemicStateId: uid('eps-root-11-second'),
         propositionId: propId,
         supportStatus: 'UNKNOWN',
         causalStatus: 'NOT_APPLICABLE',
         uncertainty: 'NONE',
-        derivationMethod: 'EXPERIMENTAL',
-        derivationEntityType: 'ResearchTrace',
-        derivationStableId: 'trace-1',
-        derivationRevisionId: 'rev-1',
+        derivationMethod: 'RULE_BASED',
+        derivationEntityType: 'EvaluatorConfig',
+        derivationStableId: evalStable,
+        derivationRevisionId: evalRev1,
         validFrom: new Date('2026-02-01T00:00:00Z'),
         knownFrom: new Date('2026-02-01T00:00:00Z'),
         tenantId: tenantA,
-        trustedCapability: TRUSTED_STANDALONE_CAPABILITY,
       });
     } catch (e) {
       err = e;
@@ -498,56 +499,53 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
       )
     `;
 
-    await epiService.appendEpistemicState({
+    await standaloneAdapter.appendStandaloneEpistemicState({
       epistemicStateId: rootId,
       propositionId: propId,
       supportStatus: 'UNKNOWN',
       causalStatus: 'NOT_APPLICABLE',
       uncertainty: 'NONE',
-      derivationMethod: 'EXPERIMENTAL',
-      derivationEntityType: 'ResearchTrace',
-      derivationStableId: 'trace-1',
-      derivationRevisionId: 'rev-1',
+      derivationMethod: 'RULE_BASED',
+      derivationEntityType: 'EvaluatorConfig',
+      derivationStableId: evalStable,
+      derivationRevisionId: evalRev1,
       validFrom: new Date('2026-01-01T00:00:00Z'),
       knownFrom: new Date('2026-01-01T00:00:00Z'),
       tenantId: tenantA,
-      trustedCapability: TRUSTED_STANDALONE_CAPABILITY,
     });
 
-    await epiService.appendEpistemicState({
+    await standaloneAdapter.appendStandaloneEpistemicState({
       epistemicStateId: uid('eps-succ-12-1'),
       propositionId: propId,
       supersedesEpistemicStateId: rootId,
       supportStatus: 'UNKNOWN',
       causalStatus: 'NOT_APPLICABLE',
       uncertainty: 'NONE',
-      derivationMethod: 'EXPERIMENTAL',
-      derivationEntityType: 'ResearchTrace',
-      derivationStableId: 'trace-1',
-      derivationRevisionId: 'rev-1',
+      derivationMethod: 'RULE_BASED',
+      derivationEntityType: 'EvaluatorConfig',
+      derivationStableId: evalStable,
+      derivationRevisionId: evalRev1,
       validFrom: new Date('2026-02-01T00:00:00Z'),
       knownFrom: new Date('2026-02-01T00:00:00Z'),
       tenantId: tenantA,
-      trustedCapability: TRUSTED_STANDALONE_CAPABILITY,
     });
 
     let err: any;
     try {
-      await epiService.appendEpistemicState({
+      await standaloneAdapter.appendStandaloneEpistemicState({
         epistemicStateId: uid('eps-succ-12-branch'),
         propositionId: propId,
         supersedesEpistemicStateId: rootId, // Branch attempt
         supportStatus: 'UNKNOWN',
         causalStatus: 'NOT_APPLICABLE',
         uncertainty: 'NONE',
-        derivationMethod: 'EXPERIMENTAL',
-        derivationEntityType: 'ResearchTrace',
-        derivationStableId: 'trace-1',
-        derivationRevisionId: 'rev-1',
+        derivationMethod: 'RULE_BASED',
+        derivationEntityType: 'EvaluatorConfig',
+        derivationStableId: evalStable,
+        derivationRevisionId: evalRev1,
         validFrom: new Date('2026-03-01T00:00:00Z'),
         knownFrom: new Date('2026-03-01T00:00:00Z'),
         tenantId: tenantA,
-        trustedCapability: TRUSTED_STANDALONE_CAPABILITY,
       });
     } catch (e) {
       err = e;
@@ -559,21 +557,20 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
   it('Vector 13: EpistemicState cycle', async () => {
     let err: any;
     try {
-      await epiService.appendEpistemicState({
+      await standaloneAdapter.appendStandaloneEpistemicState({
         epistemicStateId: 'eps-self-cycle',
         propositionId: 'some-prop',
         supersedesEpistemicStateId: 'eps-self-cycle',
         supportStatus: 'UNKNOWN',
         causalStatus: 'NOT_APPLICABLE',
         uncertainty: 'NONE',
-        derivationMethod: 'EXPERIMENTAL',
-        derivationEntityType: 'ResearchTrace',
-        derivationStableId: 'trace-1',
-        derivationRevisionId: 'rev-1',
+        derivationMethod: 'RULE_BASED',
+        derivationEntityType: 'EvaluatorConfig',
+        derivationStableId: evalStable,
+        derivationRevisionId: evalRev1,
         validFrom: new Date('2026-01-01T00:00:00Z'),
         knownFrom: new Date('2026-01-01T00:00:00Z'),
         tenantId: tenantA,
-        trustedCapability: TRUSTED_STANDALONE_CAPABILITY,
       });
     } catch (e) {
       err = e;
@@ -597,39 +594,37 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
         ${propId}, ${tenantA}, 'FACTUAL', 'Meaning', 'S', 'P', 'O', '{}', '{}', 'ALL', 'GLOBAL'
       )
     `;
-    await epiService.appendEpistemicState({
+    await standaloneAdapter.appendStandaloneEpistemicState({
       epistemicStateId: rootId,
       propositionId: propId,
       supportStatus: 'UNKNOWN',
       causalStatus: 'NOT_APPLICABLE',
       uncertainty: 'NONE',
-      derivationMethod: 'EXPERIMENTAL',
-      derivationEntityType: 'ResearchTrace',
-      derivationStableId: 'trace-1',
-      derivationRevisionId: 'rev-1',
+      derivationMethod: 'RULE_BASED',
+      derivationEntityType: 'EvaluatorConfig',
+      derivationStableId: evalStable,
+      derivationRevisionId: evalRev1,
       validFrom: new Date('2026-01-01T00:00:00Z'),
       knownFrom: new Date('2026-01-01T00:00:00Z'),
       tenantId: tenantA,
-      trustedCapability: TRUSTED_STANDALONE_CAPABILITY,
     });
 
     let err: any;
     try {
-      await epiService.appendEpistemicState({
+      await standaloneAdapter.appendStandaloneEpistemicState({
         epistemicStateId: uid('eps-retro-14'),
         propositionId: propId,
         supersedesEpistemicStateId: rootId,
         supportStatus: 'UNKNOWN',
         causalStatus: 'NOT_APPLICABLE',
         uncertainty: 'NONE',
-        derivationMethod: 'EXPERIMENTAL',
-        derivationEntityType: 'ResearchTrace',
-        derivationStableId: 'trace-1',
-        derivationRevisionId: 'rev-1',
+        derivationMethod: 'RULE_BASED',
+        derivationEntityType: 'EvaluatorConfig',
+        derivationStableId: evalStable,
+        derivationRevisionId: evalRev1,
         validFrom: new Date('2025-12-01T00:00:00Z'),
         knownFrom: new Date('2025-12-01T00:00:00Z'), // non-increasing
         tenantId: tenantA,
-        trustedCapability: TRUSTED_STANDALONE_CAPABILITY,
       });
     } catch (e) {
       err = e;

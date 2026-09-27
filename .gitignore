@@ -6,3 +6,5 @@ data/
 coverage/
 .DS_Store
 dump.rdb
+.vitest/
+vitest-results.json

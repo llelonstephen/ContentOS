@@ -34,7 +34,6 @@ import {
   verifyStageFencing,
   type StageFencingContext,
   type WriteMode,
-  type TrustedWriteCapability,
 } from './stage-fencing-coordinator.js';
 import { RegistryValidationError } from '../../../domain/services/registry-validator.js';
 
@@ -57,9 +56,9 @@ export interface AppendEpistemicStateParams {
   workspaceId?: string | null;
   cycleId?: string | null;
   runConfigId?: string | null;
+  researchTraceId?: string | null;
   fencingContext?: StageFencingContext | null;
   writeMode?: WriteMode;
-  trustedCapability?: TrustedWriteCapability;
 }
 
 export interface EpistemicReplayAuthContext {
@@ -100,10 +99,11 @@ export class EpistemicPersistenceService {
       workspaceId,
       cycleId,
       runConfigId,
+      researchTraceId,
       fencingContext,
       writeMode,
-      trustedCapability,
     } = params;
+    const _standaloneAuthority = (params as any)._standaloneAuthority;
 
     if (supersedesEpistemicStateId && supersedesEpistemicStateId === epistemicStateId) {
       throw new RegistryValidationError(
@@ -163,7 +163,7 @@ export class EpistemicPersistenceService {
         workspaceId,
         requireCycleContext: isCycle,
         writeMode,
-        trustedCapability,
+        _standaloneAuthority,
       });
 
       // 1. Verify target proposition exists and belongs to tenant
@@ -192,19 +192,24 @@ export class EpistemicPersistenceService {
       }
 
       // 2. Derivation Revision Pinning Verification (SPEC03 §63)
-      if (derivationEntityType !== 'ResearchTrace') {
-        const [rev] = await sqlTx`
-          SELECT revision_id FROM revision_registry
-          WHERE entity_type = ${derivationEntityType}
-            AND stable_id = ${derivationStableId}
-            AND revision_id = ${derivationRevisionId}
-        `;
-        if (!rev) {
-          throw new RegistryValidationError(
-            'DERIVATION_REVISION_NOT_FOUND',
-            `Derivation revision ref '${derivationEntityType}/${derivationStableId}/${derivationRevisionId}' does not exist in RevisionRegistry.`,
-          );
-        }
+      if (derivationEntityType === 'ResearchTrace' || derivationEntityType?.toLowerCase().includes('researchtrace')) {
+        throw new RegistryValidationError(
+          'RESEARCH_TRACE_CANNOT_BE_DERIVATION_REVISION',
+          'ResearchTrace cannot be used as derivation_revision_ref entity type. ResearchTrace is research execution state, not configuration identity. derivation_revision_ref must resolve to an exact registered EvaluatorConfig/derivation configuration revision.',
+        );
+      }
+
+      const [rev] = await sqlTx`
+        SELECT revision_id FROM revision_registry
+        WHERE entity_type = ${derivationEntityType}
+          AND stable_id = ${derivationStableId}
+          AND revision_id = ${derivationRevisionId}
+      `;
+      if (!rev) {
+        throw new RegistryValidationError(
+          'DERIVATION_REVISION_NOT_FOUND',
+          `Derivation revision ref '${derivationEntityType}/${derivationStableId}/${derivationRevisionId}' does not exist in RevisionRegistry.`,
+        );
       }
 
       // Authoritative Pinning for run-created decision knowledge
@@ -481,119 +486,92 @@ export class EpistemicPersistenceService {
       let finalCausalStatus = prop.proposition_type === 'CAUSAL' ? 'UNKNOWN' : 'NOT_APPLICABLE';
       let finalUncertainty = 'NONE';
 
-      if (
-        derivationEntityType === 'EvaluatorConfig' ||
-        derivationMethod === 'RULE_BASED' ||
-        derivationMethod === 'BAYESIAN'
-      ) {
-        const derived = deriveEpistemicState({
-          propositionId,
-          propositionType: prop.proposition_type as PropositionType,
-          assessments: assessmentsForDerivation,
-          derivationRevisionRef: {
-            entityType: derivationEntityType as any,
-            stableId: derivationStableId,
-            revisionId: derivationRevisionId,
-          },
-          validFrom,
-          validUntilIfKnown,
-          knownFrom,
-        });
-
-        // Mechanical validation: verify caller does not bypass derivation engine
-        if (params.supportStatus && params.supportStatus !== derived.supportStatus) {
+      let researchTrace: any = null;
+      if (derivationMethod === 'EXPERIMENTAL') {
+        if (!researchTraceId) {
           throw new RegistryValidationError(
-            'DERIVED_STATE_MISMATCH',
-            `Caller-supplied supportStatus '${params.supportStatus}' does not match mechanically derived status '${derived.supportStatus}'. Canonical persistence cannot bypass the derivation engine.`,
+            'RESEARCH_TRACE_REQUIRED',
+            'EXPERIMENTAL derivation requires an explicit researchTraceId input.',
           );
         }
-
-        if (params.causalStatus && params.causalStatus !== derived.causalStatus) {
-          throw new RegistryValidationError(
-            'DERIVED_STATE_MISMATCH',
-            `Caller-supplied causalStatus '${params.causalStatus}' does not match mechanically derived causalStatus '${derived.causalStatus}'.`,
-          );
-        }
-
-        const normCallerUncertainty = params.uncertainty?.trim().toUpperCase();
-        const normDerivedUncertainty = derived.uncertainty?.trim().toUpperCase();
-        if (normCallerUncertainty && normCallerUncertainty !== normDerivedUncertainty) {
-          throw new RegistryValidationError(
-            'DERIVED_STATE_MISMATCH',
-            `Caller-supplied uncertainty '${params.uncertainty}' does not match mechanically derived uncertainty '${derived.uncertainty}'.`,
-          );
-        }
-
-        finalSupportStatus = derived.supportStatus;
-        finalCausalStatus = derived.causalStatus;
-        finalUncertainty = derived.uncertainty;
-      } else if (derivationMethod === 'EXPERIMENTAL' && derivationEntityType === 'ResearchTrace') {
         const [trace] = await sqlTx`
-          SELECT research_trace_id, tenant_id, outcome FROM research_traces WHERE research_trace_id = ${derivationStableId}
+          SELECT research_trace_id, tenant_id, workspace_id, outcome
+          FROM research_traces
+          WHERE research_trace_id = ${researchTraceId}
         `;
-        if (trace && trace.tenant_id !== tenantId) {
+        if (!trace) {
+          throw new RegistryValidationError(
+            'RESEARCH_TRACE_NOT_FOUND',
+            `ResearchTrace '${researchTraceId}' does not exist.`,
+          );
+        }
+        if (trace.tenant_id !== tenantId) {
           throw new RegistryValidationError(
             'TENANT_ISOLATION_VIOLATION',
             `ResearchTrace belongs to tenant '${trace.tenant_id}', not '${tenantId}'.`,
           );
         }
-
-        // Mechanical derivation from actual assessments under pinned revision
-        const derived = deriveEpistemicState({
-          propositionId,
-          propositionType: prop.proposition_type as PropositionType,
-          assessments: assessmentsForDerivation,
-          derivationRevisionRef: {
-            entityType: derivationEntityType as any,
-            stableId: derivationStableId,
-            revisionId: derivationRevisionId,
-          },
-          validFrom,
-          validUntilIfKnown,
-          knownFrom,
-        });
-
-        // If research trace found no evidence or incomplete, support cannot be SUPPORTED
-        if (trace && (trace.outcome === 'NO_EVIDENCE_FOUND' || trace.outcome === 'SEARCH_FAILED')) {
-          if (params.supportStatus && params.supportStatus !== 'UNKNOWN' && params.supportStatus !== 'INSUFFICIENT') {
-            throw new RegistryValidationError(
-              'DERIVED_STATE_MISMATCH',
-              `ResearchTrace outcome '${trace.outcome}' cannot produce supportStatus '${params.supportStatus}'. Adequate evidence is required.`,
-            );
-          }
-        }
-
-        // Caller cannot supply arbitrary assertions that differ from mechanical derivation
-        if (params.supportStatus && params.supportStatus !== derived.supportStatus) {
+        if (trace.workspace_id && workspaceId && trace.workspace_id !== workspaceId) {
           throw new RegistryValidationError(
-            'DERIVED_STATE_MISMATCH',
-            `Caller-supplied supportStatus '${params.supportStatus}' does not match mechanically derived status '${derived.supportStatus}'.`,
+            'WORKSPACE_ISOLATION_VIOLATION',
+            `ResearchTrace is scoped to workspace '${trace.workspace_id}', not '${workspaceId}'.`,
           );
         }
-        if (params.causalStatus && params.causalStatus !== derived.causalStatus) {
-          throw new RegistryValidationError(
-            'DERIVED_STATE_MISMATCH',
-            `Caller-supplied causalStatus '${params.causalStatus}' does not match mechanically derived causalStatus '${derived.causalStatus}'.`,
-          );
-        }
-        const normCallerUncertainty = params.uncertainty?.trim().toUpperCase();
-        const normDerivedUncertainty = derived.uncertainty?.trim().toUpperCase();
-        if (normCallerUncertainty && normCallerUncertainty !== normDerivedUncertainty) {
-          throw new RegistryValidationError(
-            'DERIVED_STATE_MISMATCH',
-            `Caller-supplied uncertainty '${params.uncertainty}' does not match mechanically derived uncertainty '${derived.uncertainty}'.`,
-          );
-        }
+        researchTrace = trace;
+      }
 
-        finalSupportStatus = derived.supportStatus;
-        finalCausalStatus = derived.causalStatus;
-        finalUncertainty = derived.uncertainty;
-      } else {
+      // Mechanical derivation under registered & pinned configuration revision
+      const derived = deriveEpistemicState({
+        propositionId,
+        propositionType: prop.proposition_type as PropositionType,
+        assessments: assessmentsForDerivation,
+        derivationRevisionRef: {
+          entityType: derivationEntityType as any,
+          stableId: derivationStableId,
+          revisionId: derivationRevisionId,
+        },
+        validFrom,
+        validUntilIfKnown,
+        knownFrom,
+      });
+
+      // If research trace found no evidence or incomplete, support cannot be SUPPORTED
+      if (researchTrace && (researchTrace.outcome === 'NO_EVIDENCE_FOUND' || researchTrace.outcome === 'SEARCH_FAILED')) {
+        if (params.supportStatus && params.supportStatus !== 'UNKNOWN' && params.supportStatus !== 'INSUFFICIENT') {
+          throw new RegistryValidationError(
+            'DERIVED_STATE_MISMATCH',
+            `ResearchTrace outcome '${researchTrace.outcome}' cannot produce supportStatus '${params.supportStatus}'. Adequate evidence is required.`,
+          );
+        }
+      }
+
+      // Mechanical validation: verify caller does not bypass derivation engine
+      if (params.supportStatus && params.supportStatus !== derived.supportStatus) {
         throw new RegistryValidationError(
-          'CANONICAL_DERIVATION_UNSUPPORTED',
-          `Derivation method '${derivationMethod}' with entity '${derivationEntityType}' cannot produce canonical epistemic state without an authoritative validator.`,
+          'DERIVED_STATE_MISMATCH',
+          `Caller-supplied supportStatus '${params.supportStatus}' does not match mechanically derived status '${derived.supportStatus}'. Canonical persistence cannot bypass the derivation engine.`,
         );
       }
+
+      if (params.causalStatus && params.causalStatus !== derived.causalStatus) {
+        throw new RegistryValidationError(
+          'DERIVED_STATE_MISMATCH',
+          `Caller-supplied causalStatus '${params.causalStatus}' does not match mechanically derived causalStatus '${derived.causalStatus}'.`,
+        );
+      }
+
+      const normCallerUncertainty = params.uncertainty?.trim().toUpperCase();
+      const normDerivedUncertainty = derived.uncertainty?.trim().toUpperCase();
+      if (normCallerUncertainty && normCallerUncertainty !== normDerivedUncertainty) {
+        throw new RegistryValidationError(
+          'DERIVED_STATE_MISMATCH',
+          `Caller-supplied uncertainty '${params.uncertainty}' does not match mechanically derived uncertainty '${derived.uncertainty}'.`,
+        );
+      }
+
+      finalSupportStatus = derived.supportStatus;
+      finalCausalStatus = derived.causalStatus;
+      finalUncertainty = derived.uncertainty;
 
       // Enforce frozen vocabulary preservation
       if (!EPISTEMIC_SUPPORT_STATUSES.includes(finalSupportStatus as any)) {

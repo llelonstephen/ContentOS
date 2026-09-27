@@ -11,6 +11,8 @@ import {
   EvidencePersistenceService,
   type IngestSourceArtifactParams,
   type ExtractEvidenceItemParams,
+  type CreateEvidenceLinkParams,
+  type CreateEvidenceAssessmentParams,
 } from './evidence-persistence-service.js';
 import {
   PropositionPersistenceService,
@@ -26,7 +28,6 @@ import {
   type CreateKnowledgeGapParams,
   type RecordResearchTraceParams,
 } from './knowledge-gap-persistence-service.js';
-import { TRUSTED_STANDALONE_CAPABILITY } from './stage-fencing-coordinator.js';
 import { RegistryValidationError } from '../../../domain/services/registry-validator.js';
 
 export class StandaloneIngestionAdapter {
@@ -34,16 +35,27 @@ export class StandaloneIngestionAdapter {
   private readonly propService: PropositionPersistenceService;
   private readonly epiService: EpistemicPersistenceService;
   private readonly gapService: KnowledgeGapPersistenceService;
+  private readonly authority: unknown;
 
-  constructor(sql: ReturnType<typeof postgres>) {
-    this.evService = new EvidencePersistenceService(sql);
-    this.propService = new PropositionPersistenceService(sql);
-    this.epiService = new EpistemicPersistenceService(sql);
-    this.gapService = new KnowledgeGapPersistenceService(sql);
+  constructor(
+    sql: ReturnType<typeof postgres>,
+    authority?: unknown,
+    services?: {
+      evService?: EvidencePersistenceService;
+      propService?: PropositionPersistenceService;
+      epiService?: EpistemicPersistenceService;
+      gapService?: KnowledgeGapPersistenceService;
+    },
+  ) {
+    this.authority = authority;
+    this.evService = services?.evService ?? new EvidencePersistenceService(sql);
+    this.propService = services?.propService ?? new PropositionPersistenceService(sql);
+    this.epiService = services?.epiService ?? new EpistemicPersistenceService(sql);
+    this.gapService = services?.gapService ?? new KnowledgeGapPersistenceService(sql);
   }
 
   async ingestSourceArtifact(
-    params: Omit<IngestSourceArtifactParams, 'writeMode' | 'fencingContext' | 'trustedCapability'> & {
+    params: Omit<IngestSourceArtifactParams, 'writeMode' | 'fencingContext'> & {
       fencingContext?: never;
       decisionCycleId?: never;
     },
@@ -54,15 +66,15 @@ export class StandaloneIngestionAdapter {
         'Standalone adapter cannot attach to a DecisionCycle. Use decision-cycle commit boundary.',
       );
     }
-    return this.evService.ingestSourceArtifact({
+    return (this.evService as any).ingestSourceArtifact({
       ...params,
       writeMode: 'STANDALONE',
-      trustedCapability: TRUSTED_STANDALONE_CAPABILITY,
+      _standaloneAuthority: this.authority,
     });
   }
 
   async resolveOrCreateProposition(
-    params: Omit<ResolveOrCreatePropositionParams, 'writeMode' | 'fencingContext' | 'trustedCapability'> & {
+    params: Omit<ResolveOrCreatePropositionParams, 'writeMode' | 'fencingContext'> & {
       fencingContext?: never;
       decisionCycleId?: never;
     },
@@ -73,15 +85,15 @@ export class StandaloneIngestionAdapter {
         'Standalone adapter cannot attach to a DecisionCycle. Use decision-cycle commit boundary.',
       );
     }
-    return this.propService.resolveOrCreateProposition({
+    return (this.propService as any).resolveOrCreateProposition({
       ...params,
       writeMode: 'STANDALONE',
-      trustedCapability: TRUSTED_STANDALONE_CAPABILITY,
+      _standaloneAuthority: this.authority,
     });
   }
 
   async extractEvidenceItem(
-    params: Omit<ExtractEvidenceItemParams, 'writeMode' | 'fencingContext' | 'trustedCapability'> & {
+    params: Omit<ExtractEvidenceItemParams, 'writeMode' | 'fencingContext'> & {
       fencingContext?: never;
       decisionCycleId?: never;
     },
@@ -92,15 +104,53 @@ export class StandaloneIngestionAdapter {
         'Standalone adapter cannot attach to a DecisionCycle. Use decision-cycle commit boundary.',
       );
     }
-    return this.evService.extractEvidenceItem({
+    return (this.evService as any).extractEvidenceItem({
       ...params,
       writeMode: 'STANDALONE',
-      trustedCapability: TRUSTED_STANDALONE_CAPABILITY,
+      _standaloneAuthority: this.authority,
+    });
+  }
+
+  async linkEvidenceToProposition(
+    params: Omit<CreateEvidenceLinkParams, 'writeMode' | 'fencingContext'> & {
+      fencingContext?: never;
+      decisionCycleId?: never;
+    },
+  ): Promise<{ linkId: string; created: boolean }> {
+    if ((params as any).decisionCycleId || (params as any).fencingContext) {
+      throw new RegistryValidationError(
+        'DECISION_CYCLE_CONTEXT_INVALID',
+        'Standalone adapter cannot attach to a DecisionCycle. Use decision-cycle commit boundary.',
+      );
+    }
+    return (this.evService as any).linkEvidenceToProposition({
+      ...params,
+      writeMode: 'STANDALONE',
+      _standaloneAuthority: this.authority,
+    });
+  }
+
+  async createEvidenceAssessment(
+    params: Omit<CreateEvidenceAssessmentParams, 'writeMode' | 'fencingContext'> & {
+      fencingContext?: never;
+      decisionCycleId?: never;
+    },
+  ): Promise<void> {
+    if ((params as any).decisionCycleId || (params as any).fencingContext) {
+      throw new RegistryValidationError(
+        'DECISION_CYCLE_CONTEXT_INVALID',
+        'Standalone adapter cannot attach to a DecisionCycle. Use decision-cycle commit boundary.',
+      );
+    }
+    return (this.evService as any).createEvidenceAssessment({
+      ...params,
+      writeMode: 'STANDALONE',
+      _standaloneAuthority: this.authority,
     });
   }
 
   async appendStandaloneEpistemicState(
-    params: Omit<AppendEpistemicStateParams, 'writeMode' | 'fencingContext' | 'trustedCapability'> & {
+    params: Omit<AppendEpistemicStateParams, 'writeMode' | 'fencingContext'> & {
       fencingContext?: never;
       decisionCycleId?: never;
     },
@@ -111,15 +161,15 @@ export class StandaloneIngestionAdapter {
         'Standalone adapter cannot attach to a DecisionCycle. Use decision-cycle commit boundary.',
       );
     }
-    return this.epiService.appendEpistemicState({
+    return (this.epiService as any).appendEpistemicState({
       ...params,
       writeMode: 'STANDALONE',
-      trustedCapability: TRUSTED_STANDALONE_CAPABILITY,
+      _standaloneAuthority: this.authority,
     });
   }
 
   async createOrTransitionKnowledgeGap(
-    params: Omit<CreateKnowledgeGapParams, 'writeMode' | 'fencingContext' | 'trustedCapability'> & {
+    params: Omit<CreateKnowledgeGapParams, 'writeMode' | 'fencingContext'> & {
       fencingContext?: never;
       decisionCycleId?: never;
     },
@@ -130,15 +180,15 @@ export class StandaloneIngestionAdapter {
         'Standalone adapter cannot attach to a DecisionCycle. Use decision-cycle commit boundary.',
       );
     }
-    return this.gapService.createOrTransitionKnowledgeGap({
+    return (this.gapService as any).createOrTransitionKnowledgeGap({
       ...params,
       writeMode: 'STANDALONE',
-      trustedCapability: TRUSTED_STANDALONE_CAPABILITY,
+      _standaloneAuthority: this.authority,
     });
   }
 
   async recordResearchTrace(
-    params: Omit<RecordResearchTraceParams, 'writeMode' | 'fencingContext' | 'trustedCapability'> & {
+    params: Omit<RecordResearchTraceParams, 'writeMode' | 'fencingContext'> & {
       fencingContext?: never;
       decisionCycleId?: never;
     },
@@ -149,10 +199,10 @@ export class StandaloneIngestionAdapter {
         'Standalone adapter cannot attach to a DecisionCycle. Use decision-cycle commit boundary.',
       );
     }
-    return this.gapService.recordResearchTrace({
+    return (this.gapService as any).recordResearchTrace({
       ...params,
       writeMode: 'STANDALONE',
-      trustedCapability: TRUSTED_STANDALONE_CAPABILITY,
+      _standaloneAuthority: this.authority,
     });
   }
 }
