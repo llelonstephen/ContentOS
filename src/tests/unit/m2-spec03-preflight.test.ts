@@ -371,35 +371,71 @@ describe('SPEC03 §146 Static Contract Preflight Suite (28 Checks)', () => {
     expect(migrationContent).toContain("REVOKE contentos_standalone_role FROM contentos_runtime_role");
     expect(migrationContent).not.toContain("GRANT contentos_standalone_role TO contentos_runtime_role");
 
-    // 1d-ii. Forward migration exists and enforces least-privilege closure without broad grants
-    const forwardMigrationPath = path.resolve(
+    // 1d-ii. Forward migrations exist and enforce least-privilege closure without broad grants
+    const forwardMigrationPath0003 = path.resolve(
       import.meta.dirname,
       '../../persistence/relational/migrations/0003_m2_standalone_privilege_closure.sql',
     );
-    expect(fs.existsSync(forwardMigrationPath)).toBe(true);
-    const forwardMigrationContent = fs.readFileSync(forwardMigrationPath, 'utf-8');
+    expect(fs.existsSync(forwardMigrationPath0003)).toBe(true);
+    const forwardMigrationContent0003 = fs.readFileSync(forwardMigrationPath0003, 'utf-8');
+
+    const forwardMigrationPath0004 = path.resolve(
+      import.meta.dirname,
+      '../../persistence/relational/migrations/0004_m2_standalone_lock_authority_closure.sql',
+    );
+    expect(fs.existsSync(forwardMigrationPath0004)).toBe(true);
+    const forwardMigrationContent0004 = fs.readFileSync(forwardMigrationPath0004, 'utf-8');
 
     // No standalone production migration contains broad table grants
     const migrationsDir = path.resolve(import.meta.dirname, '../../persistence/relational/migrations');
-    for (const mFile of fs.readdirSync(migrationsDir)) {
-      if (!mFile.endsWith('.sql')) continue;
+    const migrationFiles = fs.readdirSync(migrationsDir).filter((f) => f.endsWith('.sql')).sort();
+    for (const mFile of migrationFiles) {
       const mContent = fs.readFileSync(path.join(migrationsDir, mFile), 'utf-8');
       expect(mContent).not.toMatch(/GRANT\s+ALL\s+ON\s+ALL\s+TABLES.*TO\s+contentos_standalone_role/i);
-      expect(mContent).not.toMatch(/GRANT\s+ALL\s+PRIVILEGES.*TO\s+contentos_standalone_role/i);
+      expect(mContent).not.toMatch(/GRANT\s+ALL\s+PRIVILEGES\s+ON\s+ALL\s+TABLES.*TO\s+contentos_standalone_role/i);
       expect(mContent).not.toMatch(/GRANT\s+SELECT,\s*INSERT,\s*UPDATE,\s*DELETE\s+ON\s+ALL\s+TABLES.*TO\s+contentos_standalone_role/i);
     }
 
-    // Exact required privilege statements exist for the access matrix
-    expect(forwardMigrationContent).toContain('CREATE ROLE contentos_standalone_role NOLOGIN');
-    expect(forwardMigrationContent).toContain('REVOKE contentos_standalone_role FROM contentos_runtime_role');
-    expect(forwardMigrationContent).toContain('"rights_policies"');
-    expect(forwardMigrationContent).toContain('"object_references"');
-    expect(forwardMigrationContent).toContain('"epistemic_state_assessments"');
-    expect(forwardMigrationContent).toContain('"object_registry"');
-    expect(forwardMigrationContent).toMatch(/GRANT\s+SELECT,\s*INSERT\s+ON[\s\S]*"object_references"[\s\S]*TO\s+contentos_standalone_role/);
-    expect(forwardMigrationContent).toMatch(/GRANT\s+SELECT,\s*INSERT\s+ON[\s\S]*"epistemic_state_assessments"[\s\S]*TO\s+contentos_standalone_role/);
-    expect(forwardMigrationContent).toMatch(/GRANT\s+SELECT\s+ON[\s\S]*"rights_policies"[\s\S]*TO\s+contentos_standalone_role/);
-    expect(forwardMigrationContent).toMatch(/GRANT\s+UPDATE\s+ON\s+"object_registry"\s+TO\s+contentos_standalone_role/);
+    // Exact required privilege statements exist for the access matrix in 0003
+    expect(forwardMigrationContent0003).toContain('CREATE ROLE contentos_standalone_role NOLOGIN');
+    expect(forwardMigrationContent0003).toContain('REVOKE contentos_standalone_role FROM contentos_runtime_role');
+    expect(forwardMigrationContent0003).toContain('"rights_policies"');
+    expect(forwardMigrationContent0003).toContain('"object_references"');
+    expect(forwardMigrationContent0003).toContain('"epistemic_state_assessments"');
+    expect(forwardMigrationContent0003).toContain('"object_registry"');
+    expect(forwardMigrationContent0003).toMatch(/GRANT\s+SELECT,\s*INSERT\s+ON[\s\S]*"object_references"[\s\S]*TO\s+contentos_standalone_role/);
+    expect(forwardMigrationContent0003).toMatch(/GRANT\s+SELECT,\s*INSERT\s+ON[\s\S]*"epistemic_state_assessments"[\s\S]*TO\s+contentos_standalone_role/);
+    expect(forwardMigrationContent0003).toMatch(/GRANT\s+SELECT\s+ON[\s\S]*"rights_policies"[\s\S]*TO\s+contentos_standalone_role/);
+
+    // Migration 0004 revokes UPDATE on object_registry from contentos_standalone_role
+    expect(forwardMigrationContent0004).toMatch(/REVOKE\s+UPDATE\s+ON\s+object_registry\s+FROM\s+contentos_standalone_role/i);
+
+    // Migration 0004 creates the restricted SECURITY DEFINER lock function
+    expect(forwardMigrationContent0004).toContain('CREATE OR REPLACE FUNCTION contentos_lock_object_registry_row');
+    expect(forwardMigrationContent0004).toContain('SECURITY DEFINER');
+    expect(forwardMigrationContent0004).toContain('FOR UPDATE');
+    expect(forwardMigrationContent0004).toContain('SET search_path = public, pg_temp');
+    expect(forwardMigrationContent0004).toContain('REVOKE ALL ON FUNCTION contentos_lock_object_registry_row(text, text) FROM PUBLIC');
+    expect(forwardMigrationContent0004).toMatch(/GRANT\s+EXECUTE\s+ON\s+FUNCTION\s+contentos_lock_object_registry_row\(text,\s*text\)\s+TO\s+contentos_standalone_role/i);
+
+    // EvidencePersistenceService calls this lock function in both standalone-relevant paths
+    const evServicePath = path.resolve(import.meta.dirname, '../../persistence/relational/services/evidence-persistence-service.ts');
+    const evServiceContent = fs.readFileSync(evServicePath, 'utf-8');
+    expect(evServiceContent).toContain('contentos_lock_object_registry_row');
+    const lockCalls = evServiceContent.match(/contentos_lock_object_registry_row/g);
+    expect(lockCalls).toHaveLength(2); // ingestSourceArtifact and extractEvidenceItem
+
+    // Standalone role is not granted direct ObjectRegistry UPDATE in final effective migration state
+    const idx0004 = migrationFiles.indexOf('0004_m2_standalone_lock_authority_closure.sql');
+    expect(idx0004).toBeGreaterThanOrEqual(0);
+    for (let i = idx0004 + 1; i < migrationFiles.length; i++) {
+      const laterContent = fs.readFileSync(path.join(migrationsDir, migrationFiles[i]), 'utf-8');
+      expect(laterContent).not.toMatch(/GRANT.*UPDATE.*ON.*object_registry.*TO.*contentos_standalone_role/i);
+      expect(laterContent).not.toMatch(/GRANT.*ALL.*ON.*SEQUENCES.*TO.*contentos_standalone_role/i);
+    }
+
+    // Migration 0004 revokes historical ALL sequence privileges
+    expect(forwardMigrationContent0004).toMatch(/REVOKE\s+ALL\s+PRIVILEGES\s+ON\s+ALL\s+SEQUENCES\s+IN\s+SCHEMA\s+public\s+FROM\s+contentos_standalone_role/i);
 
     // 1e. AST check: Persistence public surface does NOT export any privilege-minting standalone factory or constructor
     const persistenceDir = path.resolve(import.meta.dirname, '../../persistence/relational/services');

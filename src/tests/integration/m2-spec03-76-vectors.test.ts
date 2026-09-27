@@ -295,6 +295,17 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
       await sql.unsafe(stmt);
     }
 
+    // Apply M2 standalone lock authority closure & sequence revocation forward migration
+    const m4PrivsPath = path.resolve(
+      import.meta.dirname,
+      '../../persistence/relational/migrations/0004_m2_standalone_lock_authority_closure.sql',
+    );
+    const m4PrivsSql = await fs.readFile(m4PrivsPath, 'utf-8');
+    const m4Statements = m4PrivsSql.split('--> statement-breakpoint').map((s) => s.trim()).filter(Boolean);
+    for (const stmt of m4Statements) {
+      await sql.unsafe(stmt);
+    }
+
     // Seed baseline entities
     await sql`
       INSERT INTO revision_registry (entity_type, stable_id, revision_id, tenant_id)
@@ -5267,6 +5278,79 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
       });
 
       // Step 6: Negative least-privilege tests using authorized standalone role
+      // Attack A: cannot UPDATE ObjectRegistry state
+      let errNegObjState: any;
+      try {
+        await saSql`UPDATE object_registry SET state = 'DELETED' WHERE object_id = ${v73ObjId}`;
+      } catch (e) {
+        errNegObjState = e;
+      }
+      expect(errNegObjState).toBeDefined();
+      expect(errNegObjState.code).toBe('42501');
+
+      // Attack B: cannot UPDATE ObjectRegistry integrity (content_hash)
+      let errNegObjHash: any;
+      try {
+        await saSql`UPDATE object_registry SET content_hash = '0000000000000000000000000000000000000000000000000000000000000000' WHERE object_id = ${v73ObjId}`;
+      } catch (e) {
+        errNegObjHash = e;
+      }
+      expect(errNegObjHash).toBeDefined();
+      expect(errNegObjHash.code).toBe('42501');
+
+      // Cannot DELETE ObjectRegistry row
+      let errNegObjDelete: any;
+      try {
+        await saSql`DELETE FROM object_registry WHERE object_id = ${v73ObjId}`;
+      } catch (e) {
+        errNegObjDelete = e;
+      }
+      expect(errNegObjDelete).toBeDefined();
+      expect(errNegObjDelete.code).toBe('42501');
+
+      // CAN SELECT ObjectRegistry metadata
+      const [objCheck] = await saSql`SELECT object_id, state FROM object_registry WHERE object_id = ${v73ObjId}`;
+      expect(objCheck).toBeDefined();
+      expect(objCheck.state).toBe('AVAILABLE');
+
+      // CAN EXECUTE contentos_lock_object_registry_row inside transaction
+      await saSql`SELECT contentos_lock_object_registry_row(${v73ObjId}, ${tenantA})`;
+
+      // Positive lock proof:
+      // StandaloneIngestionAdapter successfully ingested SourceArtifact (6a) and extracted EvidenceItem (6b)
+      // which executed the SECURITY DEFINER lock function and acquired row locks, while direct UPDATE on object_registry remains forbidden (42501 above).
+
+      // Sequence privilege proof:
+      // 1. Standalone role has zero sequence permissions in public schema
+      const seqPrivCheck = await sql`
+        SELECT count(*)::int as count
+        FROM information_schema.table_privileges
+        WHERE grantee = 'contentos_standalone_role'
+          AND table_name IN (SELECT sequence_name FROM information_schema.sequences WHERE sequence_schema = 'public')
+      `;
+      expect(seqPrivCheck[0].count).toBe(0);
+
+      // 2. Concrete sequence operation is denied with 42501
+      const testSeqName = 'v73_test_seq_' + uid('seq').replace(/-/g, '_');
+      await sql.unsafe(`CREATE SEQUENCE ${testSeqName}`);
+      try {
+        let errSeqNextVal: any;
+        try {
+          await saSql.unsafe(`SELECT nextval('${testSeqName}')`);
+        } catch (e) {
+          errSeqNextVal = e;
+        }
+        expect(errSeqNextVal).toBeDefined();
+        expect(errSeqNextVal.code).toBe('42501');
+
+        const [hasSeqUsage] = await sql`
+          SELECT has_sequence_privilege('contentos_standalone_role', ${testSeqName}, 'USAGE') as has_priv
+        `;
+        expect(hasSeqUsage.has_priv).toBe(false);
+      } finally {
+        await sql.unsafe(`DROP SEQUENCE IF EXISTS ${testSeqName}`);
+      }
+
       // 1. cannot UPDATE immutable canonical knowledge row
       let errNegUpdate: any;
       try {

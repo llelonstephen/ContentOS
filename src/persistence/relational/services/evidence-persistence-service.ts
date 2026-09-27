@@ -171,8 +171,12 @@ export class EvidencePersistenceService {
       });
 
       // 1. Verify snapshot reference exists and is AVAILABLE in ObjectRegistry (SPEC02 §30)
+      // First, acquire row lock via security definer lock function inside same transaction
+      await sqlTx`
+        SELECT contentos_lock_object_registry_row(${snapshotReference}, ${tenantId})
+      `;
       const [obj] = await sqlTx`
-        SELECT object_id, tenant_id, content_hash, object_key, state FROM object_registry WHERE object_id = ${snapshotReference} FOR UPDATE
+        SELECT object_id, tenant_id, content_hash, object_key, state FROM object_registry WHERE object_id = ${snapshotReference}
       `;
       if (!obj) {
         throw new RegistryValidationError(
@@ -365,9 +369,13 @@ export class EvidencePersistenceService {
           );
         }
 
+        // Acquire row lock via security definer lock function inside same transaction
+        await sqlTx`
+          SELECT contentos_lock_object_registry_row(${source.snapshot_reference}, ${tenantId})
+        `;
         // Verify snapshot reference in object_registry is AVAILABLE (SPEC02 §30)
         const [obj] = await sqlTx`
-          SELECT object_id, content_hash, object_key, state FROM object_registry WHERE object_id = ${source.snapshot_reference} FOR UPDATE
+          SELECT object_id, content_hash, object_key, state FROM object_registry WHERE object_id = ${source.snapshot_reference}
         `;
         if (!obj) {
           throw new RegistryValidationError(
