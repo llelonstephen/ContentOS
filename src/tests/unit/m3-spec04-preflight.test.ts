@@ -173,7 +173,7 @@ describe('SPEC04 §146 Static Contract Preflight (34 Checks)', () => {
     expect(schemaFile).toContain('UNCERTAIN');
   });
 
-  // 12 Policy Engine input is frozen DecisionSnapshot only
+  // 12 Policy Engine input is frozen DecisionSnapshot only & declared-input closure
   it('Preflight 12: Policy Engine input is frozen DecisionSnapshot only', () => {
     const govService = fs.readFileSync(
       path.join(
@@ -184,6 +184,15 @@ describe('SPEC04 §146 Static Contract Preflight (34 Checks)', () => {
     );
     expect(govService).toContain('evaluatePolicySet');
     expect(govService).toContain('FROM decision_snapshots');
+
+    // Declared-input closure: inspect production policy-dsl.ts for allowlist compile & AST enforcement
+    const dslFile = fs.readFileSync(
+      path.join(rootDir, 'src/domain/governance/policy-dsl.ts'),
+      'utf-8',
+    );
+    expect(dslFile).toContain('allowedRoots');
+    expect(dslFile).toContain('POLICY_SCHEMA_UNSUPPORTED');
+    expect(dslFile).toContain('required_inputs allowlist');
   });
 
   // 13 PolicyResult bound to one snapshot
@@ -209,7 +218,7 @@ describe('SPEC04 §146 Static Contract Preflight (34 Checks)', () => {
     expect(govService).toContain('POLICY_REVISION_NOT_IN_SNAPSHOT');
   });
 
-  // 15 PolicyResult inputs reachable from snapshot closure
+  // 15 PolicyResult inputs reachable from snapshot closure & selector escape enforcement
   it('Preflight 15: PolicyResult inputs reachable from snapshot closure', () => {
     const govService = fs.readFileSync(
       path.join(
@@ -219,6 +228,17 @@ describe('SPEC04 §146 Static Contract Preflight (34 Checks)', () => {
       'utf-8',
     );
     expect(govService).toContain('INPUT_REF_OUTSIDE_SNAPSHOT_CLOSURE');
+
+    // Selector frozen-closure enforcement: inspect production policy-dsl.ts for prototype escape blocking
+    const dslFile = fs.readFileSync(
+      path.join(rootDir, 'src/domain/governance/policy-dsl.ts'),
+      'utf-8',
+    );
+    expect(dslFile).toContain('FORBIDDEN_PATH_SEGMENTS');
+    expect(dslFile).toContain('__proto__');
+    expect(dslFile).toContain('constructor');
+    expect(dslFile).toContain('prototype');
+    expect(dslFile).toContain('Object.prototype.hasOwnProperty');
   });
 
   // 16 expected policy set derived from GovernanceSnapshot
@@ -267,7 +287,7 @@ describe('SPEC04 §146 Static Contract Preflight (34 Checks)', () => {
     expect(govService).toContain('INCOMPLETE_POLICY_SET_FOR_CONFLICT_DETECTION');
   });
 
-  // 20 conflict identity deterministic
+  // 20 conflict identity deterministic & order-invariant
   it('Preflight 20: conflict identity deterministic', () => {
     const conflictFile = fs.readFileSync(
       path.join(rootDir, 'src/domain/governance/policy-conflict-resolver.ts'),
@@ -276,6 +296,8 @@ describe('SPEC04 §146 Static Contract Preflight (34 Checks)', () => {
     expect(conflictFile).toContain('computeConflictKey');
     expect(conflictFile).toContain('.sort()');
     expect(conflictFile).toContain('createHash');
+    // Inspect order-invariance: resolveConflict sorts descriptors deterministically by policyResultId
+    expect(conflictFile).toContain('.sort((a, b) => a.policyResultId.localeCompare(b.policyResultId))');
   });
 
   // 21 one final resolution per conflict_key
@@ -290,7 +312,7 @@ describe('SPEC04 §146 Static Contract Preflight (34 Checks)', () => {
     expect(govService).toContain('DUPLICATE_FINAL_CONFLICT_RESOLUTION');
   });
 
-  // 22 conflict resolution vocabulary preserved
+  // 22 conflict resolution vocabulary & conditions preserved
   it('Preflight 22: conflict resolution vocabulary preserved', () => {
     const conflictFile = fs.readFileSync(
       path.join(rootDir, 'src/domain/governance/policy-conflict-resolver.ts'),
@@ -302,6 +324,12 @@ describe('SPEC04 §146 Static Contract Preflight (34 Checks)', () => {
     expect(conflictFile).toContain('EXPLICIT_PRIORITY');
     expect(conflictFile).toContain('AUTHORIZED_OVERRIDE');
     expect(conflictFile).toContain('ESCALATE');
+
+    // Structural enforcement checks:
+    expect(conflictFile).toContain('isHardDeny');
+    expect(conflictFile).toContain('compareStructuredScopes');
+    expect(conflictFile).toContain('parsePriorityWeight');
+    expect(conflictFile).toContain('overrideAllowed === false');
   });
 
   // 23 AUTHORIZED_OVERRIDE requires valid PolicyOverride

@@ -4,10 +4,14 @@
  * Implements SPEC04 §57–§76:
  *   - Conflict identity: deterministic SHA-256 hash over snapshot_id and canonically sorted policy_result_ids.
  *   - All conflicting PolicyResults must belong to the SAME snapshot.
+ *   - Semantic conflict detection: multiple terminal PolicyResults on the same snapshot whose required outcomes cannot all be satisfied simultaneously.
+ *   - No hard-coded action-effect pairs alone: detects incompatible REQUIREMENTS, BLOCK vs release-permitting, and REQUIRE_REVIEW vs auto-release.
+ *   - BLOCK != automatically HARD_DENY: HARD_DENY_OVERRIDES requires proven non-overridable hard-deny semantics (override_allowed = false or statutory/mandate basis).
+ *   - Structured scope comparison: strict containment comparator over structured scope dimensions. Returns ESCALATE for incomparable, equal, or ambiguous scopes.
+ *   - No unconditional global priority ladder: evaluates specific legal justification for each resolution type.
  *   - Closed vocabulary: HARD_DENY_OVERRIDES, HARD_REQUIREMENT_OVERRIDES, MORE_SPECIFIC_SCOPE, EXPLICIT_PRIORITY, AUTHORIZED_OVERRIDE, ESCALATE.
- *   - Deterministic resolution ordering: hard deny -> hard requirement -> specific scope -> explicit priority -> escalate.
  *   - Rejects insertion-order heuristics, guessing, or hidden state.
- *   - AUTHORIZED_OVERRIDE strictly requires valid PolicyOverride, while non-override resolutions require override_id = null.
+ *   - Reversing PolicyResult input order produces identical conflict identity and resolution behavior.
  */
 import { createHash } from 'crypto';
 import { RegistryValidationError } from '../services/registry-validator.js';
@@ -27,6 +31,7 @@ export interface PolicyResultDescriptor {
   triggered: boolean;
   actionEffect: 'NO_RELEASE_EFFECT' | 'WARNING' | 'REQUIREMENT' | 'REQUIRE_REVIEW' | 'BLOCK';
   actionCode: string;
+  actionParameters?: Record<string, unknown>;
   priorityClass?: string | number;
   scope?: string;
   overrideAllowed?: boolean;
@@ -45,6 +50,194 @@ export interface ConflictResolutionOutcome {
   overrideId?: string | null;
   reasonCodes: string;
   resolvedWinningResultId?: string | null;
+  winningPolicyResultId?: string | null;
+}
+
+export interface StructuredScope {
+  dimensions: Record<string, string>;
+  raw: string;
+}
+
+export type ScopeRelation = 'MORE_SPECIFIC' | 'LESS_SPECIFIC' | 'EQUAL' | 'INCOMPARABLE';
+
+/**
+ * Parses a policy scope into structured dimensions (SPEC04 §64).
+ * Supports JSON objects, delimited key-value pairs (KEY:VALUE or KEY=VALUE separated by / , ;),
+ * or single dimension tokens.
+ */
+export function parseStructuredScope(scopeInput?: string): StructuredScope {
+  if (!scopeInput || scopeInput.trim() === '' || scopeInput.toUpperCase() === 'GLOBAL') {
+    return { dimensions: {}, raw: scopeInput ?? 'GLOBAL' };
+  }
+  const raw = scopeInput.trim();
+  // Try JSON
+  if (raw.startsWith('{') && raw.endsWith('}')) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (typeof parsed === 'object' && parsed !== null) {
+        const dimensions: Record<string, string> = {};
+        for (const [k, v] of Object.entries(parsed)) {
+          dimensions[k.toLowerCase()] = String(v).trim().toLowerCase();
+        }
+        return { dimensions, raw };
+      }
+    } catch {
+      // Fall through to delimited parsing
+    }
+  }
+
+  // Delimited key:value or key=value, separated by / or , or ;
+  const dimensions: Record<string, string> = {};
+  const tokens = raw.split(/[/,;]+/).map((s) => s.trim()).filter(Boolean);
+  let hasExplicitKey = false;
+  for (const token of tokens) {
+    const sepIdx = token.includes('=') ? token.indexOf('=') : token.indexOf(':');
+    if (sepIdx > 0) {
+      hasExplicitKey = true;
+      const k = token.slice(0, sepIdx).trim().toLowerCase();
+      const v = token.slice(sepIdx + 1).trim().toLowerCase();
+      dimensions[k] = v;
+    }
+  }
+  if (hasExplicitKey) {
+    return { dimensions, raw };
+  }
+
+  // Single unkeyed token, e.g. "US" or "LEGAL"
+  return { dimensions: { domain: raw.toLowerCase() }, raw };
+}
+
+/**
+ * Compares two structured scopes for strict containment / specificity (SPEC04 §64).
+ *
+ * Scope A is MORE_SPECIFIC than Scope B iff:
+ * 1. Every dimension present in B is present in A with an identical value.
+ * 2. Scope A defines at least one additional dimension that B does not specify.
+ * 3. No dimension in A contradicts B.
+ *
+ * Returns:
+ *   - MORE_SPECIFIC: A is strictly narrower than B.
+ *   - LESS_SPECIFIC: B is strictly narrower than A.
+ *   - EQUAL: A and B have identical dimension sets and values.
+ *   - INCOMPARABLE: Dimensions are disjoint, partially overlapping without containment, or conflict.
+ */
+export function compareStructuredScopes(aInput?: string, bInput?: string): ScopeRelation {
+  const a = parseStructuredScope(aInput);
+  const b = parseStructuredScope(bInput);
+
+  const keysA = Object.keys(a.dimensions);
+  const keysB = Object.keys(b.dimensions);
+
+  if (keysA.length === 0 && keysB.length === 0) return 'EQUAL';
+
+  let aContainsB = true;
+  for (const k of keysB) {
+    if (!Object.prototype.hasOwnProperty.call(a.dimensions, k) || a.dimensions[k] !== b.dimensions[k]) {
+      aContainsB = false;
+      break;
+    }
+  }
+
+  let bContainsA = true;
+  for (const k of keysA) {
+    if (!Object.prototype.hasOwnProperty.call(b.dimensions, k) || b.dimensions[k] !== a.dimensions[k]) {
+      bContainsA = false;
+      break;
+    }
+  }
+
+  if (aContainsB && bContainsA) {
+    return 'EQUAL';
+  }
+  if (aContainsB && keysA.length > keysB.length) {
+    return 'MORE_SPECIFIC';
+  }
+  if (bContainsA && keysB.length > keysA.length) {
+    return 'LESS_SPECIFIC';
+  }
+
+  return 'INCOMPARABLE';
+}
+
+/**
+ * Determines whether two triggered terminal PolicyResults are incompatible (SPEC04 §57).
+ */
+export function areResultsInConflict(a: PolicyResultDescriptor, b: PolicyResultDescriptor): boolean {
+  if (!a.triggered || !b.triggered) {
+    return false;
+  }
+
+  // Conflict Case 1: BLOCK vs Non-BLOCK / Release-Permitting
+  // One mandates BLOCK while the other permits release or asserts an active requirement/review
+  if (a.actionEffect === 'BLOCK' && b.actionEffect !== 'BLOCK') {
+    return true;
+  }
+  if (b.actionEffect === 'BLOCK' && a.actionEffect !== 'BLOCK') {
+    return true;
+  }
+
+  // Conflict Case 2: Incompatible REQUIREMENTS (SPEC04 §57: "REQUIREMENT A vs incompatible REQUIREMENT B")
+  if (a.actionEffect === 'REQUIREMENT' && b.actionEffect === 'REQUIREMENT') {
+    // If requirement codes differ, they assert distinct/competing mandatory obligations
+    if (a.actionCode !== b.actionCode) {
+      return true;
+    }
+    // If parameters differ, they assert incompatible parameter demands
+    if (a.actionParameters || b.actionParameters) {
+      const paramsA = a.actionParameters ?? {};
+      const paramsB = b.actionParameters ?? {};
+      for (const key of Object.keys(paramsA)) {
+        if (key in paramsB && JSON.stringify(paramsA[key]) !== JSON.stringify(paramsB[key])) {
+          return true;
+        }
+      }
+    }
+    // Identical requirement code and compatible parameters -> COMPATIBLE, NO CONFLICT
+    return false;
+  }
+
+  // Conflict Case 3: REQUIRE_REVIEW vs NO_RELEASE_EFFECT (Automated Release vs Mandatory Review)
+  if (
+    (a.actionEffect === 'REQUIRE_REVIEW' && b.actionEffect === 'NO_RELEASE_EFFECT') ||
+    (b.actionEffect === 'REQUIRE_REVIEW' && a.actionEffect === 'NO_RELEASE_EFFECT')
+  ) {
+    return true;
+  }
+
+  // Conflict Case 4: Multiple competing BLOCK actions with incompatible remediation codes
+  if (a.actionEffect === 'BLOCK' && b.actionEffect === 'BLOCK') {
+    if (a.actionCode !== b.actionCode) {
+      return true;
+    }
+    return false;
+  }
+
+  return false;
+}
+
+/**
+ * Proves whether a result has legitimate hard-deny semantics (SPEC04 §62).
+ * Hard deny requires:
+ * 1. Action is BLOCK
+ * 2. overrideAllowed === false (non-overridable) OR explicit priority mandate (STATUTORY_MANDATE / HARD_DENY).
+ * A generic, overridable BLOCK is NOT a hard deny.
+ */
+export function isHardDeny(result: PolicyResultDescriptor): boolean {
+  if (result.actionEffect !== 'BLOCK') {
+    return false;
+  }
+  // Explicitly non-overridable is required for hard deny
+  if (result.overrideAllowed === false) {
+    return true;
+  }
+  // Or priorityClass explicitly establishes a non-overridable statutory mandate
+  if (typeof result.priorityClass === 'string') {
+    const pc = result.priorityClass.toUpperCase();
+    if (pc.includes('HARD') || pc.includes('MANDATE') || pc.includes('STATUTORY')) {
+      return true;
+    }
+  }
+  return false;
 }
 
 export class PolicyConflictResolver {
@@ -67,7 +260,7 @@ export class PolicyConflictResolver {
 
   /**
    * Detects conflicts across a complete set of terminal PolicyResults (SPEC04 §57, §58).
-   * Conflict detection admitted ONLY after policy result set is complete.
+   * Evaluates structured semantic compatibility.
    */
   static detectConflicts(results: PolicyResultDescriptor[]): DetectedConflict[] {
     if (!results || results.length === 0) return [];
@@ -84,22 +277,26 @@ export class PolicyConflictResolver {
     }
 
     const conflicts: DetectedConflict[] = [];
+    const seenPairs = new Set<string>();
 
-    // Check for triggered BLOCK vs non-BLOCK (e.g. REQUIREMENT, WARNING, NO_RELEASE_EFFECT, etc.)
-    const blockResults = results.filter((r) => r.triggered && r.actionEffect === 'BLOCK');
-    const nonBlockResults = results.filter((r) => r.triggered && r.actionEffect !== 'BLOCK');
+    for (let i = 0; i < results.length; i++) {
+      for (let j = i + 1; j < results.length; j++) {
+        const a = results[i]!;
+        const b = results[j]!;
 
-    if (blockResults.length > 0 && nonBlockResults.length > 0) {
-      for (const b of blockResults) {
-        for (const nb of nonBlockResults) {
-          const conflicting = [b, nb];
-          const conflictKey = this.computeConflictKey(snapshotId, [b.policyResultId, nb.policyResultId]);
-          conflicts.push({
-            conflictKey,
-            snapshotId,
-            policyResultIds: [b.policyResultId, nb.policyResultId].sort(),
-            results: conflicting,
-          });
+        if (areResultsInConflict(a, b)) {
+          const sortedIds = [a.policyResultId, b.policyResultId].sort();
+          const pairKey = sortedIds.join(':');
+          if (!seenPairs.has(pairKey)) {
+            seenPairs.add(pairKey);
+            const conflictKey = this.computeConflictKey(snapshotId, sortedIds);
+            conflicts.push({
+              conflictKey,
+              snapshotId,
+              policyResultIds: sortedIds,
+              results: [a, b],
+            });
+          }
         }
       }
     }
@@ -108,98 +305,165 @@ export class PolicyConflictResolver {
   }
 
   /**
-   * Deterministically resolves a detected conflict using frozen policy rules (SPEC04 §61–§67, §75).
+   * Deterministically resolves a detected conflict using frozen policy rules (SPEC04 §61–§67).
+   *
+   * Evaluates legal justification for resolution types:
+   * 1. HARD_DENY_OVERRIDES: Proven hard deny dominates non-hard-deny. (Generic BLOCK != automatically hard deny).
+   * 2. HARD_REQUIREMENT_OVERRIDES: Mandatory requirement dominates advisory warning.
+   * 3. MORE_SPECIFIC_SCOPE: Strictly narrower structured scope dominates broader scope.
+   * 4. EXPLICIT_PRIORITY: Deterministically higher priority class dominates lower.
+   * 5. ESCALATE: Returned when scopes/priorities are equal, incomparable, or resolution cannot be proven.
+   *
+   * Evaluation is symmetric and invariant to input descriptor ordering.
    */
   static resolveConflict(conflict: DetectedConflict): ConflictResolutionOutcome {
     const conflictKey = conflict.conflictKey;
-    const results = conflict.results ?? (conflict as any).descriptors ?? [];
+    const rawResults: PolicyResultDescriptor[] = conflict.results ?? (conflict as any).descriptors ?? [];
+
+    if (rawResults.length < 2) {
+      throw new RegistryValidationError('CONFLICT_UNRESOLVED', 'A conflict requires at least 2 results to resolve.');
+    }
+
+    // Sort results deterministically by policyResultId for order invariance
+    const results = [...rawResults].sort((a, b) => a.policyResultId.localeCompare(b.policyResultId));
+    const [resA, resB] = results;
 
     // 1. HARD_DENY_OVERRIDES (SPEC04 §62)
-    const blockResult = results.find((r) => r.actionEffect === 'BLOCK');
-    if (blockResult) {
-      // If one is BLOCK and non-overridable, or standard hard deny
+    // Permitted ONLY when frozen semantics explicitly prove one result is a non-overridable hard deny
+    // relative to the other.
+    const hardDenyA = isHardDeny(resA!);
+    const hardDenyB = isHardDeny(resB!);
+
+    if (hardDenyA && !hardDenyB) {
       return {
         conflictKey,
         resolutionType: 'HARD_DENY_OVERRIDES',
         overrideId: null,
         reasonCodes: 'HARD_DENY_DOMINATES',
-        resolvedWinningResultId: blockResult.policyResultId,
+        resolvedWinningResultId: resA!.policyResultId,
+        winningPolicyResultId: resA!.policyResultId,
       };
+    }
+    if (hardDenyB && !hardDenyA) {
+      return {
+        conflictKey,
+        resolutionType: 'HARD_DENY_OVERRIDES',
+        overrideId: null,
+        reasonCodes: 'HARD_DENY_DOMINATES',
+        resolvedWinningResultId: resB!.policyResultId,
+        winningPolicyResultId: resB!.policyResultId,
+      };
+    }
+    if (hardDenyA && hardDenyB) {
+      // Both are hard denies: neither can override the other; must evaluate priority/scope or ESCALATE
     }
 
     // 2. HARD_REQUIREMENT_OVERRIDES (SPEC04 §63)
-    const reqResult = results.find((r) => r.actionEffect === 'REQUIREMENT');
-    const warnResult = results.find((r) => r.actionEffect === 'WARNING');
-    if (reqResult && warnResult) {
+    // Mandatory requirement dominates advisory warning when preserving allowed outcome
+    const reqA = resA!.actionEffect === 'REQUIREMENT';
+    const reqB = resB!.actionEffect === 'REQUIREMENT';
+    const warnA = resA!.actionEffect === 'WARNING';
+    const warnB = resB!.actionEffect === 'WARNING';
+
+    if (reqA && warnB && !hardDenyB) {
       return {
         conflictKey,
         resolutionType: 'HARD_REQUIREMENT_OVERRIDES',
         overrideId: null,
         reasonCodes: 'MANDATORY_REQUIREMENT_DOMINATES_WARNING',
-        resolvedWinningResultId: reqResult.policyResultId,
+        resolvedWinningResultId: resA!.policyResultId,
+        winningPolicyResultId: resA!.policyResultId,
+      };
+    }
+    if (reqB && warnA && !hardDenyA) {
+      return {
+        conflictKey,
+        resolutionType: 'HARD_REQUIREMENT_OVERRIDES',
+        overrideId: null,
+        reasonCodes: 'MANDATORY_REQUIREMENT_DOMINATES_WARNING',
+        resolvedWinningResultId: resB!.policyResultId,
+        winningPolicyResultId: resB!.policyResultId,
       };
     }
 
     // 3. MORE_SPECIFIC_SCOPE (SPEC04 §64)
-    // If scopes can be deterministically compared by depth / specificity
-    const [resA, resB] = results;
-    if (resA && resB && resA.scope && resB.scope && resA.scope !== resB.scope) {
-      const scopeDepthA = resA.scope.split(':').length;
-      const scopeDepthB = resB.scope.split(':').length;
-      if (scopeDepthA > scopeDepthB && resA.scope.startsWith(resB.scope)) {
-        return {
-          conflictKey,
-          resolutionType: 'MORE_SPECIFIC_SCOPE',
-          overrideId: null,
-          reasonCodes: 'NARROWER_SCOPE_DOMINATES',
-          resolvedWinningResultId: resA.policyResultId,
-        };
-      }
-      if (scopeDepthB > scopeDepthA && resB.scope.startsWith(resA.scope)) {
-        return {
-          conflictKey,
-          resolutionType: 'MORE_SPECIFIC_SCOPE',
-          overrideId: null,
-          reasonCodes: 'NARROWER_SCOPE_DOMINATES',
-          resolvedWinningResultId: resB.policyResultId,
-        };
-      }
+    // Allowed only when scope relation is deterministically provable from structured scope
+    const scopeRel = compareStructuredScopes(resA!.scope, resB!.scope);
+    if (scopeRel === 'MORE_SPECIFIC') {
+      return {
+        conflictKey,
+        resolutionType: 'MORE_SPECIFIC_SCOPE',
+        overrideId: null,
+        reasonCodes: 'NARROWER_STRUCTURED_SCOPE_DOMINATES',
+        resolvedWinningResultId: resA!.policyResultId,
+        winningPolicyResultId: resA!.policyResultId,
+      };
+    }
+    if (scopeRel === 'LESS_SPECIFIC') {
+      return {
+        conflictKey,
+        resolutionType: 'MORE_SPECIFIC_SCOPE',
+        overrideId: null,
+        reasonCodes: 'NARROWER_STRUCTURED_SCOPE_DOMINATES',
+        resolvedWinningResultId: resB!.policyResultId,
+        winningPolicyResultId: resB!.policyResultId,
+      };
     }
 
     // 4. EXPLICIT_PRIORITY (SPEC04 §65)
-    if (resA && resB && resA.priorityClass !== undefined && resB.priorityClass !== undefined) {
-      const pA = Number(resA.priorityClass);
-      const pB = Number(resB.priorityClass);
-      if (!isNaN(pA) && !isNaN(pB) && pA !== pB) {
-        const higher = pA > pB ? resA : resB;
+    // Allowed only when priorityClass defines a deterministic ordering
+    if (resA!.priorityClass !== undefined && resB!.priorityClass !== undefined) {
+      const weightA = parsePriorityWeight(resA!.priorityClass);
+      const weightB = parsePriorityWeight(resB!.priorityClass);
+      if (weightA !== null && weightB !== null && weightA !== weightB) {
+        const higher = weightA > weightB ? resA! : resB!;
         return {
           conflictKey,
           resolutionType: 'EXPLICIT_PRIORITY',
           overrideId: null,
           reasonCodes: 'HIGHER_PRIORITY_CLASS_DOMINATES',
           resolvedWinningResultId: higher.policyResultId,
+          winningPolicyResultId: higher.policyResultId,
         };
       }
     }
 
-    // 5. If none of the above deterministically resolve, ESCALATE (SPEC04 §67)
-    // Insertion order or guessing is strictly forbidden (SPEC04 §45, §67).
+    // 5. ESCALATE (SPEC04 §67)
+    // When conflict cannot be resolved deterministically from frozen semantics
     return {
       conflictKey,
       resolutionType: 'ESCALATE',
       overrideId: null,
       reasonCodes: 'UNDETERMINED_PRECEDENCE_ESCALATE_TO_REVIEW',
       resolvedWinningResultId: null,
+      winningPolicyResultId: null,
     };
   }
 
   /**
    * Evaluates if a given conflict resolution permits release (SPEC04 §65, §67).
    */
-  static isReleasePermitted(resolutionType: string): boolean {
+  static isReleasePermitted(resolutionType: string, intendedReleaseStatus?: string): boolean {
     if (resolutionType === 'ESCALATE' || resolutionType === 'HARD_DENY_OVERRIDES') {
+      return false;
+    }
+    if (intendedReleaseStatus === 'BLOCKED') {
       return false;
     }
     return true;
   }
+}
+
+export function parsePriorityWeight(val: string | number | undefined): number | null {
+  if (val === undefined || val === null) return null;
+  if (typeof val === 'number') return isNaN(val) ? null : val;
+  const str = String(val).trim().toUpperCase();
+  if (str === 'CRITICAL' || str === 'P0') return 1000;
+  if (str === 'HIGH' || str === 'P1') return 500;
+  if (str === 'MEDIUM' || str === 'P2') return 300;
+  if (str === 'LOW' || str === 'P3') return 100;
+  if (str === 'STANDARD' || str === 'DEFAULT') return 50;
+  const num = Number(str);
+  if (!isNaN(num)) return num;
+  return null;
 }

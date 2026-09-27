@@ -579,9 +579,13 @@ export class GovernancePersistenceService {
 
       const descriptors: PolicyResultDescriptor[] = resultsRows.map((r: any) => {
         let effect: any = 'NO_RELEASE_EFFECT';
+        let actCode: string = r.reason_code;
+        let actParams: Record<string, unknown> | undefined;
         try {
           const actObj = JSON.parse(r.action);
           effect = actObj.effect ?? (r.triggered ? 'BLOCK' : 'NO_RELEASE_EFFECT');
+          if (actObj.code) actCode = actObj.code;
+          if (actObj.parameters) actParams = actObj.parameters;
         } catch {
           effect = r.triggered ? 'BLOCK' : 'NO_RELEASE_EFFECT';
         }
@@ -591,7 +595,8 @@ export class GovernancePersistenceService {
           policyRevisionId: r.policy_revision_id,
           triggered: r.triggered,
           actionEffect: effect,
-          actionCode: r.reason_code,
+          actionCode: actCode,
+          actionParameters: actParams,
           priorityClass: r.priority_class,
           scope: r.scope,
           overrideAllowed: r.override_allowed,

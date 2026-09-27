@@ -794,19 +794,57 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
 
   // Vector 25: selector escapes frozen snapshot closure
   it('Vector 25: selector escapes frozen snapshot closure (fails closed)', () => {
-    const res = evaluatePolicyDsl(
+    // Attack 1: selector path contains __proto__
+    expect(() =>
+      evaluatePolicyDsl(
+        {
+          conditions: { op: 'EQ', left: '__proto__.polluted', right: 'evil' },
+          action: { effect: 'BLOCK', code: 'PROTOTYPE_POLLUTION' },
+          required_inputs: [],
+        },
+        {},
+      ),
+    ).toThrow(/POLICY_SCHEMA_UNSUPPORTED/i);
+
+    // Attack 2: selector path contains constructor
+    expect(() =>
+      evaluatePolicyDsl(
+        {
+          conditions: { op: 'EQ', left: 'constructor.name', right: 'Object' },
+          action: { effect: 'BLOCK', code: 'CONSTRUCTOR_POLLUTION' },
+          required_inputs: [],
+        },
+        {},
+      ),
+    ).toThrow(/POLICY_SCHEMA_UNSUPPORTED/i);
+
+    // Attack 3: policy declares input A but condition reads B
+    expect(() =>
+      evaluatePolicyDsl(
+        {
+          conditions: { op: 'EQ', left: 'UndeclaredInput.field', right: 'val' },
+          action: { effect: 'BLOCK', code: 'UNDECLARED_INPUT' },
+          required_inputs: ['DeclaredInputA'],
+        },
+        { DeclaredInputA: { field: 'ok' }, UndeclaredInput: { field: 'val' } },
+      ),
+    ).toThrow(/POLICY_SCHEMA_UNSUPPORTED/i);
+
+    // Legitimate declared selector still evaluates correctly
+    const legRes = evaluatePolicyDsl(
       {
-        conditions: { op: 'EQ', left: '__proto__.polluted', right: 'evil' },
-        action: { effect: 'BLOCK', code: 'PROTOTYPE_POLLUTION' },
-        required_inputs: [],
+        conditions: { op: 'EQ', left: 'DeclaredInputA.field', right: 'ok' },
+        action: { effect: 'REQUIREMENT', code: 'DECLARED_PASS' },
+        required_inputs: ['DeclaredInputA'],
       },
-      {},
+      { DeclaredInputA: { field: 'ok' } },
     );
-    expect(res.triggered).toBe(false);
+    expect(legRes.triggered).toBe(true);
   });
 
   // Vector 26: policy required input missing treated as false
   it('Vector 26: policy required input missing treated as false (fails closed with error)', () => {
+    // 1. Missing declared root
     expect(() =>
       evaluatePolicyDsl(
         {
@@ -817,29 +855,94 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
         {},
       ),
     ).toThrow(/POLICY_INPUT_MISSING/i);
+
+    // 2. Missing nested required path
+    expect(() =>
+      evaluatePolicyDsl(
+        {
+          conditions: { op: 'EQ', left: 'AudienceState.non_existent_property', right: 'US' },
+          action: { effect: 'BLOCK', code: 'NESTED_MISSING' },
+          required_inputs: ['AudienceState'],
+        },
+        { AudienceState: { jurisdiction: 'US' } },
+      ),
+    ).toThrow(/POLICY_INPUT_MISSING/i);
   });
 
   // Vector 27: policy type mismatch coerced silently
   it('Vector 27: policy type mismatch coerced silently (fails closed with type error)', () => {
+    // Attack 1: COUNT_* operator applied to scalar input (channel is string)
     expect(() =>
       evaluatePolicyDsl(
         {
-          conditions: { op: 'COUNT_GT', left: 'candidates', right: 'five' as any },
-          action: { effect: 'BLOCK', code: 'COUNT_ERROR' },
-          required_inputs: [],
+          conditions: { op: 'COUNT_GT', left: 'TaskContract.channel', right: 2 },
+          action: { effect: 'BLOCK', code: 'COUNT_SCALAR_ERROR' },
+          required_inputs: ['TaskContract'],
         },
-        { candidates: [1, 2, 3] },
+        { TaskContract: { channel: 'WEB' } },
+      ),
+    ).toThrow(/POLICY_TYPE_ERROR/i);
+
+    // Attack 2: Disparate scalar types comparison (e.g. array vs scalar string)
+    expect(() =>
+      evaluatePolicyDsl(
+        {
+          conditions: { op: 'COUNT_GT', left: 'TaskContract.items', right: 'five' as any },
+          action: { effect: 'BLOCK', code: 'COUNT_ERROR' },
+          required_inputs: ['TaskContract'],
+        },
+        { TaskContract: { items: [1, 2, 3] } },
       ),
     ).toThrow(/POLICY_TYPE_ERROR/i);
   });
 
   // Vector 28: policy schema unsupported but evaluator guesses
   it('Vector 28: policy schema unsupported but evaluator guesses (fails closed)', () => {
+    // 1. Unsupported operator
     expect(() =>
       evaluatePolicyDsl(
         {
           conditions: { op: 'FUZZY_MATCH' as any, left: 'a', right: 'b' },
           action: { effect: 'BLOCK', code: 'UNSUPPORTED' },
+          required_inputs: [],
+        },
+        {},
+      ),
+    ).toThrow(/POLICY_SCHEMA_UNSUPPORTED/i);
+
+    // 2. Unsupported expected_type in selector schema
+    expect(() =>
+      evaluatePolicyDsl(
+        {
+          conditions: {
+            op: 'EXISTS',
+            value: { root: 'TaskContract', path: 'channel', expected_type: 'INVALID_TYPE' as any },
+          },
+          action: { effect: 'BLOCK', code: 'BAD_EXPECTED_TYPE' },
+          required_inputs: ['TaskContract'],
+        },
+        { TaskContract: { channel: 'WEB' } },
+      ),
+    ).toThrow(/POLICY_SCHEMA_UNSUPPORTED/i);
+
+    // 3. Unsupported action effect
+    expect(() =>
+      evaluatePolicyDsl(
+        {
+          conditions: { op: 'IS_TRUE', value: { root: 'TaskContract', path: 'standalone_task' } },
+          action: { effect: 'CUSTOM_RELEASE_PERMIT' as any, code: 'UNSUPPORTED_EFFECT' },
+          required_inputs: ['TaskContract'],
+        },
+        { TaskContract: { standalone_task: true } },
+      ),
+    ).toThrow(/POLICY_SCHEMA_UNSUPPORTED/i);
+
+    // 4. Malformed AST (e.g. ALL operator with empty args array)
+    expect(() =>
+      evaluatePolicyDsl(
+        {
+          conditions: { op: 'ALL', args: [] },
+          action: { effect: 'BLOCK', code: 'MALFORMED_AST' },
           required_inputs: [],
         },
         {},
@@ -1144,7 +1247,7 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
       {
         conditions: { op: 'IS_TRUE', left: 'TaskContract.standalone_task' },
         action: { effect: 'NO_RELEASE_EFFECT', code: 'UNCERTAIN_PASS' },
-        required_inputs: [],
+        required_inputs: ['TaskContract'],
       },
       {
         TaskContract: { standalone_task: true },
@@ -1272,18 +1375,19 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
 
   // Vector 45: conflict resolution chosen by insertion order
   it('Vector 45: conflict resolution chosen by insertion order (fails closed / deterministic)', () => {
-    const d1 = {
-      policyResultId: 'res-block',
+    // 1. Explicitly non-overridable hard deny may use HARD_DENY_OVERRIDES
+    const dHardBlock = {
+      policyResultId: 'res-hard-block',
       snapshotId: 's-45',
-      policyRevisionId: 'p-block',
+      policyRevisionId: 'p-hard-block',
       triggered: true,
       actionEffect: 'BLOCK' as const,
-      actionCode: 'BLOCK_CODE',
+      actionCode: 'HARD_BLOCK',
       priorityClass: 'STANDARD',
       scope: 'GLOBAL',
       overrideAllowed: false,
     };
-    const d2 = {
+    const dAllow = {
       policyResultId: 'res-allow',
       snapshotId: 's-45',
       policyRevisionId: 'p-allow',
@@ -1295,28 +1399,52 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
       overrideAllowed: false,
     };
 
-    // Regardless of order [d1, d2] or [d2, d1], HARD_DENY_OVERRIDES wins
-    const conflict1 = {
-      conflictKey: 'k-45',
-      policyResultIds: ['res-block', 'res-allow'],
-      descriptors: [d1, d2],
+    // Reversing input order produces identical conflict identity/resolution behavior
+    const confHard1 = {
+      conflictKey: 'k-45-hard',
+      policyResultIds: ['res-hard-block', 'res-allow'],
+      descriptors: [dHardBlock, dAllow],
     };
-    const conflict2 = {
-      conflictKey: 'k-45',
-      policyResultIds: ['res-allow', 'res-block'],
-      descriptors: [d2, d1],
+    const confHard2 = {
+      conflictKey: 'k-45-hard',
+      policyResultIds: ['res-allow', 'res-hard-block'],
+      descriptors: [dAllow, dHardBlock],
     };
-    expect(PolicyConflictResolver.resolveConflict(conflict1).resolutionType).toBe(
-      'HARD_DENY_OVERRIDES',
-    );
-    expect(PolicyConflictResolver.resolveConflict(conflict2).resolutionType).toBe(
-      'HARD_DENY_OVERRIDES',
-    );
+    expect(PolicyConflictResolver.resolveConflict(confHard1).resolutionType).toBe('HARD_DENY_OVERRIDES');
+    expect(PolicyConflictResolver.resolveConflict(confHard2).resolutionType).toBe('HARD_DENY_OVERRIDES');
+    expect(PolicyConflictResolver.resolveConflict(confHard1).winningPolicyResultId).toBe('res-hard-block');
+    expect(PolicyConflictResolver.resolveConflict(confHard2).winningPolicyResultId).toBe('res-hard-block');
+
+    // 2. Generic BLOCK without hard-deny semantics does NOT automatically become HARD_DENY_OVERRIDES (it ESCALATES)
+    const dGenericBlock = {
+      policyResultId: 'res-gen-block',
+      snapshotId: 's-45',
+      policyRevisionId: 'p-gen-block',
+      triggered: true,
+      actionEffect: 'BLOCK' as const,
+      actionCode: 'GENERIC_BLOCK',
+      priorityClass: 'STANDARD',
+      scope: 'GLOBAL',
+      overrideAllowed: true, // Overridable -> NOT hard deny
+    };
+    const confGen1 = {
+      conflictKey: 'k-45-gen',
+      policyResultIds: ['res-gen-block', 'res-allow'],
+      descriptors: [dGenericBlock, dAllow],
+    };
+    const confGen2 = {
+      conflictKey: 'k-45-gen',
+      policyResultIds: ['res-allow', 'res-gen-block'],
+      descriptors: [dAllow, dGenericBlock],
+    };
+    expect(PolicyConflictResolver.resolveConflict(confGen1).resolutionType).toBe('ESCALATE');
+    expect(PolicyConflictResolver.resolveConflict(confGen2).resolutionType).toBe('ESCALATE');
   });
 
   // Vector 46: MORE_SPECIFIC_SCOPE used when scopes incomparable
   it('Vector 46: MORE_SPECIFIC_SCOPE used when scopes incomparable (falls through / fails closed)', () => {
-    const d1 = {
+    // 1. Incomparable structured scopes ESCALATE
+    const dIncomp1 = {
       policyResultId: 'res-1',
       snapshotId: 's-46',
       policyRevisionId: 'p-1',
@@ -1324,10 +1452,10 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
       actionEffect: 'REQUIRE_REVIEW' as const,
       actionCode: 'REV_1',
       priorityClass: 'STANDARD',
-      scope: 'CHANNEL:EMAIL',
+      scope: JSON.stringify({ channel: 'EMAIL' }),
       overrideAllowed: true,
     };
-    const d2 = {
+    const dIncomp2 = {
       policyResultId: 'res-2',
       snapshotId: 's-46',
       policyRevisionId: 'p-2',
@@ -1335,22 +1463,115 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
       actionEffect: 'WARNING' as const,
       actionCode: 'WARN_1',
       priorityClass: 'STANDARD',
-      scope: 'MARKET:DE',
+      scope: JSON.stringify({ market: 'DE' }),
       overrideAllowed: true,
     };
-    const conflict = {
-      conflictKey: 'k-46',
+    const conflictIncomp = {
+      conflictKey: 'k-46-incomp',
       policyResultIds: ['res-1', 'res-2'],
-      descriptors: [d1, d2],
+      descriptors: [dIncomp1, dIncomp2],
     };
-    const outcome = PolicyConflictResolver.resolveConflict(conflict);
-    // Incomparable scopes cannot resolve via MORE_SPECIFIC_SCOPE; escalates
-    expect(outcome.resolutionType).not.toBe('MORE_SPECIFIC_SCOPE');
+    expect(PolicyConflictResolver.resolveConflict(conflictIncomp).resolutionType).toBe('ESCALATE');
+
+    // 2. Deterministically narrower structured scope may use MORE_SPECIFIC_SCOPE
+    const dBroad = {
+      policyResultId: 'res-broad',
+      snapshotId: 's-46',
+      policyRevisionId: 'p-broad',
+      triggered: true,
+      actionEffect: 'REQUIRE_REVIEW' as const,
+      actionCode: 'REV_BROAD',
+      priorityClass: 'STANDARD',
+      scope: JSON.stringify({ channel: 'EMAIL' }),
+      overrideAllowed: true,
+    };
+    const dNarrow = {
+      policyResultId: 'res-narrow',
+      snapshotId: 's-46',
+      policyRevisionId: 'p-narrow',
+      triggered: true,
+      actionEffect: 'WARNING' as const,
+      actionCode: 'WARN_NARROW',
+      priorityClass: 'STANDARD',
+      scope: JSON.stringify({ channel: 'EMAIL', market: 'DE' }),
+      overrideAllowed: true,
+    };
+    const conflictNarrow1 = {
+      conflictKey: 'k-46-scope-1',
+      policyResultIds: ['res-broad', 'res-narrow'],
+      descriptors: [dBroad, dNarrow],
+    };
+    const conflictNarrow2 = {
+      conflictKey: 'k-46-scope-2',
+      policyResultIds: ['res-narrow', 'res-broad'],
+      descriptors: [dNarrow, dBroad],
+    };
+    const resNarrow1 = PolicyConflictResolver.resolveConflict(conflictNarrow1);
+    const resNarrow2 = PolicyConflictResolver.resolveConflict(conflictNarrow2);
+    expect(resNarrow1.resolutionType).toBe('MORE_SPECIFIC_SCOPE');
+    expect(resNarrow1.winningPolicyResultId).toBe('res-narrow');
+    expect(resNarrow2.resolutionType).toBe('MORE_SPECIFIC_SCOPE');
+    expect(resNarrow2.winningPolicyResultId).toBe('res-narrow');
+
+    // 3. Two incompatible REQUIREMENT results are detected as a conflict
+    const dReqA = {
+      policyResultId: 'res-req-a',
+      snapshotId: 's-46',
+      policyRevisionId: 'p-req-a',
+      triggered: true,
+      actionEffect: 'REQUIREMENT' as const,
+      actionCode: 'REQUIRE_DISCLAIMER_A',
+      priorityClass: 'STANDARD',
+      scope: 'GLOBAL',
+      overrideAllowed: true,
+    };
+    const dReqB = {
+      policyResultId: 'res-req-b',
+      snapshotId: 's-46',
+      policyRevisionId: 'p-req-b',
+      triggered: true,
+      actionEffect: 'REQUIREMENT' as const,
+      actionCode: 'REQUIRE_DISCLAIMER_B',
+      priorityClass: 'STANDARD',
+      scope: 'GLOBAL',
+      overrideAllowed: true,
+    };
+    const detectedIncompatible = PolicyConflictResolver.detectConflicts([dReqA, dReqB]);
+    expect(detectedIncompatible.length).toBe(1);
+
+    // 4. Two compatible REQUIREMENT results are not falsely conflicted
+    const dReqComp1 = {
+      policyResultId: 'res-comp-1',
+      snapshotId: 's-46',
+      policyRevisionId: 'p-comp-1',
+      triggered: true,
+      actionEffect: 'REQUIREMENT' as const,
+      actionCode: 'REQUIRE_DISCLAIMER_A',
+      actionParameters: { disclaimerId: 'd-1' },
+      priorityClass: 'STANDARD',
+      scope: 'GLOBAL',
+      overrideAllowed: true,
+    };
+    const dReqComp2 = {
+      policyResultId: 'res-comp-2',
+      snapshotId: 's-46',
+      policyRevisionId: 'p-comp-2',
+      triggered: true,
+      actionEffect: 'REQUIREMENT' as const,
+      actionCode: 'REQUIRE_DISCLAIMER_A',
+      actionParameters: { disclaimerId: 'd-1' },
+      priorityClass: 'STANDARD',
+      scope: 'GLOBAL',
+      overrideAllowed: true,
+    };
+    const detectedCompatible = PolicyConflictResolver.detectConflicts([dReqComp1, dReqComp2]);
+    expect(detectedCompatible.length).toBe(0);
   });
 
   // Vector 47: EXPLICIT_PRIORITY used when priorities equal/incomparable
   it('Vector 47: EXPLICIT_PRIORITY used when priorities equal/incomparable (falls through / fails closed)', () => {
-    const d1 = {
+    // 1. Equal/incomparable priority does not choose insertion order -> ESCALATES
+    const dEq1 = {
       policyResultId: 'res-1',
       snapshotId: 's-47',
       policyRevisionId: 'p-1',
@@ -1361,7 +1582,7 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
       scope: 'GLOBAL',
       overrideAllowed: true,
     };
-    const d2 = {
+    const dEq2 = {
       policyResultId: 'res-2',
       snapshotId: 's-47',
       policyRevisionId: 'p-2',
@@ -1372,19 +1593,66 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
       scope: 'GLOBAL',
       overrideAllowed: true,
     };
-    const conflict = {
-      conflictKey: 'k-47',
+    const confEq1 = {
+      conflictKey: 'k-47-eq-1',
       policyResultIds: ['res-1', 'res-2'],
-      descriptors: [d1, d2],
+      descriptors: [dEq1, dEq2],
     };
-    const outcome = PolicyConflictResolver.resolveConflict(conflict);
-    expect(outcome.resolutionType).toBe('ESCALATE');
+    const confEq2 = {
+      conflictKey: 'k-47-eq-2',
+      policyResultIds: ['res-2', 'res-1'],
+      descriptors: [dEq2, dEq1],
+    };
+    expect(PolicyConflictResolver.resolveConflict(confEq1).resolutionType).toBe('ESCALATE');
+    expect(PolicyConflictResolver.resolveConflict(confEq2).resolutionType).toBe('ESCALATE');
+
+    // 2. Strict explicit priority resolves deterministically via EXPLICIT_PRIORITY
+    const dHigh = {
+      policyResultId: 'res-high',
+      snapshotId: 's-47',
+      policyRevisionId: 'p-high',
+      triggered: true,
+      actionEffect: 'REQUIRE_REVIEW' as const,
+      actionCode: 'REV_HIGH',
+      priorityClass: 'P1',
+      scope: 'GLOBAL',
+      overrideAllowed: true,
+    };
+    const dLow = {
+      policyResultId: 'res-low',
+      snapshotId: 's-47',
+      policyRevisionId: 'p-low',
+      triggered: true,
+      actionEffect: 'WARNING' as const,
+      actionCode: 'WARN_LOW',
+      priorityClass: 'P2',
+      scope: 'GLOBAL',
+      overrideAllowed: true,
+    };
+    const confPrio1 = {
+      conflictKey: 'k-47-prio-1',
+      policyResultIds: ['res-high', 'res-low'],
+      descriptors: [dHigh, dLow],
+    };
+    const confPrio2 = {
+      conflictKey: 'k-47-prio-2',
+      policyResultIds: ['res-low', 'res-high'],
+      descriptors: [dLow, dHigh],
+    };
+    const resPrio1 = PolicyConflictResolver.resolveConflict(confPrio1);
+    const resPrio2 = PolicyConflictResolver.resolveConflict(confPrio2);
+    expect(resPrio1.resolutionType).toBe('EXPLICIT_PRIORITY');
+    expect(resPrio1.winningPolicyResultId).toBe('res-high');
+    expect(resPrio2.resolutionType).toBe('EXPLICIT_PRIORITY');
+    expect(resPrio2.winningPolicyResultId).toBe('res-high');
   });
 
   // Vector 48: ESCALATE interpreted as release authorization
   it('Vector 48: ESCALATE interpreted as release authorization (fails closed)', async () => {
     // ESCALATE resolution cannot authorize READY release
     expect(PolicyConflictResolver.isReleasePermitted('ESCALATE')).toBe(false);
+    expect(PolicyConflictResolver.isReleasePermitted('ESCALATE', 'READY')).toBe(false);
+    expect(PolicyConflictResolver.isReleasePermitted('ESCALATE', 'BLOCKED')).toBe(false);
   });
 
   // Vector 49: AUTHORIZED_OVERRIDE has null override_id
