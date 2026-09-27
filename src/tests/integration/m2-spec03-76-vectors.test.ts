@@ -21,8 +21,9 @@ import { EvidencePersistenceService } from '../../persistence/relational/service
 import { KnowledgeGapPersistenceService } from '../../persistence/relational/services/knowledge-gap-persistence-service.js';
 import { EpistemicPersistenceService } from '../../persistence/relational/services/epistemic-persistence-service.js';
 import { ControlPlanePersistenceService } from '../../persistence/relational/services/control-plane-persistence-service.js';
-import { PublicationPersistenceService } from '../../persistence/relational/services/publication-persistence-service.js';
 import { GovernanceControlPlaneGateway, GovernanceActivationAuthority } from '../../control-plane/authority/control-plane-authority.js';
+import { StrategyKnowledgeGateService } from '../../persistence/relational/services/strategy-knowledge-gate-service.js';
+import { claimObjectForGC } from '../../persistence/relational/services/object-registry-service.js';
 import {
   deriveEpistemicState,
   validateCausalSupportGuard,
@@ -66,10 +67,11 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
   let gapService: KnowledgeGapPersistenceService;
   let epiService: EpistemicPersistenceService;
   let cpService: ControlPlanePersistenceService;
-  let pubService: PublicationPersistenceService;
+  let strategyGateService: StrategyKnowledgeGateService;
 
   const tenantA = 'tenant-spec03-a';
   const tenantB = 'tenant-spec03-b';
+  const workspaceA = 'ws-spec03-a';
   const uid = (p: string) => `${p}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
 
   const taskRevId = uid('task-rev-03');
@@ -93,7 +95,7 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
     gapService = new KnowledgeGapPersistenceService(sql);
     epiService = new EpistemicPersistenceService(sql);
     cpService = new ControlPlanePersistenceService(sql);
-    pubService = new PublicationPersistenceService(sql);
+    strategyGateService = new StrategyKnowledgeGateService(sql);
 
     // Apply M2 triggers if tables were reset
     const m2TriggersPath = path.resolve(
@@ -253,11 +255,12 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
     expect(err.code).toBe('EVIDENCE_ORIGIN_NOT_FOUND');
   });
 
-  it('Vector 04: source snapshot missing', async () => {
-    let err: any;
+  it('Vector 04: source snapshot missing / GC_CLAIMED / DELETED / AVAILABLE serialization', async () => {
+    // 1. Missing snapshot reference
+    let errMissing: any;
     try {
       await evService.ingestSourceArtifact({
-        sourceId: uid('src-04'),
+        sourceId: uid('src-04-miss'),
         tenantId: tenantA,
         sourceType: 'WEB_PAGE',
         publisher: 'Publisher',
@@ -265,16 +268,110 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
         jurisdiction: 'US',
         sourceVersion: '1.0',
         retrievedAt: new Date(),
-        contentHash: 'hash-04',
-        snapshotReference: 'missing-object-id', // Missing in ObjectRegistry
+        contentHash: 'hash-04-miss',
+        snapshotReference: 'missing-object-id',
         rightsPolicyId: rightsPolicyId,
         dataScope: 'GLOBAL_PUBLIC',
       });
     } catch (e) {
-      err = e;
+      errMissing = e;
     }
-    expect(err).toBeDefined();
-    expect(err.code).toBe('SNAPSHOT_REFERENCE_NOT_FOUND');
+    expect(errMissing).toBeDefined();
+    expect(errMissing.code).toBe('SNAPSHOT_REFERENCE_NOT_FOUND');
+
+    // 2. DELETED snapshot reference rejected
+    const delObjId = uid('obj-04-del');
+    await sql`
+      INSERT INTO object_registry (object_id, tenant_id, content_hash, object_key, size_bytes, media_type, state)
+      VALUES (${delObjId}, ${tenantA}, ${uid('h-del')}, ${uid('k-del')}, 100, 'text/plain', 'DELETED')
+    `;
+    let errDel: any;
+    try {
+      await evService.ingestSourceArtifact({
+        sourceId: uid('src-04-del'),
+        tenantId: tenantA,
+        sourceType: 'WEB_PAGE',
+        publisher: 'Publisher',
+        author: 'Author',
+        jurisdiction: 'US',
+        sourceVersion: '1.0',
+        retrievedAt: new Date(),
+        contentHash: 'hash-04-del',
+        snapshotReference: delObjId,
+        rightsPolicyId: rightsPolicyId,
+        dataScope: 'GLOBAL_PUBLIC',
+      });
+    } catch (e) {
+      errDel = e;
+    }
+    expect(errDel).toBeDefined();
+    expect(errDel.code).toBe('CANONICAL_REFERENCE_REJECTED_DELETED');
+
+    // 3. GC_CLAIMED snapshot reference rejected
+    const gcObjId = uid('obj-04-gc');
+    await sql`
+      INSERT INTO object_registry (object_id, tenant_id, content_hash, object_key, size_bytes, media_type, state, gc_claim_token)
+      VALUES (${gcObjId}, ${tenantA}, ${uid('h-gc')}, ${uid('k-gc')}, 100, 'text/plain', 'GC_CLAIMED', 'claim-tok-1')
+    `;
+    let errGc: any;
+    try {
+      await evService.ingestSourceArtifact({
+        sourceId: uid('src-04-gc'),
+        tenantId: tenantA,
+        sourceType: 'WEB_PAGE',
+        publisher: 'Publisher',
+        author: 'Author',
+        jurisdiction: 'US',
+        sourceVersion: '1.0',
+        retrievedAt: new Date(),
+        contentHash: 'hash-04-gc',
+        snapshotReference: gcObjId,
+        rightsPolicyId: rightsPolicyId,
+        dataScope: 'GLOBAL_PUBLIC',
+      });
+    } catch (e) {
+      errGc = e;
+    }
+    expect(errGc).toBeDefined();
+    expect(errGc.code).toBe('OBJECT_NOT_AVAILABLE_FOR_REFERENCE');
+
+    // 4. AVAILABLE object succeeds and creates canonical reference in object_references
+    const availObjId = uid('obj-04-avail');
+    await sql`
+      INSERT INTO object_registry (object_id, tenant_id, content_hash, object_key, size_bytes, media_type, state)
+      VALUES (${availObjId}, ${tenantA}, ${uid('h-avail')}, ${uid('k-avail')}, 100, 'text/plain', 'AVAILABLE')
+    `;
+    const srcAvailId = uid('src-04-avail');
+    await evService.ingestSourceArtifact({
+      sourceId: srcAvailId,
+      tenantId: tenantA,
+      sourceType: 'WEB_PAGE',
+      publisher: 'Publisher',
+      author: 'Author',
+      jurisdiction: 'US',
+      sourceVersion: '1.0',
+      retrievedAt: new Date(),
+      contentHash: 'hash-04-avail',
+      snapshotReference: availObjId,
+      rightsPolicyId: rightsPolicyId,
+      dataScope: 'GLOBAL_PUBLIC',
+    });
+
+    const [ref] = await sql`
+      SELECT object_id FROM object_references WHERE object_id = ${availObjId}
+    `;
+    expect(ref).toBeDefined();
+    expect(ref.object_id).toBe(availObjId);
+
+    // 5. GC reachability race remains safe: cannot claim object that is referenced by SourceArtifact
+    let errClaim: any;
+    try {
+      await claimObjectForGC(sql, availObjId, 'tok-new');
+    } catch (e) {
+      errClaim = e;
+    }
+    expect(errClaim).toBeDefined();
+    expect(errClaim.code).toBe('OBJECT_IN_USE_CANNOT_GC');
   });
 
   it('Vector 05: source rights use blocked', async () => {
@@ -493,43 +590,88 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
   // --- VECTORS 11 to 20: Evidence Quality & Classification ---
 
   it('Vector 11: evidence extractor drops material qualifier', async () => {
-    const p1 = {
-      propositionType: 'FACTUAL' as const,
-      canonicalMeaning: 'Reduces noise at 1 metre',
-      subject: 'Device',
-      predicate: 'reduces',
-      object: 'noise',
-      qualifiers: 'at 1 metre',
-      conditions: 'standard',
-      populationScope: 'all',
-      jurisdictionScope: 'GLOBAL',
-    };
-    const p2 = {
-      ...p1,
-      qualifiers: '', // Dropped qualifier
-    };
-    expect(() => validateSemanticMergeSafety(p1, p2)).toThrowError(RegistryValidationError);
+    const srcId = uid('src-11');
+    await evService.ingestSourceArtifact({
+      sourceId: srcId,
+      tenantId: tenantA,
+      sourceType: 'WEB_PAGE',
+      publisher: 'Publisher',
+      author: 'Author',
+      jurisdiction: 'GLOBAL',
+      sourceVersion: '1.0',
+      retrievedAt: new Date(),
+      contentHash: 'hash-11',
+      snapshotReference: snapshotObjId,
+      rightsPolicyId: rightsPolicyId,
+      dataScope: 'GLOBAL_PUBLIC',
+    });
+
+    let err: any;
+    try {
+      await evService.extractEvidenceItem({
+        evidenceId: uid('ev-11'),
+        tenantId: tenantA,
+        originType: 'SOURCE_ARTIFACT',
+        originId: srcId,
+        sourceContent: 'The device reduces acoustic noise at 1 metre in laboratory benchmark tests.',
+        statement: 'The device reduces acoustic noise.', // Dropped "at 1 metre" measurement condition
+        statementType: 'ASSERTION',
+        assertionMethod: 'EXTRACTED',
+        evidenceDomain: 'ACADEMIC_STUDY',
+        studyDesign: 'LABORATORY',
+        causalIdentification: 'NONE',
+        mechanismSupport: 'NONE',
+        validFrom: new Date(),
+        limitations: 'None',
+        conditions: [],
+      });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeDefined();
+    expect(err.code).toBe('MATERIAL_MEASUREMENT_CONDITION_DROPPED');
   });
 
   it('Vector 12: evidence extractor upgrades association to causation', async () => {
-    const assoc = {
-      propositionType: 'FACTUAL' as const,
-      canonicalMeaning: 'A is associated with B',
-      subject: 'A',
-      predicate: 'is associated with',
-      object: 'B',
-      qualifiers: '',
-      conditions: '',
-      populationScope: 'general',
-      jurisdictionScope: 'GLOBAL',
-    };
-    const causal = {
-      ...assoc,
-      propositionType: 'CAUSAL' as const,
-      canonicalMeaning: 'A causes B',
-      predicate: 'causes',
-    };
-    expect(evaluateSemanticEquivalence(assoc, causal)).toBe('CREATE_NEW');
+    const srcId = uid('src-12');
+    await evService.ingestSourceArtifact({
+      sourceId: srcId,
+      tenantId: tenantA,
+      sourceType: 'WEB_PAGE',
+      publisher: 'Publisher',
+      author: 'Author',
+      jurisdiction: 'GLOBAL',
+      sourceVersion: '1.0',
+      retrievedAt: new Date(),
+      contentHash: 'hash-12',
+      snapshotReference: snapshotObjId,
+      rightsPolicyId: rightsPolicyId,
+      dataScope: 'GLOBAL_PUBLIC',
+    });
+
+    let err: any;
+    try {
+      await evService.extractEvidenceItem({
+        evidenceId: uid('ev-12'),
+        tenantId: tenantA,
+        originType: 'SOURCE_ARTIFACT',
+        originId: srcId,
+        sourceContent: 'Increased ad frequency was associated with higher short-term conversion.',
+        statement: 'Increased ad frequency causes higher short-term conversion.', // Upgraded associated with -> causes
+        statementType: 'ASSERTION',
+        assertionMethod: 'EXTRACTED',
+        evidenceDomain: 'OBSERVATIONAL_PERFORMANCE',
+        studyDesign: 'OBSERVATIONAL',
+        causalIdentification: 'NONE',
+        mechanismSupport: 'NONE',
+        validFrom: new Date(),
+        limitations: 'None',
+      });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeDefined();
+    expect(err.code).toBe('EVIDENCE_SEMANTIC_STRENGTHENING_PROHIBITED');
   });
 
   it('Vector 13: evidence domain classified as support judgment', () => {
@@ -970,7 +1112,7 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
     expect(evaluateSemanticEquivalence(p1, p2)).toBe('CREATE_NEW');
   });
 
-  it('Vector 30: inaccessible cross-tenant Proposition reused', async () => {
+  it('Vector 30: inaccessible cross-tenant Proposition reused & existence leak', async () => {
     const propTenantA = uid('prop-30-private-a');
     const secretMeaning = uid('Secret internal proprietary finding');
     await propService.resolveOrCreateProposition({
@@ -1000,7 +1142,7 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
 
   // --- VECTORS 31 to 40: Links, Compatibility & Assessments ---
 
-  it('Vector 31: duplicate EvidencePropositionLink creation', async () => {
+  it('Vector 31: duplicate EvidencePropositionLink creation & cross-workspace isolation', async () => {
     const evId = uid('ev-31');
     const propId = uid('prop-31');
     const linkId1 = uid('link-31-1');
@@ -1063,9 +1205,37 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
     });
     expect(l2.created).toBe(false);
     expect(l2.linkId).toBe(linkId1);
+
+    // Cross-workspace Proposition isolation: workspace A proposition cannot be reused by workspace B
+    const meaningWs = uid('Workspace-private meaning');
+    const ws1PropId = uid('prop-ws1');
+    await propService.resolveOrCreateProposition({
+      propositionId: ws1PropId,
+      tenantId: tenantA,
+      workspaceId: 'workspace-alpha',
+      propositionType: 'FACTUAL',
+      canonicalMeaning: meaningWs,
+      subject: 'S',
+      predicate: 'P',
+      object: 'O',
+    });
+
+    const ws2Res = await propService.resolveOrCreateProposition({
+      propositionId: uid('prop-ws2'),
+      tenantId: tenantA,
+      workspaceId: 'workspace-beta',
+      propositionType: 'FACTUAL',
+      canonicalMeaning: meaningWs,
+      subject: 'S',
+      predicate: 'P',
+      object: 'O',
+    });
+    expect(ws2Res.outcome).toBe('CREATED_NEW');
+    expect(ws2Res.propositionId).not.toBe(ws1PropId);
   });
 
-  it('Vector 32: support assessed before Link identity', async () => {
+  it('Vector 32: support assessed before Link identity & cross-tenant link rejected', async () => {
+    // 1. Support assessed before link identity exists
     let err: any;
     try {
       await evService.createEvidenceAssessment({
@@ -1094,10 +1264,68 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
     }
     expect(err).toBeDefined();
     expect(err.code).toBe('EVIDENCE_PROPOSITION_LINK_NOT_FOUND');
+
+    // 2. Cross-tenant link creation attempt is rejected
+    const propTenantB = uid('prop-32-tb');
+    await propService.resolveOrCreateProposition({
+      propositionId: propTenantB,
+      tenantId: tenantB,
+      propositionType: 'FACTUAL',
+      canonicalMeaning: uid('Prop 32 Tenant B'),
+      subject: 'S',
+      predicate: 'P',
+      object: 'O',
+    });
+
+    const srcIdA = uid('src-32-ta');
+    const evIdA = uid('ev-32-ta');
+    await evService.ingestSourceArtifact({
+      sourceId: srcIdA,
+      tenantId: tenantA,
+      sourceType: 'DOC',
+      publisher: 'P',
+      author: 'A',
+      jurisdiction: 'US',
+      sourceVersion: '1.0',
+      retrievedAt: new Date(),
+      contentHash: 'hash-32-ta',
+      snapshotReference: snapshotObjId,
+      rightsPolicyId: rightsPolicyId,
+      dataScope: 'GLOBAL_PUBLIC',
+    });
+    await evService.extractEvidenceItem({
+      evidenceId: evIdA,
+      tenantId: tenantA,
+      originType: 'SOURCE_ARTIFACT',
+      originId: srcIdA,
+      statement: 'Evidence statement 32 TA',
+      statementType: 'ASSERTION',
+      assertionMethod: 'EXTRACTED',
+      evidenceDomain: 'ACADEMIC_STUDY',
+      studyDesign: 'NONE',
+      causalIdentification: 'NONE',
+      mechanismSupport: 'NONE',
+      validFrom: new Date(),
+      limitations: 'None',
+    });
+
+    let errCrossLink: any;
+    try {
+      await evService.linkEvidenceToProposition({
+        linkId: uid('link-32-cross'),
+        evidenceId: evIdA,
+        propositionId: propTenantB,
+        tenantId: tenantA, // Calling as tenantA with proposition from tenantB
+      });
+    } catch (e) {
+      errCrossLink = e;
+    }
+    expect(errCrossLink).toBeDefined();
+    expect(errCrossLink.code).toBe('TENANT_ISOLATION_VIOLATION');
   });
 
-  it('Vector 33: compatibility conflated with relationship', () => {
-    // Proves that COMPATIBLE + CONTRADICTS is valid and independent
+  it('Vector 33: compatibility conflated with relationship & cross-tenant assessment', async () => {
+    // 1. Proves that COMPATIBLE + CONTRADICTS is valid and independent
     const res = deriveEpistemicState({
       propositionId: 'prop-33',
       propositionType: 'FACTUAL',
@@ -1116,9 +1344,88 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
       knownFrom: new Date(),
     });
     expect(res.supportStatus).toBe('CONTRADICTED');
+
+    // 2. Cross-tenant assessment creation attempt is rejected
+    const propId33 = uid('prop-33-ta');
+    await propService.resolveOrCreateProposition({
+      propositionId: propId33,
+      tenantId: tenantA,
+      propositionType: 'FACTUAL',
+      canonicalMeaning: uid('Prop 33 TA'),
+      subject: 'S',
+      predicate: 'P',
+      object: 'O',
+    });
+    const srcId33 = uid('src-33');
+    await evService.ingestSourceArtifact({
+      sourceId: srcId33,
+      tenantId: tenantA,
+      sourceType: 'DOC',
+      publisher: 'P',
+      author: 'A',
+      jurisdiction: 'US',
+      sourceVersion: '1.0',
+      retrievedAt: new Date(),
+      contentHash: 'hash-33',
+      snapshotReference: snapshotObjId,
+      rightsPolicyId: rightsPolicyId,
+      dataScope: 'GLOBAL_PUBLIC',
+    });
+    const evId33 = uid('ev-33');
+    await evService.extractEvidenceItem({
+      evidenceId: evId33,
+      tenantId: tenantA,
+      originType: 'SOURCE_ARTIFACT',
+      originId: srcId33,
+      statement: 'Evidence statement 33',
+      statementType: 'ASSERTION',
+      assertionMethod: 'EXTRACTED',
+      evidenceDomain: 'ACADEMIC_STUDY',
+      studyDesign: 'NONE',
+      causalIdentification: 'NONE',
+      mechanismSupport: 'NONE',
+      validFrom: new Date(),
+      limitations: 'None',
+    });
+    const link33 = await evService.linkEvidenceToProposition({
+      linkId: uid('link-33-ta'),
+      evidenceId: evId33,
+      propositionId: propId33,
+      tenantId: tenantA,
+    });
+
+    let errCrossAss: any;
+    try {
+      await evService.createEvidenceAssessment({
+        assessmentId: uid('ass-33-tb'),
+        tenantId: tenantB, // Calling as Tenant B for Tenant A's link!
+        linkId: link33.linkId,
+        compatibilityStatus: 'COMPATIBLE',
+        relationship: 'SUPPORTS',
+        assessor: 'Assessor',
+        assessmentMethod: 'MANUAL',
+        authority: 'HIGH',
+        methodologicalQuality: 'HIGH',
+        directness: 'DIRECT',
+        applicability: 'HIGH',
+        populationMatch: 'MATCH',
+        contextMatch: 'MATCH',
+        freshness: 'FRESH',
+        independence: 'INDEPENDENT',
+        precision: 'HIGH',
+        limitations: 'None',
+        uncertainty: 'LOW',
+        assessedAt: new Date(),
+      });
+    } catch (e) {
+      errCrossAss = e;
+    }
+    expect(errCrossAss).toBeDefined();
+    expect(errCrossAss.code).toBe('TENANT_ISOLATION_VIOLATION');
   });
 
-  it('Vector 34: INCOMPATIBLE evidence contributes support', () => {
+  it('Vector 34: INCOMPATIBLE evidence contributes support & cross-tenant EpistemicState', async () => {
+    // 1. Incompatible contributes zero support
     const res = deriveEpistemicState({
       propositionId: 'prop-34',
       propositionType: 'FACTUAL',
@@ -1137,6 +1444,37 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
       knownFrom: new Date(),
     });
     expect(res.supportStatus).toBe('UNKNOWN'); // Incompatible contributes zero support!
+
+    // 2. Cross-tenant EpistemicState append attempt is rejected
+    const propId34 = uid('prop-34-ta');
+    await propService.resolveOrCreateProposition({
+      propositionId: propId34,
+      tenantId: tenantA,
+      propositionType: 'FACTUAL',
+      canonicalMeaning: uid('Prop 34 TA'),
+      subject: 'S',
+      predicate: 'P',
+      object: 'O',
+    });
+
+    let errCrossEpi: any;
+    try {
+      await epiService.appendEpistemicState({
+        epistemicStateId: uid('epi-34-tb'),
+        propositionId: propId34, // Proposition belongs to Tenant A
+        tenantId: tenantB, // Calling as Tenant B
+        derivationMethod: 'RULE_BASED',
+        derivationEntityType: 'EvaluatorConfig',
+        derivationStableId: evalStable,
+        derivationRevisionId: evalRevId,
+        validFrom: new Date(),
+        knownFrom: new Date(),
+      });
+    } catch (e) {
+      errCrossEpi = e;
+    }
+    expect(errCrossEpi).toBeDefined();
+    expect(errCrossEpi.code).toBe('TENANT_ISOLATION_VIOLATION');
   });
 
   it('Vector 35: INCOMPATIBLE evidence contributes contradiction weight', () => {
@@ -1582,9 +1920,37 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
     expect(res.selectedAssessmentIds).toEqual(['a-succ']);
   });
 
-  it('Vector 44: hidden unstored evidence affects derivation', () => {
-    // EpistemicState derivation uses strictly recorded inputs
-    expect(true).toBe(true);
+  it('Vector 44: hidden unstored evidence affects derivation', async () => {
+    const propId = uid('prop-44');
+    await propService.resolveOrCreateProposition({
+      propositionId: propId,
+      tenantId: tenantA,
+      propositionType: 'FACTUAL',
+      canonicalMeaning: uid('Prop 44'),
+      subject: 'S',
+      predicate: 'P',
+      object: 'O',
+    });
+
+    let err: any;
+    try {
+      await epiService.appendEpistemicState({
+        epistemicStateId: uid('epi-44'),
+        propositionId: propId,
+        assessmentIds: ['unrecorded-hidden-assessment-id'],
+        derivationMethod: 'RULE_BASED',
+        derivationEntityType: 'EvaluatorConfig',
+        derivationStableId: evalStable,
+        derivationRevisionId: evalRevId,
+        validFrom: new Date(),
+        knownFrom: new Date(),
+        tenantId: tenantA,
+      });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeDefined();
+    expect(err.code).toBe('ASSESSMENT_NOT_FOUND');
   });
 
   it('Vector 45: material contradiction silently omitted', () => {
@@ -1603,16 +1969,40 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
     expect(res.supportStatus).toBe('CONFLICTING');
   });
 
-  it('Vector 46: UNKNOWN promoted to SUPPORTED', () => {
-    const res = deriveEpistemicState({
-      propositionId: 'prop-46',
+  it('Vector 46: UNKNOWN promoted to SUPPORTED', async () => {
+    const propId = uid('prop-46');
+    await propService.resolveOrCreateProposition({
+      propositionId: propId,
+      tenantId: tenantA,
       propositionType: 'FACTUAL',
-      assessments: [], // Zero evidence
-      derivationRevisionRef: { entityType: 'EvaluatorConfig', stableId: evalStable, revisionId: evalRevId },
-      validFrom: new Date(),
-      knownFrom: new Date(),
+      canonicalMeaning: uid('Prop 46'),
+      subject: 'S',
+      predicate: 'P',
+      object: 'O',
     });
-    expect(res.supportStatus).toBe('UNKNOWN');
+
+    let err: any;
+    try {
+      await epiService.appendEpistemicState({
+        epistemicStateId: uid('epi-46'),
+        propositionId: propId,
+        supportStatus: 'SUPPORTED', // Caller tries to persist SUPPORTED with zero evidence
+        causalStatus: 'NOT_APPLICABLE',
+        uncertainty: 'None',
+        derivationMethod: 'RULE_BASED',
+        derivationEntityType: 'EvaluatorConfig',
+        derivationStableId: evalStable,
+        derivationRevisionId: evalRevId,
+        validFrom: new Date(),
+        knownFrom: new Date(),
+        tenantId: tenantA,
+        assessmentIds: [],
+      });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeDefined();
+    expect(err.code).toBe('DERIVED_STATE_MISMATCH');
   });
 
   it('Vector 47: INSUFFICIENT promoted to SUPPORTED', () => {
@@ -1681,8 +2071,41 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
   });
 
   it('Vector 50: replay recomputes old state using current model', async () => {
-    // Replay reads the stored exact derivation_revision_id, not a dynamic current revision
-    expect(true).toBe(true);
+    const propId = uid('prop-50');
+    await propService.resolveOrCreateProposition({
+      propositionId: propId,
+      tenantId: tenantA,
+      propositionType: 'FACTUAL',
+      canonicalMeaning: uid('Prop 50'),
+      subject: 'S',
+      predicate: 'P',
+      object: 'O',
+    });
+
+    const epiId = uid('epi-50');
+    await epiService.appendEpistemicState({
+      epistemicStateId: epiId,
+      propositionId: propId,
+      derivationMethod: 'RULE_BASED',
+      derivationEntityType: 'EvaluatorConfig',
+      derivationStableId: evalStable,
+      derivationRevisionId: evalRevId, // Old revision
+      validFrom: new Date(),
+      knownFrom: new Date(),
+      tenantId: tenantA,
+    });
+
+    // Later, register a newer model revision
+    const newerRevId = uid('eval-rev-50-newer');
+    await sql`
+      INSERT INTO revision_registry (entity_type, stable_id, revision_id, tenant_id)
+      VALUES ('EvaluatorConfig', ${evalStable}, ${newerRevId}, ${tenantA})
+    `;
+
+    // Replay traversal returns the recorded historical revision, NOT the newer model
+    const replay = await epiService.getEpistemicStateReplay(epiId);
+    expect(replay.epistemicState.derivation_revision_id).toBe(evalRevId);
+    expect(replay.epistemicState.derivation_revision_id).not.toBe(newerRevId);
   });
 
   // --- VECTORS 51 to 60: Causal Guard & Temporal Semantics ---
@@ -1784,11 +2207,152 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
   });
 
   it('Vector 56: causal-status requirements change mid-run without pinned revision', async () => {
-    expect(true).toBe(true);
+    const rcId = uid('rc-56');
+    await sql`
+      INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id)
+      VALUES ('RunConfig', ${rcId}, ${tenantA})
+    `;
+    await sql`
+      INSERT INTO run_configs (run_config_id, runtime_parameters, tenant_id)
+      VALUES (${rcId}, ${JSON.stringify({ derivation_revision_id: evalRevId })}, ${tenantA})
+    `;
+
+    const propId = uid('prop-56');
+    await propService.resolveOrCreateProposition({
+      propositionId: propId,
+      tenantId: tenantA,
+      propositionType: 'FACTUAL',
+      canonicalMeaning: uid('Prop 56'),
+      subject: 'S',
+      predicate: 'P',
+      object: 'O',
+    });
+
+    // Register a second revision that is NOT pinned by RunConfig
+    const otherRevId = uid('eval-other-56');
+    await sql`
+      INSERT INTO revision_registry (entity_type, stable_id, revision_id, tenant_id)
+      VALUES ('EvaluatorConfig', ${evalStable}, ${otherRevId}, ${tenantA})
+    `;
+
+    // Attempting to append EpistemicState with unpinned revision is rejected
+    let err: any;
+    try {
+      await epiService.appendEpistemicState({
+        epistemicStateId: uid('epi-56'),
+        propositionId: propId,
+        runConfigId: rcId,
+        derivationMethod: 'RULE_BASED',
+        derivationEntityType: 'EvaluatorConfig',
+        derivationStableId: evalStable,
+        derivationRevisionId: otherRevId, // Not pinned by rcId!
+        validFrom: new Date(),
+        knownFrom: new Date(),
+        tenantId: tenantA,
+      });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeDefined();
+    expect(err.code).toBe('DERIVATION_REVISION_NOT_PINNED');
   });
 
-  it('Vector 57: evidence valid-time outside target silently used', () => {
-    expect(true).toBe(true);
+  it('Vector 57: evidence valid-time outside target silently used', async () => {
+    const srcId = uid('src-57');
+    await evService.ingestSourceArtifact({
+      sourceId: srcId,
+      tenantId: tenantA,
+      sourceType: 'WEB_PAGE',
+      publisher: 'Publisher',
+      author: 'Author',
+      jurisdiction: 'GLOBAL',
+      sourceVersion: '1.0',
+      retrievedAt: new Date(),
+      contentHash: 'hash-57',
+      snapshotReference: snapshotObjId,
+      rightsPolicyId: rightsPolicyId,
+      dataScope: 'GLOBAL_PUBLIC',
+    });
+
+    const evId = uid('ev-57');
+    await evService.extractEvidenceItem({
+      evidenceId: evId,
+      tenantId: tenantA,
+      originType: 'SOURCE_ARTIFACT',
+      originId: srcId,
+      statement: 'Evidence statement 57',
+      statementType: 'ASSERTION',
+      assertionMethod: 'EXTRACTED',
+      evidenceDomain: 'ACADEMIC_STUDY',
+      studyDesign: 'OBSERVATIONAL',
+      causalIdentification: 'NONE',
+      mechanismSupport: 'NONE',
+      validFrom: new Date('2026-06-01T00:00:00Z'), // Valid only from June 2026
+      validUntilIfKnown: new Date('2026-12-31T00:00:00Z'),
+      limitations: 'None',
+    });
+
+    const propId = uid('prop-57');
+    await propService.resolveOrCreateProposition({
+      propositionId: propId,
+      tenantId: tenantA,
+      propositionType: 'FACTUAL',
+      canonicalMeaning: uid('Prop 57'),
+      subject: 'S',
+      predicate: 'P',
+      object: 'O',
+    });
+
+    const link = await evService.linkEvidenceToProposition({
+      linkId: uid('link-57'),
+      evidenceId: evId,
+      propositionId: propId,
+      tenantId: tenantA,
+    });
+
+    const assId = uid('ass-57');
+    await evService.createEvidenceAssessment({
+      assessmentId: assId,
+      tenantId: tenantA,
+      linkId: link.linkId,
+      compatibilityStatus: 'COMPATIBLE',
+      relationship: 'SUPPORTS',
+      assessor: 'Assessor',
+      assessmentMethod: 'MANUAL',
+      authority: 'HIGH',
+      methodologicalQuality: 'HIGH',
+      directness: 'DIRECT',
+      applicability: 'HIGH',
+      populationMatch: 'MATCH',
+      contextMatch: 'MATCH',
+      freshness: 'FRESH',
+      independence: 'INDEPENDENT',
+      precision: 'HIGH',
+      limitations: 'None',
+      uncertainty: 'LOW',
+      assessedAt: new Date(),
+    });
+
+    // Attempt derivation for January 2026 (outside evidence validFrom)
+    let err: any;
+    try {
+      await epiService.appendEpistemicState({
+        epistemicStateId: uid('epi-57'),
+        propositionId: propId,
+        assessmentIds: [assId],
+        derivationMethod: 'RULE_BASED',
+        derivationEntityType: 'EvaluatorConfig',
+        derivationStableId: evalStable,
+        derivationRevisionId: evalRevId,
+        validFrom: new Date('2026-01-01T00:00:00Z'), // Target valid time: Jan 1
+        knownFrom: new Date('2026-01-01T00:00:00Z'),
+        tenantId: tenantA,
+      });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeDefined();
+    expect(err.code).toBe('EVIDENCE_VALID_TIME_MISMATCH');
   });
 
   it('Vector 58: valid_until mutated after future event', async () => {
@@ -1985,7 +2549,7 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
       epistemicStateId: succ1,
       propositionId: propId,
       supersedesEpistemicStateId: rootId,
-      supportStatus: 'SUPPORTED',
+      supportStatus: 'UNKNOWN',
       causalStatus: 'NOT_APPLICABLE',
       uncertainty: 'None',
       derivationMethod: 'RULE_BASED',
@@ -2003,7 +2567,7 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
         epistemicStateId: succ2,
         propositionId: propId,
         supersedesEpistemicStateId: rootId, // ATTACK: branching off rootId
-        supportStatus: 'PARTIALLY_SUPPORTED',
+        supportStatus: 'UNKNOWN',
         causalStatus: 'NOT_APPLICABLE',
         uncertainty: 'None',
         derivationMethod: 'RULE_BASED',
@@ -2152,18 +2716,234 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
   });
 
   it('Vector 65: deletion keeps prohibited payload for replay', async () => {
-    // Verified: Deletion changes object state to DELETED/REDACTED, never preserves prohibited bytes
-    expect(true).toBe(true);
+    // Audit Requirement: Prove prohibited payload is removed, historical state remains immutable, replay explicitly degrades
+    const srcId = uid('src-65');
+    const objId = uid('obj-65');
+    await sql`
+      INSERT INTO object_registry (
+        object_id, tenant_id, content_hash, object_key, size_bytes, media_type, state
+      ) VALUES (
+        ${objId}, ${tenantA}, ${'hash-' + objId}, ${'key-' + objId}, 1024, 'application/json', 'AVAILABLE'
+      )
+    `;
+    await evService.ingestSourceArtifact({
+      sourceId: srcId,
+      tenantId: tenantA,
+      sourceType: 'WEB_PAGE',
+      publisher: 'Pub 65',
+      author: 'Author 65',
+      jurisdiction: 'GLOBAL',
+      sourceVersion: '1.0',
+      retrievedAt: new Date(),
+      contentHash: 'hash-65',
+      snapshotReference: objId,
+      rightsPolicyId: rightsPolicyId,
+      dataScope: 'GLOBAL_PUBLIC',
+    });
+    const evId = uid('ev-65');
+    await evService.extractEvidenceItem({
+      evidenceId: evId,
+      tenantId: tenantA,
+      originType: 'SOURCE_ARTIFACT',
+      originId: srcId,
+      statement: 'Prohibited payload statement 65',
+      statementType: 'ASSERTION',
+      assertionMethod: 'EXTRACTED',
+      evidenceDomain: 'ACADEMIC_STUDY',
+      studyDesign: 'LABORATORY',
+      causalIdentification: 'NONE',
+      mechanismSupport: 'NONE',
+      validFrom: new Date('2026-01-01T00:00:00Z'),
+      limitations: 'None',
+    });
+    const propId = uid('prop-65');
+    await propService.resolveOrCreateProposition({
+      propositionId: propId,
+      tenantId: tenantA,
+      propositionType: 'FACTUAL',
+      canonicalMeaning: uid('Prop 65'),
+      subject: 'S',
+      predicate: 'P',
+      object: 'O',
+    });
+    const linkId = uid('link-65');
+    await evService.linkEvidenceToProposition({
+      linkId,
+      tenantId: tenantA,
+      evidenceId: evId,
+      propositionId: propId,
+    });
+    const assId = uid('ass-65');
+    await evService.createEvidenceAssessment({
+      assessmentId: assId,
+      tenantId: tenantA,
+      linkId,
+      compatibilityStatus: 'COMPATIBLE',
+      relationship: 'SUPPORTS',
+      assessorType: 'AUTOMATED_PIPELINE',
+      evaluatorStableId: evalStable,
+      evaluatorRevisionId: evalRevId,
+    });
+    const epiId = uid('epi-65');
+    await epiService.appendEpistemicState({
+      epistemicStateId: epiId,
+      propositionId: propId,
+      assessmentIds: [assId],
+      derivationMethod: 'RULE_BASED',
+      derivationEntityType: 'EvaluatorConfig',
+      derivationStableId: evalStable,
+      derivationRevisionId: evalRevId,
+      validFrom: new Date('2026-01-01T00:00:00Z'),
+      knownFrom: new Date('2026-01-01T00:00:00Z'),
+      tenantId: tenantA,
+    });
+
+    // M1 Retention/Deletion boundary: Prohibited payload object is marked DELETED
+    await sql`UPDATE object_registry SET state = 'DELETED' WHERE object_id = ${objId}`;
+
+    // Verify: historical EpistemicState row is completely intact and immutable
+    const [epiRow] = await sql`SELECT * FROM epistemic_state_versions WHERE epistemic_state_id = ${epiId}`;
+    expect(epiRow).toBeDefined();
+    expect(epiRow.support_status).toBe('SUPPORTED');
+
+    // Verify: historical replay explicitly reports degraded replayability
+    const replay = await epiService.getEpistemicStateReplay(epiId);
+    expect(replay.replayability).toBe('UNAVAILABLE_DUE_TO_RETENTION');
+    expect(replay.epistemicState.epistemic_state_id).toBe(epiId);
   });
 
-  it('Vector 66: deletion silently preserves old evidence in future derivation', () => {
-    // Deleted evidence must not contribute to future derivations
-    expect(true).toBe(true);
+  it('Vector 66: deletion silently preserves old evidence in future derivation', async () => {
+    // When evidence payload is deleted, future derivation cannot silently include it
+    const srcId = uid('src-66');
+    const objId = uid('obj-66');
+    await sql`
+      INSERT INTO object_registry (
+        object_id, tenant_id, content_hash, object_key, size_bytes, media_type, state
+      ) VALUES (
+        ${objId}, ${tenantA}, ${'hash-' + objId}, ${'key-' + objId}, 1024, 'application/json', 'AVAILABLE'
+      )
+    `;
+    await evService.ingestSourceArtifact({
+      sourceId: srcId,
+      tenantId: tenantA,
+      sourceType: 'WEB_PAGE',
+      publisher: 'Pub 66',
+      author: 'Author 66',
+      jurisdiction: 'GLOBAL',
+      sourceVersion: '1.0',
+      retrievedAt: new Date(),
+      contentHash: 'hash-66',
+      snapshotReference: objId,
+      rightsPolicyId: rightsPolicyId,
+      dataScope: 'GLOBAL_PUBLIC',
+    });
+    const evId = uid('ev-66');
+    await evService.extractEvidenceItem({
+      evidenceId: evId,
+      tenantId: tenantA,
+      originType: 'SOURCE_ARTIFACT',
+      originId: srcId,
+      statement: 'Prohibited payload statement 66',
+      statementType: 'ASSERTION',
+      assertionMethod: 'EXTRACTED',
+      evidenceDomain: 'ACADEMIC_STUDY',
+      studyDesign: 'LABORATORY',
+      causalIdentification: 'NONE',
+      mechanismSupport: 'NONE',
+      validFrom: new Date('2026-01-01T00:00:00Z'),
+      limitations: 'None',
+    });
+    const propId = uid('prop-66');
+    await propService.resolveOrCreateProposition({
+      propositionId: propId,
+      tenantId: tenantA,
+      propositionType: 'FACTUAL',
+      canonicalMeaning: uid('Prop 66'),
+      subject: 'S',
+      predicate: 'P',
+      object: 'O',
+    });
+    const linkId = uid('link-66');
+    await evService.linkEvidenceToProposition({
+      linkId,
+      tenantId: tenantA,
+      evidenceId: evId,
+      propositionId: propId,
+    });
+    const assId = uid('ass-66');
+    await evService.createEvidenceAssessment({
+      assessmentId: assId,
+      tenantId: tenantA,
+      linkId,
+      compatibilityStatus: 'COMPATIBLE',
+      relationship: 'SUPPORTS',
+      assessorType: 'AUTOMATED_PIPELINE',
+      evaluatorStableId: evalStable,
+      evaluatorRevisionId: evalRevId,
+    });
+
+    // Mark payload as DELETED under retention policy
+    await sql`UPDATE object_registry SET state = 'DELETED' WHERE object_id = ${objId}`;
+
+    // A future derivation attempt referencing the deleted evidence payload fails closed
+    let err: any;
+    try {
+      await epiService.appendEpistemicState({
+        epistemicStateId: uid('epi-66'),
+        propositionId: propId,
+        assessmentIds: [assId],
+        derivationMethod: 'RULE_BASED',
+        derivationEntityType: 'EvaluatorConfig',
+        derivationStableId: evalStable,
+        derivationRevisionId: evalRevId,
+        validFrom: new Date('2026-02-01T00:00:00Z'),
+        knownFrom: new Date('2026-02-01T00:00:00Z'),
+        tenantId: tenantA,
+      });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeDefined();
+    expect(err.code).toBe('UNAVAILABLE_EVIDENCE_IN_DERIVATION');
   });
 
-  it('Vector 67: deletion causes fabricated replacement evidence', () => {
-    // Fabricated replacement evidence is strictly forbidden
-    expect(true).toBe(true);
+  it('Vector 67: deletion causes fabricated replacement evidence', async () => {
+    // Future derivation without deleted evidence uses only remaining lawful evidence without fabrication
+    const propId = uid('prop-67');
+    await propService.resolveOrCreateProposition({
+      propositionId: propId,
+      tenantId: tenantA,
+      propositionType: 'FACTUAL',
+      canonicalMeaning: uid('Prop 67'),
+      subject: 'S',
+      predicate: 'P',
+      object: 'O',
+    });
+
+    // Since the only evidence was deleted and excluded, the exact remaining assessment set is empty []
+    // Derivation strictly yields UNKNOWN without fabricating any surrogate evidence
+    const epiId = uid('epi-67');
+    await epiService.appendEpistemicState({
+      epistemicStateId: epiId,
+      propositionId: propId,
+      assessmentIds: [], // Lawful remaining set is empty
+      derivationMethod: 'RULE_BASED',
+      derivationEntityType: 'EvaluatorConfig',
+      derivationStableId: evalStable,
+      derivationRevisionId: evalRevId,
+      validFrom: new Date('2026-02-01T00:00:00Z'),
+      knownFrom: new Date('2026-02-01T00:00:00Z'),
+      tenantId: tenantA,
+    });
+
+    const [epiRow] = await sql`SELECT * FROM epistemic_state_versions WHERE epistemic_state_id = ${epiId}`;
+    expect(epiRow).toBeDefined();
+    expect(epiRow.support_status).toBe('UNKNOWN');
+    expect(epiRow.uncertainty).toBe('NONE');
+
+    // Prove no fabricated EvidenceItems were added
+    const links = await sql`SELECT * FROM evidence_proposition_links WHERE proposition_id = ${propId}`;
+    expect(links.length).toBe(0);
   });
 
   it('Vector 68: blocking KnowledgeGap disappears after research failure', async () => {
@@ -2255,16 +3035,127 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
     expect(err.code).toBe('UNKNOWN_PRESERVATION_GATE_BLOCKED');
   });
 
-  it('Vector 70: Strategy required Proposition missing decision-time EpistemicState', () => {
-    // Strategy generation requires decision-time EpistemicStateVersion
-    expect(true).toBe(true);
+  it('Vector 70: Strategy required Proposition missing decision-time EpistemicState', async () => {
+    const propId = uid('prop-70');
+    await propService.resolveOrCreateProposition({
+      propositionId: propId,
+      tenantId: tenantA,
+      propositionType: 'FACTUAL',
+      canonicalMeaning: uid('Prop 70'),
+      subject: 'S',
+      predicate: 'P',
+      object: 'O',
+    });
+
+    // 1. Attack: Required proposition has no EpistemicState at all
+    let err1: any;
+    try {
+      await strategyGateService.evaluateKnowledgeGate({
+        strategyId: uid('st-70-1'),
+        requiredPropositionIds: [propId],
+        tenantId: tenantA,
+        knowledgeBoundaryTime: new Date('2026-03-01T00:00:00Z'),
+        targetValidTime: new Date('2026-03-01T00:00:00Z'),
+      });
+    } catch (e) {
+      err1 = e;
+    }
+    expect(err1).toBeDefined();
+    expect(err1.code).toBe('STRATEGY_KNOWLEDGE_GATE_BLOCKED');
+
+    // Create EpistemicState known in the future (2026-04-01)
+    const futureEpiId = uid('epi-70-future');
+    await epiService.appendEpistemicState({
+      epistemicStateId: futureEpiId,
+      propositionId: propId,
+      derivationMethod: 'RULE_BASED',
+      derivationEntityType: 'EvaluatorConfig',
+      derivationStableId: evalStable,
+      derivationRevisionId: evalRevId,
+      validFrom: new Date('2026-01-01T00:00:00Z'),
+      knownFrom: new Date('2026-04-01T00:00:00Z'), // Outside knowledge boundary of 2026-03-01
+      tenantId: tenantA,
+    });
+
+    // 2. Attack: EpistemicState is outside pinned knowledge boundary
+    let err2: any;
+    try {
+      await strategyGateService.evaluateKnowledgeGate({
+        strategyId: uid('st-70-2'),
+        requiredPropositionIds: [propId],
+        tenantId: tenantA,
+        knowledgeBoundaryTime: new Date('2026-03-01T00:00:00Z'),
+        targetValidTime: new Date('2026-03-01T00:00:00Z'),
+      });
+    } catch (e) {
+      err2 = e;
+    }
+    expect(err2).toBeDefined();
+    expect(err2.code).toBe('STRATEGY_KNOWLEDGE_GATE_BLOCKED');
+
+    // 3. Attack: Task has an unresolved blocking knowledge gap
+    let err3: any;
+    try {
+      await strategyGateService.evaluateKnowledgeGate({
+        strategyId: uid('st-70-3'),
+        requiredPropositionIds: [propId],
+        tenantId: tenantA,
+        knowledgeBoundaryTime: new Date('2026-05-01T00:00:00Z'),
+        targetValidTime: new Date('2026-01-01T00:00:00Z'),
+        activeKnowledgeGaps: [
+          {
+            gapId: uid('gap-70'),
+            blocking: true,
+            assumptionAllowed: false,
+            status: 'BLOCKING',
+          },
+        ],
+      });
+    } catch (e) {
+      err3 = e;
+    }
+    expect(err3).toBeDefined();
+    expect(err3.code).toBe('UNKNOWN_PRESERVATION_GATE_BLOCKED');
+
+    // 4. Legitimate resolution returns exact epistemic_state_id
+    const resolved = await strategyGateService.evaluateKnowledgeGate({
+      strategyId: uid('st-70-4'),
+      requiredPropositionIds: [propId],
+      tenantId: tenantA,
+      knowledgeBoundaryTime: new Date('2026-05-01T00:00:00Z'),
+      targetValidTime: new Date('2026-01-01T00:00:00Z'),
+    });
+    expect(resolved.canProceed).toBe(true);
+    expect(resolved.resolvedEpistemicStates[propId]).toBe(futureEpiId);
   });
 
   // --- VECTORS 71 to 76: DecisionCycle, Fencing & Control Plane Isolation ---
 
-  it('Vector 71: RunKnowledgeDelta mutated continuously', () => {
-    // RunKnowledgeDelta is materialized near freeze, not continuously mutated
-    expect(true).toBe(true);
+  it('Vector 71: RunKnowledgeDelta mutated continuously', async () => {
+    const deltaId = uid('delta-71');
+    const corrKey = uid('corr-71');
+    await sql`
+      INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id, workspace_id, payload_state)
+      VALUES ('RunKnowledgeDelta', ${deltaId}, ${tenantA}, ${workspaceA}, 'AVAILABLE')
+    `;
+    await sql`
+      INSERT INTO run_knowledge_deltas (delta_id, tenant_id, workspace_id, run_correlation_key, created_at)
+      VALUES (${deltaId}, ${tenantA}, ${workspaceA}, ${corrKey}, now())
+    `;
+
+    // Production Trigger prevent_mutation_run_knowledge_deltas blocks continuous mutation
+    let err: any;
+    try {
+      await sql`
+        UPDATE run_knowledge_deltas
+        SET run_correlation_key = 'mutated-correlation-key'
+        WHERE delta_id = ${deltaId}
+      `;
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeDefined();
+    expect(err.code).toBe('55000');
   });
 
   it('Vector 72: knowledge commit accepted after FREEZING', async () => {
@@ -2352,29 +3243,90 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
       predicate: 'P',
       object: 'O',
     });
+    const srcId = uid('src-73');
+    await evService.ingestSourceArtifact({
+      sourceId: srcId,
+      tenantId: tenantA,
+      sourceType: 'WEB_PAGE',
+      publisher: 'Publisher 73',
+      author: 'Author 73',
+      jurisdiction: 'GLOBAL',
+      sourceVersion: '1.0',
+      retrievedAt: new Date(),
+      contentHash: 'hash-73',
+      snapshotReference: snapshotObjId,
+      rightsPolicyId: rightsPolicyId,
+      dataScope: 'GLOBAL_PUBLIC',
+    });
+    const evId = uid('ev-73');
+    await evService.extractEvidenceItem({
+      evidenceId: evId,
+      tenantId: tenantA,
+      originType: 'SOURCE_ARTIFACT',
+      originId: srcId,
+      statement: 'Stat 73',
+      statementType: 'ASSERTION',
+      assertionMethod: 'EXTRACTED',
+      evidenceDomain: 'ACADEMIC_STUDY',
+      studyDesign: 'OBSERVATIONAL',
+      causalIdentification: 'NONE',
+      mechanismSupport: 'NONE',
+      validFrom: new Date(),
+      limitations: 'None',
+    });
+    const linkId = uid('link-73');
+    await evService.linkEvidenceToProposition({
+      linkId,
+      tenantId: tenantA,
+      evidenceId: evId,
+      propositionId: propId,
+    });
 
-    let err: any;
+    // 1. Attack: Commit EvidenceAssessment against superseded cycle -> STALE_WORKER_COMMIT_REJECTED
+    let err1: any;
     try {
-      await epiService.appendEpistemicState({
-        epistemicStateId: uid('epi-73'),
-        propositionId: propId,
-        supportStatus: 'UNKNOWN',
-        causalStatus: 'NOT_APPLICABLE',
-        uncertainty: 'None',
-        derivationMethod: 'RULE_BASED',
-        derivationEntityType: 'EvaluatorConfig',
-        derivationStableId: evalStable,
-        derivationRevisionId: evalRevId,
-        validFrom: new Date(),
-        knownFrom: new Date(),
+      await evService.createEvidenceAssessment({
+        assessmentId: uid('ass-73'),
         tenantId: tenantA,
-        cycleId, // Superseded cycle!
+        linkId,
+        compatibilityStatus: 'COMPATIBLE',
+        relationship: 'SUPPORTS',
+        assessorType: 'AUTOMATED_PIPELINE',
+        evaluatorStableId: evalStable,
+        evaluatorRevisionId: evalRevId,
+        decisionCycleId: cycleId,
+        fencingContext: {
+          stageExecutionId: uid('se-73'),
+          fencingToken: 1,
+          workerId: 'worker-1',
+        },
       });
     } catch (e) {
-      err = e;
+      err1 = e;
     }
-    expect(err).toBeDefined();
-    expect(err.code).toBe('STALE_WORKER_COMMIT_REJECTED');
+    expect(err1).toBeDefined();
+    expect(err1.code).toBe('STALE_WORKER_COMMIT_REJECTED');
+
+    // 2. Attack: Omitting stage authorization from a decision-cycle commit fails closed
+    let err2: any;
+    try {
+      await evService.createEvidenceAssessment({
+        assessmentId: uid('ass-73-b'),
+        tenantId: tenantA,
+        linkId,
+        compatibilityStatus: 'COMPATIBLE',
+        relationship: 'SUPPORTS',
+        assessorType: 'AUTOMATED_PIPELINE',
+        evaluatorStableId: evalStable,
+        evaluatorRevisionId: evalRevId,
+        decisionCycleId: cycleId,
+        // fencingContext omitted!
+      });
+    } catch (e) {
+      err2 = e;
+    }
+    expect(err2).toBeDefined();
+    expect(err2.code).toBe('STAGE_EXECUTION_CONTEXT_REQUIRED');
   });
 
   it('Vector 74: stale worker creates EpistemicState after cancellation', async () => {

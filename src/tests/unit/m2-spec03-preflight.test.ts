@@ -50,7 +50,6 @@ import { validateCausalSupportGuard } from '../../domain/knowledge/epistemic-der
 import {
   enforceUnknownPreservationGate,
   validateResearchGapResolution,
-  validateKnowledgeGapTransition,
 } from '../../domain/knowledge/unknown-preservation-gate.js';
 import {
   validatePerformanceEvidenceFirewall,
@@ -60,12 +59,48 @@ import { RegistryValidationError } from '../../domain/services/registry-validato
 
 describe('SPEC03 §146 Static Contract Preflight Suite (28 Checks)', () => {
   it('Check 01: no new canonical domain entity invented', () => {
-    // Canonical entity count must remain exactly matching SPEC02 frozen schema
+    // Read schema files and inspect exported tables
     const schemaDir = path.resolve(import.meta.dirname, '../../persistence/relational/schema');
-    const files = fs.readdirSync(schemaDir).filter((f) => f.endsWith('.ts'));
-    expect(files.length).toBeGreaterThan(0);
-    // Verified: No new database table entities added beyond the frozen SPEC02 schema.
-    expect(true).toBe(true);
+    const files = fs.readdirSync(schemaDir).filter((f) => f.endsWith('.ts') && !f.endsWith('.d.ts'));
+
+    const canonicalTables = new Set<string>();
+    for (const file of files) {
+      const content = fs.readFileSync(path.join(schemaDir, file), 'utf-8');
+      const tableMatches = content.matchAll(/pgTable\(\s*'([^']+)'/g);
+      for (const m of tableMatches) {
+        canonicalTables.add(m[1]);
+      }
+    }
+
+    // Verify against M0 + M1 migrations: exactly 144 tables, no new tables created in M2
+    const m0MigrationPath = path.resolve(
+      import.meta.dirname,
+      '../../persistence/relational/migrations/0000_chemical_iron_man.sql',
+    );
+    const m1MigrationPath = path.resolve(
+      import.meta.dirname,
+      '../../persistence/relational/migrations/0001_fantastic_kid_colt.sql',
+    );
+    const m0Sql = fs.readFileSync(m0MigrationPath, 'utf-8');
+    const m1Sql = fs.readFileSync(m1MigrationPath, 'utf-8');
+    const existingTables = new Set<string>();
+    for (const m of (m0Sql + m1Sql).matchAll(/CREATE TABLE "(?:public"\.")?([^"]+)"/g)) {
+      existingTables.add(m[1]);
+    }
+
+    // Ensure all tables in schema were already present in frozen M0/M1 migrations
+    expect(canonicalTables.size).toBe(144);
+    for (const table of canonicalTables) {
+      expect(existingTables.has(table)).toBe(true);
+    }
+
+    // Verify M2 migration added only triggers, zero CREATE TABLE statements
+    const m2MigrationPath = path.resolve(
+      import.meta.dirname,
+      '../../persistence/relational/migrations/0002_m2_immutable_triggers.sql',
+    );
+    const m2Sql = fs.readFileSync(m2MigrationPath, 'utf-8');
+    expect(m2Sql).not.toContain('CREATE TABLE');
   });
 
   it('Check 02: all canonical enums preserved', () => {
@@ -86,7 +121,6 @@ describe('SPEC03 §146 Static Contract Preflight Suite (28 Checks)', () => {
   });
 
   it('Check 04: Proposition remains immutable semantic identity', () => {
-    // Proposition table has no updated_at column, semantic change creates new ID
     const schemaContent = fs.readFileSync(
       path.resolve(import.meta.dirname, '../../persistence/relational/schema/epistemic.ts'),
       'utf-8',
@@ -100,7 +134,9 @@ describe('SPEC03 §146 Static Contract Preflight Suite (28 Checks)', () => {
       path.resolve(import.meta.dirname, '../../persistence/relational/schema/epistemic.ts'),
       'utf-8',
     );
-    expect(schemaContent).toContain("uniqueIndex('uq_evidence_proposition_link').on(table.evidence_id, table.proposition_id)");
+    expect(schemaContent).toContain(
+      "uniqueIndex('uq_evidence_proposition_link').on(table.evidence_id, table.proposition_id)",
+    );
   });
 
   it('Check 06: compatibility and relationship remain separate', () => {
@@ -122,8 +158,13 @@ describe('SPEC03 §146 Static Contract Preflight Suite (28 Checks)', () => {
   });
 
   it('Check 08: reassessment never mutates old record', () => {
-    // Reassessment requires new assessment_id with supersedes_assessment_id
-    expect(true).toBe(true);
+    const triggersSql = fs.readFileSync(
+      path.resolve(import.meta.dirname, '../../persistence/relational/migrations/0002_m2_immutable_triggers.sql'),
+      'utf-8',
+    );
+    expect(triggersSql).toContain('trg_immutable_evidence_assessments');
+    expect(triggersSql).toContain('BEFORE UPDATE OR DELETE ON "evidence_assessments"');
+    expect(triggersSql).toContain('prevent_immutable_mutation()');
   });
 
   it('Check 09: EpistemicState uses exact assessment IDs', () => {
@@ -156,8 +197,12 @@ describe('SPEC03 §146 Static Contract Preflight Suite (28 Checks)', () => {
   });
 
   it('Check 12: Epistemic chain single-root', () => {
-    // Enforced in EpistemicPersistenceService: at most one root per proposition
-    expect(true).toBe(true);
+    const serviceContent = fs.readFileSync(
+      path.resolve(import.meta.dirname, '../../persistence/relational/services/epistemic-persistence-service.ts'),
+      'utf-8',
+    );
+    expect(serviceContent).toContain('SECOND_EPISTEMIC_ROOT_FORBIDDEN');
+    expect(serviceContent).toContain('supersedes_epistemic_state_id IS NULL');
   });
 
   it('Check 13: Epistemic chain non-branching', () => {
@@ -165,22 +210,34 @@ describe('SPEC03 §146 Static Contract Preflight Suite (28 Checks)', () => {
       path.resolve(import.meta.dirname, '../../persistence/relational/schema/epistemic.ts'),
       'utf-8',
     );
-    expect(schemaContent).toContain('uniqueIndex(\'uq_epistemic_state_predecessor\')');
+    expect(schemaContent).toContain("uniqueIndex('uq_epistemic_state_predecessor')");
   });
 
   it('Check 14: Epistemic chain same-Proposition', () => {
-    // Enforced in EpistemicPersistenceService: predecessor.proposition_id === successor.proposition_id
-    expect(true).toBe(true);
+    const serviceContent = fs.readFileSync(
+      path.resolve(import.meta.dirname, '../../persistence/relational/services/epistemic-persistence-service.ts'),
+      'utf-8',
+    );
+    expect(serviceContent).toContain('EPISTEMIC_PROPOSITION_MISMATCH');
+    expect(serviceContent).toContain('predecessor.proposition_id !== propositionId');
   });
 
   it('Check 15: Epistemic known_from monotonic', () => {
-    // Enforced in EpistemicPersistenceService: successor.known_from > predecessor.known_from
-    expect(true).toBe(true);
+    const serviceContent = fs.readFileSync(
+      path.resolve(import.meta.dirname, '../../persistence/relational/services/epistemic-persistence-service.ts'),
+      'utf-8',
+    );
+    expect(serviceContent).toContain('EPISTEMIC_KNOWN_FROM_NON_INCREASING');
+    expect(serviceContent).toContain('succKnownFrom <= predKnownFrom');
   });
 
   it('Check 16: Epistemic chain acyclic', () => {
-    // Enforced in EpistemicPersistenceService: cycle detection on ancestor traversal
-    expect(true).toBe(true);
+    const serviceContent = fs.readFileSync(
+      path.resolve(import.meta.dirname, '../../persistence/relational/services/epistemic-persistence-service.ts'),
+      'utf-8',
+    );
+    expect(serviceContent).toContain('EPISTEMIC_CYCLE');
+    expect(serviceContent).toContain('visited.has(currentAncestorId)');
   });
 
   it('Check 17: valid time distinct from known time', () => {
@@ -233,41 +290,81 @@ describe('SPEC03 §146 Static Contract Preflight Suite (28 Checks)', () => {
   });
 
   it('Check 22: RunKnowledgeDelta lifecycle consistent with SPEC01', () => {
-    // RunKnowledgeDelta is materialized near freeze, not continuously mutated
-    expect(true).toBe(true);
+    const schemaContent = fs.readFileSync(
+      path.resolve(import.meta.dirname, '../../persistence/relational/schema/governance-snapshots.ts'),
+      'utf-8',
+    );
+    expect(schemaContent).toContain('run_knowledge_deltas');
+    expect(schemaContent).toContain('delta_id');
+    expect(schemaContent).toContain('run_correlation_key');
+
+    // Immutable triggers attach to run_knowledge_deltas
+    const triggersSql = fs.readFileSync(
+      path.resolve(import.meta.dirname, '../../persistence/relational/migrations/0001_fantastic_kid_colt.sql'),
+      'utf-8',
+    );
+    expect(triggersSql).toContain('trg_immutable_run_knowledge_deltas');
+    expect(triggersSql).toContain('BEFORE UPDATE OR DELETE ON "run_knowledge_deltas"');
   });
 
   it('Check 23: FREEZING boundary consistent with SPEC01', () => {
-    // Enforced in EpistemicPersistenceService: commits rejected after FREEZING
-    expect(true).toBe(true);
+    const coordinatorContent = fs.readFileSync(
+      path.resolve(import.meta.dirname, '../../persistence/relational/services/stage-fencing-coordinator.ts'),
+      'utf-8',
+    );
+    expect(coordinatorContent).toContain('KNOWLEDGE_COMMIT_REJECTED_AFTER_FREEZING');
+    expect(coordinatorContent).toContain("cycle.status === 'FREEZING' || cycle.status === 'FROZEN'");
   });
 
   it('Check 24: deletion/replay consistent with SPEC02', () => {
-    // Data rights override replay convenience; deleted payload degrades replay explicitly
-    expect(true).toBe(true);
+    const serviceContent = fs.readFileSync(
+      path.resolve(import.meta.dirname, '../../persistence/relational/services/epistemic-persistence-service.ts'),
+      'utf-8',
+    );
+    expect(serviceContent).toContain('UNAVAILABLE_DUE_TO_RETENTION');
+    expect(serviceContent).toContain("obr.state as payload_state");
   });
 
   it('Check 25: tenant/data-scope isolation intact', () => {
-    // All queries and inserts enforce tenant envelope and data scope
-    expect(true).toBe(true);
+    const propService = fs.readFileSync(
+      path.resolve(import.meta.dirname, '../../persistence/relational/services/proposition-persistence-service.ts'),
+      'utf-8',
+    );
+    const evService = fs.readFileSync(
+      path.resolve(import.meta.dirname, '../../persistence/relational/services/evidence-persistence-service.ts'),
+      'utf-8',
+    );
+    expect(propService).toContain('WORKSPACE_ISOLATION_VIOLATION');
+    expect(evService).toContain('TENANT_ISOLATION_VIOLATION');
+    expect(evService).toContain('WORKSPACE_ISOLATION_VIOLATION');
   });
 
   it('Check 26: no CURRENT/LATEST/ACTIVE historical substitution', () => {
-    // EpistemicStateVersion and DecisionSnapshot store exact IDs
-    expect(true).toBe(true);
+    const gateContent = fs.readFileSync(
+      path.resolve(import.meta.dirname, '../../persistence/relational/services/strategy-knowledge-gate-service.ts'),
+      'utf-8',
+    );
+    expect(gateContent).toContain('STRATEGY_KNOWLEDGE_GATE_BLOCKED');
+    expect(gateContent).toContain('known_from <= ${knowledgeBoundaryTime}');
+    expect(gateContent).toContain('Generic CURRENT/LATEST substitution is prohibited');
   });
 
   it('Check 27: Runtime cannot mutate Control Plane', () => {
-    // Vector 60 locked boundary: runtime role has no INSERT/UPDATE/DELETE/TRUNCATE on control_plane_activations
     const migrationContent = fs.readFileSync(
       path.resolve(import.meta.dirname, '../../persistence/relational/migrations/0001_fantastic_kid_colt.sql'),
       'utf-8',
     );
-    expect(migrationContent).toContain('REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON control_plane_activations FROM contentos_runtime_role');
+    expect(migrationContent).toContain(
+      'REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON control_plane_activations FROM contentos_runtime_role',
+    );
   });
 
   it('Check 28: no duplicate source of epistemic truth', () => {
-    // EpistemicStateVersion is the sole authoritative historical truth for Proposition state
-    expect(true).toBe(true);
+    const schemaContent = fs.readFileSync(
+      path.resolve(import.meta.dirname, '../../persistence/relational/schema/epistemic.ts'),
+      'utf-8',
+    );
+    expect(schemaContent).not.toContain('current_support_status');
+    expect(schemaContent).not.toContain('latest_epistemic_state_id');
   });
 });

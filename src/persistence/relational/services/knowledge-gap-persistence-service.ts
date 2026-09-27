@@ -6,6 +6,7 @@
  * - ResearchTrace execution recording
  * - Unknown-Preservation Gate enforcement
  * - Fail-closed uncertainty handling
+ * - StageExecution & DecisionCycle fencing boundary
  */
 import postgres from 'postgres';
 import type { KnowledgeGapStatus, ResearchOutcome } from '../../../domain/knowledge/types.js';
@@ -15,6 +16,7 @@ import {
   assertUnknownPreservationGate,
   type KnowledgeGapState,
 } from '../../../domain/knowledge/unknown-preservation-gate.js';
+import { verifyStageFencing, type StageFencingContext } from './stage-fencing-coordinator.js';
 import { RegistryValidationError } from '../../../domain/services/registry-validator.js';
 
 export interface CreateKnowledgeGapParams {
@@ -31,6 +33,7 @@ export interface CreateKnowledgeGapParams {
   riskIfWrong: string;
   status: KnowledgeGapStatus;
   supersedesGapId?: string | null;
+  fencingContext?: StageFencingContext | null;
 }
 
 export interface RecordResearchTraceParams {
@@ -49,6 +52,7 @@ export interface RecordResearchTraceParams {
   stopReason: string;
   startedAt: Date;
   completedAt: Date;
+  fencingContext?: StageFencingContext | null;
 }
 
 export class KnowledgeGapPersistenceService {
@@ -73,6 +77,7 @@ export class KnowledgeGapPersistenceService {
       riskIfWrong,
       status,
       supersedesGapId,
+      fencingContext,
     } = params;
 
     // Validate EXPLICIT_ASSUMPTION (SPEC03 §9)
@@ -84,9 +89,17 @@ export class KnowledgeGapPersistenceService {
     }
 
     await this.sql.begin(async (sqlTx) => {
+      // 0. Stage fencing check if in cycle context
+      await verifyStageFencing(sqlTx, {
+        fencingContext,
+        tenantId,
+        workspaceId,
+        requireCycleContext: !!fencingContext?.decisionCycleId,
+      });
+
       // 1. Verify task revision exists
       const [task] = await sqlTx`
-        SELECT task_revision_id FROM task_contract_revisions WHERE task_revision_id = ${taskRevisionId}
+        SELECT task_revision_id, tenant_id FROM task_contract_revisions WHERE task_revision_id = ${taskRevisionId}
       `;
       if (!task) {
         throw new RegistryValidationError(
@@ -94,16 +107,28 @@ export class KnowledgeGapPersistenceService {
           `Task revision '${taskRevisionId}' does not exist.`,
         );
       }
+      if (task.tenant_id !== tenantId) {
+        throw new RegistryValidationError(
+          'TENANT_ISOLATION_VIOLATION',
+          `Task revision '${taskRevisionId}' belongs to tenant '${task.tenant_id}', not '${tenantId}'.`,
+        );
+      }
 
       // 2. If superseding a prior gap, verify prior exists and validate transition
       if (supersedesGapId) {
         const [prior] = await sqlTx`
-          SELECT gap_id, blocking, assumption_allowed, status FROM knowledge_gaps WHERE gap_id = ${supersedesGapId}
+          SELECT gap_id, tenant_id, blocking, assumption_allowed, status FROM knowledge_gaps WHERE gap_id = ${supersedesGapId}
         `;
         if (!prior) {
           throw new RegistryValidationError(
             'SUPERSEDED_GAP_NOT_FOUND',
             `Prior KnowledgeGap '${supersedesGapId}' does not exist.`,
+          );
+        }
+        if (prior.tenant_id !== tenantId) {
+          throw new RegistryValidationError(
+            'TENANT_ISOLATION_VIOLATION',
+            `Prior KnowledgeGap '${supersedesGapId}' belongs to tenant '${prior.tenant_id}', not '${tenantId}'.`,
           );
         }
 
@@ -162,12 +187,21 @@ export class KnowledgeGapPersistenceService {
       stopReason,
       startedAt,
       completedAt,
+      fencingContext,
     } = params;
 
     await this.sql.begin(async (sqlTx) => {
-      // 1. Verify gap exists
+      // 0. Stage fencing check if in cycle context
+      await verifyStageFencing(sqlTx, {
+        fencingContext,
+        tenantId,
+        workspaceId,
+        requireCycleContext: !!fencingContext?.decisionCycleId,
+      });
+
+      // 1. Verify gap exists and matches tenant
       const [gap] = await sqlTx`
-        SELECT gap_id, blocking, status FROM knowledge_gaps WHERE gap_id = ${gapId}
+        SELECT gap_id, tenant_id, blocking, status FROM knowledge_gaps WHERE gap_id = ${gapId}
       `;
       if (!gap) {
         throw new RegistryValidationError(
@@ -175,8 +209,14 @@ export class KnowledgeGapPersistenceService {
           `KnowledgeGap '${gapId}' does not exist.`,
         );
       }
+      if (gap.tenant_id !== tenantId) {
+        throw new RegistryValidationError(
+          'TENANT_ISOLATION_VIOLATION',
+          `KnowledgeGap belongs to tenant '${gap.tenant_id}', not '${tenantId}'.`,
+        );
+      }
 
-      // 2. Validate that failed/incomplete research does not resolve blocking gap (SPEC03 §10, §12)
+      // 2. Validate research outcome semantics (SPEC03 §11)
       validateResearchGapResolution(outcome, {
         blocking: gap.blocking as boolean,
         status: gap.status as KnowledgeGapStatus,
@@ -197,36 +237,37 @@ export class KnowledgeGapPersistenceService {
           research_trace_id, tenant_id, workspace_id, gap_id, research_question,
           queries, sources_searched, retrieval_entity_type, retrieval_stable_id,
           retrieval_revision_id, coverage_limitations, outcome, stop_reason,
-          started_at, completed_at
+          started_at, completed_at, created_at
         ) VALUES (
           ${researchTraceId}, ${tenantId}, ${workspaceId ?? null}, ${gapId}, ${researchQuestion},
           ${queries}, ${sourcesSearched}, ${retrievalEntityType}, ${retrievalStableId},
           ${retrievalRevisionId}, ${coverageLimitations}, ${outcome}, ${stopReason},
-          ${startedAt}, ${completedAt}
+          ${startedAt}, ${completedAt}, now()
         )
       `;
     });
   }
 
   /**
-   * Asserts the Unknown-Preservation Gate for all final gaps of a task.
-   * Implements SPEC03 §10.
+   * Asserts the Unknown-Preservation Gate for all active blocking KnowledgeGaps of a task.
+   * Throws RegistryValidationError if any blocking gap is unresolved without an allowed assumption.
+   * Implements SPEC03 §19–§21.
    */
-  async assertTaskUnknownPreservationGate(taskRevisionId: string): Promise<void> {
+  async assertTaskUnknownPreservationGate(taskRevisionId: string, tenantId?: string): Promise<void> {
     const gaps = await this.sql`
-      SELECT gap_id, task_revision_id, question, blocking, assumption_allowed, status, supersedes_gap_id
+      SELECT gap_id, blocking, assumption_allowed, status
       FROM knowledge_gaps
       WHERE task_revision_id = ${taskRevisionId}
+        ${tenantId ? this.sql`AND tenant_id = ${tenantId}` : this.sql``}
     `;
 
     const gapStates: KnowledgeGapState[] = gaps.map((g) => ({
-      gapId: g['gap_id'] as string,
-      taskRevisionId: g['task_revision_id'] as string,
-      question: g['question'] as string,
-      blocking: g['blocking'] as boolean,
-      assumptionAllowed: g['assumption_allowed'] as boolean,
-      status: g['status'] as KnowledgeGapStatus,
-      supersedesGapId: g['supersedes_gap_id'] as string | null,
+      gapId: g.gap_id as string,
+      taskRevisionId,
+      question: 'Task blocking gap check',
+      blocking: g.blocking as boolean,
+      assumptionAllowed: g.assumption_allowed as boolean,
+      status: g.status as KnowledgeGapStatus,
     }));
 
     assertUnknownPreservationGate(gapStates);

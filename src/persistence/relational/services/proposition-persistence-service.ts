@@ -5,9 +5,10 @@
  * - Immutable Proposition semantic identity
  * - Concurrency-safe proposition resolution using derived advisory lock
  * - Double-check re-query pattern before creation
- * - Cross-tenant isolation & DataScope boundaries
+ * - Cross-tenant isolation & workspace-private DataScope boundaries
  * - ImmutableEntityRegistry registration
  * - Material semantic change creates new proposition; never mutates old row
+ * - StageExecution & DecisionCycle fencing boundary
  */
 import postgres from 'postgres';
 import type { PropositionSemanticIdentity, PropositionType } from '../../../domain/knowledge/types.js';
@@ -16,6 +17,7 @@ import {
   computeAdvisoryLockKey,
   evaluateSemanticEquivalence,
 } from '../../../domain/knowledge/semantic-fingerprint.js';
+import { verifyStageFencing, type StageFencingContext } from './stage-fencing-coordinator.js';
 import { RegistryValidationError } from '../../../domain/services/registry-validator.js';
 
 export interface ResolveOrCreatePropositionParams {
@@ -32,6 +34,7 @@ export interface ResolveOrCreatePropositionParams {
   populationScope?: string;
   jurisdictionScope?: string;
   supersedesPropositionId?: string | null;
+  fencingContext?: StageFencingContext | null;
 }
 
 export interface PropositionResolutionResult {
@@ -64,6 +67,7 @@ export class PropositionPersistenceService {
       populationScope = '',
       jurisdictionScope = '',
       supersedesPropositionId,
+      fencingContext,
     } = params;
 
     const identity: PropositionSemanticIdentity = {
@@ -82,20 +86,40 @@ export class PropositionPersistenceService {
     const lockKey = computeAdvisoryLockKey(fingerprint);
 
     return await this.sql.begin(async (sqlTx) => {
+      // 0. Stage fencing check if in cycle context
+      await verifyStageFencing(sqlTx, {
+        fencingContext,
+        tenantId,
+        workspaceId,
+        requireCycleContext: !!fencingContext?.decisionCycleId,
+      });
+
       // 1. Acquire transaction-level advisory lock on derived semantic fingerprint (SPEC03 §34)
       await sqlTx`SELECT pg_advisory_xact_lock(${lockKey})`;
 
       // 2. Re-query accessible propositions inside the locked transaction (SPEC03 §34, §105)
-      // Only check propositions belonging to the same tenant or explicitly public/shared
-      const candidates = await sqlTx`
-        SELECT 
-          proposition_id, tenant_id, workspace_id, proposition_type,
-          canonical_meaning, subject, predicate, object, qualifiers,
-          conditions, population_scope, jurisdiction_scope, supersedes_proposition_id
-        FROM propositions
-        WHERE tenant_id = ${tenantId}
-          AND proposition_type = ${propositionType}
-      `;
+      // Enforce accessible Proposition rule: workspace-private propositions cannot leak across workspaces
+      const candidates = workspaceId
+        ? await sqlTx`
+            SELECT 
+              proposition_id, tenant_id, workspace_id, proposition_type,
+              canonical_meaning, subject, predicate, object, qualifiers,
+              conditions, population_scope, jurisdiction_scope, supersedes_proposition_id
+            FROM propositions
+            WHERE tenant_id = ${tenantId}
+              AND (workspace_id = ${workspaceId} OR workspace_id IS NULL)
+              AND proposition_type = ${propositionType}
+          `
+        : await sqlTx`
+            SELECT 
+              proposition_id, tenant_id, workspace_id, proposition_type,
+              canonical_meaning, subject, predicate, object, qualifiers,
+              conditions, population_scope, jurisdiction_scope, supersedes_proposition_id
+            FROM propositions
+            WHERE tenant_id = ${tenantId}
+              AND workspace_id IS NULL
+              AND proposition_type = ${propositionType}
+          `;
 
       for (const row of candidates) {
         const existingIdentity: PropositionSemanticIdentity = {
@@ -124,13 +148,25 @@ export class PropositionPersistenceService {
       // 3. If supersedes_proposition_id is provided, verify it exists and is accessible
       if (supersedesPropositionId) {
         const [prior] = await sqlTx`
-          SELECT proposition_id FROM propositions
-          WHERE proposition_id = ${supersedesPropositionId} AND tenant_id = ${tenantId}
+          SELECT proposition_id, tenant_id, workspace_id FROM propositions
+          WHERE proposition_id = ${supersedesPropositionId}
         `;
         if (!prior) {
           throw new RegistryValidationError(
             'SUPERSEDED_PROPOSITION_NOT_FOUND',
-            `Prior proposition '${supersedesPropositionId}' to supersede not found in accessible tenant scope.`,
+            `Prior proposition '${supersedesPropositionId}' to supersede not found.`,
+          );
+        }
+        if (prior.tenant_id !== tenantId) {
+          throw new RegistryValidationError(
+            'TENANT_ISOLATION_VIOLATION',
+            `Prior proposition '${supersedesPropositionId}' belongs to tenant '${prior.tenant_id}', not caller '${tenantId}'.`,
+          );
+        }
+        if (prior.workspace_id && workspaceId && prior.workspace_id !== workspaceId) {
+          throw new RegistryValidationError(
+            'WORKSPACE_ISOLATION_VIOLATION',
+            `Prior proposition '${supersedesPropositionId}' belongs to workspace '${prior.workspace_id}', not '${workspaceId}'.`,
           );
         }
         if (supersedesPropositionId === propositionId) {
