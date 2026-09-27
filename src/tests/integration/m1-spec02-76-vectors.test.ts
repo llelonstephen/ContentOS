@@ -20,7 +20,7 @@ import { DecisionPersistenceService } from '../../persistence/relational/service
 import { RetentionDeletionService } from '../../persistence/relational/services/retention-deletion-service.js';
 import { claimObjectForGC } from '../../persistence/relational/services/object-registry-service.js';
 import { GovernanceControlPlaneGateway, GovernanceActivationAuthority } from '../../control-plane/authority/control-plane-authority.js';
-import { createStandaloneIngestionAdapter } from '../../persistence/relational/services/stage-fencing-coordinator.js';
+import { createStandaloneIngestionAdapter } from '../../bootstrap/composition-root.js';
 import {
   RegistryValidationError,
   validateSupersession,

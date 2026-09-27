@@ -24,7 +24,7 @@ import { ControlPlanePersistenceService } from '../../persistence/relational/ser
 import { GovernanceControlPlaneGateway, GovernanceActivationAuthority } from '../../control-plane/authority/control-plane-authority.js';
 import { StrategyKnowledgeGateService } from '../../persistence/relational/services/strategy-knowledge-gate-service.js';
 import { claimObjectForGC } from '../../persistence/relational/services/object-registry-service.js';
-import { createStandaloneIngestionAdapter } from '../../persistence/relational/services/stage-fencing-coordinator.js';
+import { createStandaloneIngestionAdapter } from '../../bootstrap/composition-root.js';
 import { StandaloneIngestionAdapter } from '../../persistence/relational/services/standalone-ingestion-adapter.js';
 import { getDefaultObjectStore } from '../../persistence/objects/default-object-store.js';
 import {
@@ -3041,6 +3041,100 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
     expect(errRtCrossTenant).toBeDefined();
     expect(errRtCrossTenant.code).toBe('TENANT_ISOLATION_VIOLATION');
 
+    // 3b. Workspace-isolated ResearchTrace fail-closed tests (SPEC03 §103):
+    // ResearchTrace tenant A / workspace A
+    const propWsId = uid('prop-56-ws');
+    await propService.resolveOrCreateProposition({
+      propositionId: propWsId,
+      tenantId: tenantA,
+      propositionType: 'FACTUAL',
+      canonicalMeaning: 'Proposition 56 for Workspace Isolation Tests',
+      subject: 'Subject 56 Ws',
+      predicate: 'hasProperty',
+      object: 'Value 56 Ws',
+    });
+
+    const wsTraceId = uid('rt-56-ws-a');
+    await sql`
+      INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id)
+      VALUES ('ResearchTrace', ${wsTraceId}, ${tenantA})
+      ON CONFLICT DO NOTHING
+    `;
+    await sql`
+      INSERT INTO research_traces (
+        research_trace_id, tenant_id, workspace_id, gap_id, research_question, queries, sources_searched,
+        retrieval_entity_type, retrieval_stable_id, retrieval_revision_id, coverage_limitations,
+        outcome, stop_reason, started_at, completed_at
+      ) VALUES (
+        ${wsTraceId}, ${tenantA}, 'workspace-alpha', ${gapId56}, 'Question 56 Ws', 'query 56 Ws', 'web',
+        'EvaluatorConfig', ${evalStable}, ${evalRevId}, 'None',
+        'FOUND_RELEVANT_EVIDENCE', 'ANSWER_FOUND', now(), now()
+      )
+    `;
+
+    // 3b-i. EXPERIMENTAL derivation called as tenant A with workspace omitted -> WORKSPACE_ISOLATION_VIOLATION
+    let errWsOmitted: any;
+    try {
+      await epiService.appendEpistemicState({
+        epistemicStateId: uid('epi-56-ws-omitted'),
+        propositionId: propWsId,
+        runConfigId: rcId,
+        derivationMethod: 'EXPERIMENTAL',
+        derivationEntityType: 'EvaluatorConfig',
+        derivationStableId: evalStable,
+        derivationRevisionId: evalRevId,
+        researchTraceId: wsTraceId,
+        validFrom: new Date(),
+        knownFrom: new Date(),
+        tenantId: tenantA,
+        workspaceId: undefined, // Omitted!
+      });
+    } catch (e) {
+      errWsOmitted = e;
+    }
+    expect(errWsOmitted).toBeDefined();
+    expect(errWsOmitted.code).toBe('WORKSPACE_ISOLATION_VIOLATION');
+
+    // 3b-ii. Workspace B -> reject
+    let errWsMismatch: any;
+    try {
+      await epiService.appendEpistemicState({
+        epistemicStateId: uid('epi-56-ws-mismatch'),
+        propositionId: propWsId,
+        runConfigId: rcId,
+        derivationMethod: 'EXPERIMENTAL',
+        derivationEntityType: 'EvaluatorConfig',
+        derivationStableId: evalStable,
+        derivationRevisionId: evalRevId,
+        researchTraceId: wsTraceId,
+        validFrom: new Date(),
+        knownFrom: new Date(),
+        tenantId: tenantA,
+        workspaceId: 'workspace-beta', // Mismatched workspace
+      });
+    } catch (e) {
+      errWsMismatch = e;
+    }
+    expect(errWsMismatch).toBeDefined();
+    expect(errWsMismatch.code).toBe('WORKSPACE_ISOLATION_VIOLATION');
+
+    // 3b-iii. Workspace A -> succeed
+    const wsOkEpiId = uid('epi-56-ws-ok');
+    await epiService.appendEpistemicState({
+      epistemicStateId: wsOkEpiId,
+      propositionId: propWsId,
+      runConfigId: rcId,
+      derivationMethod: 'EXPERIMENTAL',
+      derivationEntityType: 'EvaluatorConfig',
+      derivationStableId: evalStable,
+      derivationRevisionId: evalRevId,
+      researchTraceId: wsTraceId,
+      validFrom: new Date(),
+      knownFrom: new Date(),
+      tenantId: tenantA,
+      workspaceId: 'workspace-alpha', // Matching workspace!
+    });
+
     // 4. EXPERIMENTAL + valid ResearchTrace + valid pinned EvaluatorConfig -> mechanically derive successfully
     const experimentalEpiId = uid('epi-56-experimental-ok');
     await epiService.appendEpistemicState({
@@ -4803,10 +4897,29 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
     expect(errBaseEpi.code).toBe('WRITE_AUTHORITY_REQUIRED');
 
     // 8. Blocker #1 Standalone Authority Protection Attacks:
-    // Subcase 1: importing coordinator statically/dynamically cannot retrieve standalone authority token
+    // Subcase 1: ordinary runtime/persistence import surface does NOT expose any callable standalone-authority issuer
     const coordinatorMod = await import('../../persistence/relational/services/stage-fencing-coordinator.js');
+    expect((coordinatorMod as any).createStandaloneIngestionAdapter).toBeUndefined();
     expect((coordinatorMod as any).TRUSTED_STANDALONE_CAPABILITY).toBeUndefined();
     expect((coordinatorMod as any).STANDALONE_AUTHORITY).toBeUndefined();
+
+    // Verify all persistence modules export zero standalone authority issuers or symbols
+    const persistenceMods = [
+      await import('../../persistence/relational/services/stage-fencing-coordinator.js'),
+      await import('../../persistence/relational/services/evidence-persistence-service.js'),
+      await import('../../persistence/relational/services/proposition-persistence-service.js'),
+      await import('../../persistence/relational/services/epistemic-persistence-service.js'),
+      await import('../../persistence/relational/services/knowledge-gap-persistence-service.js'),
+      await import('../../persistence/relational/services/standalone-ingestion-adapter.js'),
+      await import('../../persistence/relational/services/decision-cycle-knowledge-adapter.js'),
+      await import('../../persistence/relational/services/strategy-knowledge-gate-service.js'),
+      await import('../../persistence/relational/services/control-plane-persistence-service.js'),
+    ];
+    for (const mod of persistenceMods) {
+      expect((mod as any).createStandaloneIngestionAdapter).toBeUndefined();
+      expect((mod as any).STANDALONE_AUTHORITY).toBeUndefined();
+      expect((mod as any).TRUSTED_STANDALONE_CAPABILITY).toBeUndefined();
+    }
 
     // Subcase 2: base persistence method called directly with no authority -> rejects with WRITE_AUTHORITY_REQUIRED
     let errNoAuth: any;
@@ -4845,11 +4958,18 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
     expect(errLookalike).toBeDefined();
     expect(errLookalike.code).toBe('WRITE_AUTHORITY_REQUIRED');
 
-    // Subcase 4: namespace/dynamic import cannot obtain privileged capability
+    // Subcase 4: namespace/dynamic import cannot obtain privileged capability or factory
     const exportedValues = Object.values(coordinatorMod);
     expect(exportedValues.some((v) => typeof v === 'symbol')).toBe(false);
     expect(Object.keys(coordinatorMod)).not.toContain('TRUSTED_STANDALONE_CAPABILITY');
     expect(Object.keys(coordinatorMod)).not.toContain('STANDALONE_AUTHORITY');
+    expect(Object.keys(coordinatorMod)).not.toContain('createStandaloneIngestionAdapter');
+
+    // Subcase 4b: Unauthorized runtime module cannot call bootstrap issuer
+    const { assertTrustedBootstrapCaller } = await import('../../bootstrap/composition-root.js');
+    expect(() => {
+      assertTrustedBootstrapCaller('at DecisionCycleWorker (/Users/test/src/workflow/worker.ts:42:15)');
+    }).toThrowError(/STANDALONE_ISSUANCE_FORBIDDEN/);
 
     // Subcase 5: stale DecisionCycle worker cannot invoke standalone writes
     let errStaleWorkerStandalone: any;

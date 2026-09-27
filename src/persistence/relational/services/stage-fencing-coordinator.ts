@@ -8,9 +8,8 @@
  *   - Enforces lease owner and expiration
  *   - Prohibits omitting stage authorization when writing within a DecisionCycle
  */
-import type postgres from 'postgres';
 import { RegistryValidationError } from '../../../domain/services/registry-validator.js';
-import { StandaloneIngestionAdapter } from './standalone-ingestion-adapter.js';
+import { isStandaloneAuthority } from '../../../bootstrap/composition-root.js';
 
 export interface StageFencingContext {
   decisionCycleId?: string | null;
@@ -20,24 +19,6 @@ export interface StageFencingContext {
 }
 
 export type WriteMode = 'STANDALONE' | 'DECISION_CYCLE';
-
-const STANDALONE_AUTHORITY: unique symbol = Symbol('ContentOS.Private.StandaloneAuthority');
-
-/**
- * Trusted factory to construct StandaloneIngestionAdapter with the module-private authority.
- * Decision-cycle runtime modules are statically prohibited from importing this factory.
- */
-export function createStandaloneIngestionAdapter(
-  sql: ReturnType<typeof postgres>,
-  services?: {
-    evService?: any;
-    propService?: any;
-    epiService?: any;
-    gapService?: any;
-  },
-): StandaloneIngestionAdapter {
-  return new StandaloneIngestionAdapter(sql, STANDALONE_AUTHORITY, services);
-}
 
 export async function verifyStageFencing(
   sqlTx: any,
@@ -62,7 +43,7 @@ export async function verifyStageFencing(
     );
   }
 
-  if (!isCycleMode && _standaloneAuthority !== STANDALONE_AUTHORITY) {
+  if (!isCycleMode && !isStandaloneAuthority(_standaloneAuthority)) {
     throw new RegistryValidationError(
       'WRITE_AUTHORITY_REQUIRED',
       'Direct invocation of canonical knowledge persistence without verified write authority is forbidden. Decision-cycle writes require DecisionCycle and StageExecution fencing context; standalone writes require trusted StandaloneIngestionAdapter capability.',

@@ -511,10 +511,10 @@ export class EpistemicPersistenceService {
             `ResearchTrace belongs to tenant '${trace.tenant_id}', not '${tenantId}'.`,
           );
         }
-        if (trace.workspace_id && workspaceId && trace.workspace_id !== workspaceId) {
+        if (trace.workspace_id != null && (!workspaceId || trace.workspace_id !== workspaceId)) {
           throw new RegistryValidationError(
             'WORKSPACE_ISOLATION_VIOLATION',
-            `ResearchTrace is scoped to workspace '${trace.workspace_id}', not '${workspaceId}'.`,
+            `ResearchTrace is scoped to workspace '${trace.workspace_id}', but caller provided '${workspaceId || 'NONE'}'. Workspace context is required to access workspace-scoped ResearchTraces.`,
           );
         }
         researchTrace = trace;

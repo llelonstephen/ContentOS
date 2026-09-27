@@ -334,7 +334,51 @@ describe('SPEC03 §146 Static Contract Preflight Suite (28 Checks)', () => {
           expect(name).not.toMatch(/AUTHORITY_TOKEN/i);
         }
       }
+      if (ts.isFunctionDeclaration(node) && node.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)) {
+        const name = node.name?.getText(coordinatorSf) ?? '';
+        expect(name).not.toBe('createStandaloneIngestionAdapter');
+        expect(name).not.toMatch(/create.*standalone/i);
+        expect(name).not.toMatch(/mint/i);
+      }
     });
+
+    // 1b. AST check: Persistence public surface does NOT export any privilege-minting standalone factory or constructor
+    const persistenceDir = path.resolve(import.meta.dirname, '../../persistence/relational/services');
+    for (const pFile of fs.readdirSync(persistenceDir)) {
+      if (!pFile.endsWith('.ts')) continue;
+      const pPath = path.join(persistenceDir, pFile);
+      const pCode = fs.readFileSync(pPath, 'utf-8');
+      const pSf = ts.createSourceFile(pPath, pCode, ts.ScriptTarget.Latest, true);
+      ts.forEachChild(pSf, (node) => {
+        // Check exported functions
+        if (ts.isFunctionDeclaration(node) && node.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)) {
+          const fnName = node.name?.getText(pSf) ?? '';
+          expect(fnName).not.toMatch(/create.*standalone/i);
+          expect(fnName).not.toMatch(/mint.*authority/i);
+          expect(fnName).not.toMatch(/standalone.*adapter/i);
+          expect(fnName).not.toBe('createStandaloneIngestionAdapter');
+        }
+        // Check exported variables / arrow functions
+        if (ts.isVariableStatement(node) && node.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)) {
+          for (const decl of node.declarationList.declarations) {
+            const varName = decl.name.getText(pSf);
+            expect(varName).not.toMatch(/create.*standalone/i);
+            expect(varName).not.toMatch(/standalone.*adapter/i);
+            expect(varName).not.toBe('createStandaloneIngestionAdapter');
+          }
+        }
+        // Check exported classes: StandaloneIngestionAdapter cannot have public static factory minting authority
+        if (ts.isClassDeclaration(node) && node.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)) {
+          for (const member of node.members) {
+            if (ts.isMethodDeclaration(member) && member.modifiers?.some((m) => m.kind === ts.SyntaxKind.StaticKeyword)) {
+              const methodName = member.name.getText(pSf);
+              expect(methodName).not.toMatch(/create/i);
+              expect(methodName).not.toMatch(/mint/i);
+            }
+          }
+        }
+      });
+    }
 
     // 2. AST check: Base canonical persistence interfaces do NOT expose public authority parameters
     const persistenceServiceFiles = [
@@ -380,8 +424,12 @@ describe('SPEC03 §146 Static Contract Preflight Suite (28 Checks)', () => {
     walk(srcDir);
 
     for (const file of allFiles) {
-      // Exclude standalone adapter itself and the coordinator definition
-      if (file.endsWith('standalone-ingestion-adapter.ts') || file.endsWith('stage-fencing-coordinator.ts')) {
+      // Exclude standalone adapter itself, the coordinator definition, and the trusted bootstrap composition root
+      if (
+        file.endsWith('standalone-ingestion-adapter.ts') ||
+        file.endsWith('stage-fencing-coordinator.ts') ||
+        file.includes('/bootstrap/')
+      ) {
         continue;
       }
       const code = fs.readFileSync(file, 'utf-8');
@@ -391,7 +439,11 @@ describe('SPEC03 §146 Static Contract Preflight Suite (28 Checks)', () => {
         // Detect static imports
         if (ts.isImportDeclaration(node)) {
           const modSpecifier = node.moduleSpecifier.getText(sf);
-          if (modSpecifier.includes('standalone-ingestion-adapter') || modSpecifier.includes('stage-fencing-coordinator')) {
+          if (
+            modSpecifier.includes('standalone-ingestion-adapter') ||
+            modSpecifier.includes('stage-fencing-coordinator') ||
+            modSpecifier.includes('composition-root')
+          ) {
             const namedBindings = node.importClause?.namedBindings;
             if (namedBindings && ts.isNamespaceImport(namedBindings)) {
               throw new Error(`Namespace import of privileged module detected in ${file}`);
@@ -635,6 +687,10 @@ describe('SPEC03 §146 Static Contract Preflight Suite (28 Checks)', () => {
             // 5. No caller-controlled truth path for EXPERIMENTAL
             expect(body).toContain("derivationMethod === 'EXPERIMENTAL'");
             expect(body).toContain("researchTrace.outcome === 'NO_EVIDENCE_FOUND'");
+            // 6. Fail-closed workspace isolation for ResearchTrace:
+            // trace.workspace_id != null requires matching caller workspaceId; omitting workspaceId throws WORKSPACE_ISOLATION_VIOLATION
+            expect(body).toContain('trace.workspace_id != null && (!workspaceId || trace.workspace_id !== workspaceId)');
+            expect(body).toContain('WORKSPACE_ISOLATION_VIOLATION');
           }
         }
       }

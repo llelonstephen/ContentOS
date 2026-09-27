@@ -20,7 +20,7 @@ import { EpistemicPersistenceService } from '../../persistence/relational/servic
 import { MeasurementPersistenceService } from '../../persistence/relational/services/measurement-persistence-service.js';
 import { DecisionPersistenceService } from '../../persistence/relational/services/decision-persistence-service.js';
 import { GovernanceControlPlaneGateway } from '../../control-plane/authority/control-plane-authority.js';
-import { createStandaloneIngestionAdapter } from '../../persistence/relational/services/stage-fencing-coordinator.js';
+import { createStandaloneIngestionAdapter } from '../../bootstrap/composition-root.js';
 
 function assertTestDatabase(url: string): void {
   const parsed = new URL(url);
