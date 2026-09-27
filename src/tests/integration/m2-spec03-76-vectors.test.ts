@@ -194,8 +194,6 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
       END $$;
     `;
     await sql`GRANT USAGE ON SCHEMA public TO contentos_runtime_role, contentos_standalone_role`;
-    await sql`GRANT ALL ON ALL TABLES IN SCHEMA public TO contentos_standalone_role`;
-    await sql`GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO contentos_standalone_role`;
     await sql`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO contentos_runtime_role`;
     await sql`GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO contentos_runtime_role`;
     await sql`GRANT contentos_standalone_role TO CURRENT_USER`;
@@ -285,6 +283,17 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
     );
     const m2TriggersSql = await fs.readFile(m2TriggersPath, 'utf-8');
     await sql.unsafe(m2TriggersSql);
+
+    // Apply M2 standalone privilege closure forward migration
+    const m3PrivsPath = path.resolve(
+      import.meta.dirname,
+      '../../persistence/relational/migrations/0003_m2_standalone_privilege_closure.sql',
+    );
+    const m3PrivsSql = await fs.readFile(m3PrivsPath, 'utf-8');
+    const m3Statements = m3PrivsSql.split('--> statement-breakpoint').map((s) => s.trim()).filter(Boolean);
+    for (const stmt of m3Statements) {
+      await sql.unsafe(stmt);
+    }
 
     // Seed baseline entities
     await sql`
@@ -5069,22 +5078,273 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
       expect(errStaleWorkerStandalone.code).toBe('WRITE_AUTHORITY_REQUIRED');
 
       // Subcase 6: authorized standalone PostgreSQL principal performs legitimate standalone write
-      // -> succeeds
+      // -> succeeds under ONLY production migration privileges
       await saSql`SET ROLE contentos_standalone_role`;
       const authorizedAdapter = createStandaloneIngestionAdapter(saSql);
-      const authorizedPropId = uid('prop-73-authorized');
-      const authorizedRes = await authorizedAdapter.resolveOrCreateProposition({
-        propositionId: authorizedPropId,
+
+      // Execute full representative legitimate standalone SPEC03 chain:
+      // SourceArtifact -> EvidenceItem -> Proposition -> EvidencePropositionLink -> EvidenceAssessment -> EpistemicStateVersion
+      // plus KnowledgeGap and ResearchTrace
+
+      const v73Uid = uid('v73-chain');
+      const v73RawText = `Authoritative standalone evidence text for ${v73Uid}`;
+      const v73Store = getDefaultObjectStore();
+      const v73Meta = await v73Store.put(Buffer.from(v73RawText, 'utf-8'), 'text/plain');
+      const v73ContentHash = v73Meta.content_hash;
+      const v73ObjectKey = v73Meta.object_reference;
+      const v73ObjId = uid('obj-v73');
+      const v73RpId = uid('rp-v73');
+      const v73TaskRevId = uid('task-rev-v73');
+      const v73TaskStable = uid('task-st-v73');
+      const v73EvalStable = uid('eval-st-v73');
+      const v73EvalRevId = uid('eval-rev-v73');
+
+      // Admin fixture prerequisites owned outside standalone workflow
+      await sql`
+        INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id, workspace_id, payload_state, created_at)
+        VALUES ('RightsPolicy', ${v73RpId}, ${tenantA}, null, 'AVAILABLE', now())
+      `;
+      await sql`
+        INSERT INTO rights_policies (
+          rights_policy_id, tenant_id, copyright_status, license, analysis_use,
+          generation_use, quotation_use, transformation_permission, redistribution_permission,
+          commercial_use_permission, attribution_requirements, effective_from, created_at
+        ) VALUES (
+          ${v73RpId}, ${tenantA}, 'PUBLIC_DOMAIN', 'CC0', true,
+          true, true, true, true, true, 'None', now(), now()
+        )
+      `;
+      await sql`
+        INSERT INTO object_registry (object_id, tenant_id, workspace_id, content_hash, object_key, size_bytes, media_type, state, created_at)
+        VALUES (${v73ObjId}, ${tenantA}, ${workspaceA}, ${v73ContentHash}, ${v73ObjectKey}, ${v73Meta.size_bytes}, 'text/plain', 'AVAILABLE', now())
+      `;
+      await sql`
+        INSERT INTO revision_registry (entity_type, stable_id, revision_id, tenant_id)
+        VALUES 
+          ('TaskContractRevision', ${v73TaskStable}, ${v73TaskRevId}, ${tenantA}),
+          ('EvaluatorConfig', ${v73EvalStable}, ${v73EvalRevId}, ${tenantA})
+        ON CONFLICT DO NOTHING
+      `;
+      await sql`
+        INSERT INTO task_contract_revisions (
+          task_id, task_revision_id, tenant_id, workspace_id, standalone_task, objective, channel,
+          format, language, market, jurisdiction, brand_id, product_id, audience_context,
+          success_metric_revision_id, constraints, risk_context, compute_budget, created_at
+        ) VALUES (
+          ${v73TaskStable}, ${v73TaskRevId}, ${tenantA}, ${workspaceA}, true, 'Objective', 'TWITTER_X',
+          'TEXT', 'en', 'US', 'US', 'brand-1', 'prod-1', 'Audience',
+          'metric-rev-1', 'None', 'Low', 'Budget', now()
+        )
+      `;
+
+      // 6a. SourceArtifact
+      const v73SourceId = uid('src-v73');
+      await authorizedAdapter.ingestSourceArtifact({
+        sourceId: v73SourceId,
         tenantId: tenantA,
-        propositionType: 'FACTUAL',
-        canonicalMeaning: uid('Prop 73 Authorized Standalone Success'),
-        subject: 'Authorized S',
-        predicate: 'hasP',
-        object: 'Valid O',
+        workspaceId: workspaceA,
+        sourceType: 'DOCUMENT',
+        publisher: 'Test Publisher',
+        author: 'Test Author',
+        jurisdiction: 'US',
+        sourceVersion: '1.0',
+        retrievedAt: new Date(),
+        contentHash: v73ContentHash,
+        snapshotReference: v73ObjId,
+        rightsPolicyId: v73RpId,
+        dataScope: 'WORKSPACE_SHARED',
+        rawText: v73RawText,
       });
-      expect(authorizedRes).toBeDefined();
-      expect(authorizedRes.outcome).toBe('CREATED_NEW');
-      expect(authorizedRes.propositionId).toBe(authorizedPropId);
+
+      // 6b. EvidenceItem
+      const v73EvId = uid('ev-v73');
+      await authorizedAdapter.extractEvidenceItem({
+        evidenceId: v73EvId,
+        tenantId: tenantA,
+        workspaceId: workspaceA,
+        originType: 'SOURCE_ARTIFACT',
+        originId: v73SourceId,
+        statement: v73RawText,
+        statementType: 'FACTUAL',
+        assertionMethod: 'AUTOMATED',
+        evidenceDomain: 'PRODUCT_DOCUMENTATION',
+        studyDesign: 'OBSERVATIONAL',
+        causalIdentification: 'CORRELATIONAL',
+        mechanismSupport: 'PLAUSIBLE',
+        validFrom: new Date('2025-01-01'),
+        limitations: 'None',
+        sourceContent: v73RawText,
+      });
+
+      // 6c. Proposition
+      const v73PropId = uid('prop-v73');
+      const propRes = await authorizedAdapter.resolveOrCreateProposition({
+        propositionId: v73PropId,
+        tenantId: tenantA,
+        workspaceId: workspaceA,
+        propositionType: 'FACTUAL',
+        canonicalMeaning: uid('Meaning for Vector 73 Standalone Chain'),
+        subject: 'Subject V73',
+        predicate: 'is effective',
+        object: 'Outcome V73',
+      });
+      expect(propRes.outcome).toBe('CREATED_NEW');
+      expect(propRes.propositionId).toBe(v73PropId);
+
+      // 6d. EvidencePropositionLink
+      const v73LinkId = uid('link-v73');
+      const linkRes = await authorizedAdapter.linkEvidenceToProposition({
+        linkId: v73LinkId,
+        evidenceId: v73EvId,
+        propositionId: v73PropId,
+        tenantId: tenantA,
+        workspaceId: workspaceA,
+      });
+      expect(linkRes.created).toBe(true);
+
+      // 6e. EvidenceAssessment
+      const v73AssId = uid('ass-v73');
+      await authorizedAdapter.createEvidenceAssessment({
+        assessmentId: v73AssId,
+        tenantId: tenantA,
+        workspaceId: workspaceA,
+        linkId: v73LinkId,
+        compatibilityStatus: 'COMPATIBLE',
+        relationship: 'SUPPORTS',
+      });
+
+      // 6f. EpistemicStateVersion
+      const v73EpiId = uid('epi-v73');
+      await authorizedAdapter.appendStandaloneEpistemicState({
+        epistemicStateId: v73EpiId,
+        propositionId: v73PropId,
+        derivationMethod: 'RULE_BASED',
+        derivationEntityType: 'EvaluatorConfig',
+        derivationStableId: v73EvalStable,
+        derivationRevisionId: v73EvalRevId,
+        validFrom: new Date('2025-06-01'),
+        knownFrom: new Date(),
+        assessmentIds: [v73AssId],
+        tenantId: tenantA,
+        workspaceId: workspaceA,
+      });
+
+      // 6g. KnowledgeGap standalone create/transition
+      const v73GapId = uid('gap-v73');
+      await authorizedAdapter.createOrTransitionKnowledgeGap({
+        gapId: v73GapId,
+        tenantId: tenantA,
+        workspaceId: workspaceA,
+        taskRevisionId: v73TaskRevId,
+        question: 'What is the standalone gap for V73?',
+        decisionRelevance: 'HIGH',
+        blocking: true,
+        researchable: true,
+        userResolvable: false,
+        assumptionAllowed: true,
+        riskIfWrong: 'LOW',
+        status: 'OPEN',
+      });
+
+      // 6h. ResearchTrace standalone recording
+      const v73TraceId = uid('trace-v73');
+      await authorizedAdapter.recordResearchTrace({
+        researchTraceId: v73TraceId,
+        tenantId: tenantA,
+        workspaceId: workspaceA,
+        gapId: v73GapId,
+        researchQuestion: 'How to research standalone gap for V73?',
+        queries: 'standalone queries V73',
+        sourcesSearched: 'standalone sources V73',
+        retrievalEntityType: 'EvaluatorConfig',
+        retrievalStableId: v73EvalStable,
+        retrievalRevisionId: v73EvalRevId,
+        coverageLimitations: 'None',
+        outcome: 'FOUND_RELEVANT_EVIDENCE',
+        stopReason: 'COMPLETE',
+        startedAt: new Date(Date.now() - 5000),
+        completedAt: new Date(),
+      });
+
+      // Step 6: Negative least-privilege tests using authorized standalone role
+      // 1. cannot UPDATE immutable canonical knowledge row
+      let errNegUpdate: any;
+      try {
+        await saSql`UPDATE propositions SET canonical_meaning = 'mutated' WHERE proposition_id = ${v73PropId}`;
+      } catch (e) {
+        errNegUpdate = e;
+      }
+      expect(errNegUpdate).toBeDefined();
+      expect(errNegUpdate.code).toBe('42501');
+
+      // 2. cannot DELETE immutable canonical knowledge row
+      let errNegDelete: any;
+      try {
+        await saSql`DELETE FROM evidence_items WHERE evidence_id = ${v73EvId}`;
+      } catch (e) {
+        errNegDelete = e;
+      }
+      expect(errNegDelete).toBeDefined();
+      expect(errNegDelete.code).toBe('42501');
+
+      // 3. cannot mutate control_plane_activations
+      let errNegCp: any;
+      try {
+        await saSql`DELETE FROM control_plane_activations`;
+      } catch (e) {
+        errNegCp = e;
+      }
+      expect(errNegCp).toBeDefined();
+      expect(errNegCp.code).toBe('42501');
+
+      // 4. cannot grant itself another role
+      let errNegGrant: any;
+      try {
+        await saSql`GRANT contentos_control_plane_role TO contentos_standalone_role`;
+      } catch (e) {
+        errNegGrant = e;
+      }
+      expect(errNegGrant).toBeDefined();
+      expect(errNegGrant.code).toBe('42501');
+
+      // 5. cannot alter schema
+      let errNegSchema: any;
+      try {
+        await saSql`CREATE TABLE malicious_test_table (id text)`;
+      } catch (e) {
+        errNegSchema = e;
+      }
+      expect(errNegSchema).toBeDefined();
+      expect(errNegSchema.code).toBe('42501');
+
+      // Subcase 7: existing SUPERSEDED/FREEZING stale-worker attacks still reject
+      const freezingCycleId = uid('cycle-73-freezing');
+      await sql`
+        INSERT INTO decision_cycles (decision_cycle_id, tenant_id, run_id, cycle_number, status, reason, opened_at)
+        VALUES (${freezingCycleId}, ${tenantA}, ${runId}, 99, 'FREEZING', 'Freezing cycle', now())
+      `;
+      let errFreezingCommit: any;
+      try {
+        await (basePropService as any).resolveOrCreateProposition({
+          propositionId: uid('prop-73-freezing'),
+          tenantId: tenantA,
+          propositionType: 'FACTUAL',
+          canonicalMeaning: uid('Prop 73 Freezing Commit'),
+          subject: 'S',
+          predicate: 'P',
+          object: 'O',
+          writeMode: 'DECISION_CYCLE',
+          fencingContext: {
+            decisionCycleId: freezingCycleId,
+            stageExecutionId: uid('se-73-freezing'),
+            fencingToken: 1,
+          },
+        });
+      } catch (e) {
+        errFreezingCommit = e;
+      }
+      expect(errFreezingCommit).toBeDefined();
+      expect(errFreezingCommit.code).toBe('KNOWLEDGE_COMMIT_REJECTED_AFTER_FREEZING');
     } finally {
       await rtSql.end();
       await saSql.end();

@@ -139,8 +139,6 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
     await sql`GRANT USAGE ON SCHEMA public TO contentos_runtime_role, contentos_control_plane_role, contentos_standalone_role`;
     await sql`GRANT ALL ON ALL TABLES IN SCHEMA public TO contentos_control_plane_role`;
     await sql`GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO contentos_control_plane_role`;
-    await sql`GRANT ALL ON ALL TABLES IN SCHEMA public TO contentos_standalone_role`;
-    await sql`GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO contentos_standalone_role`;
     await sql`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO contentos_runtime_role`;
     await sql`GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO contentos_runtime_role`;
     await sql`REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON control_plane_activations FROM contentos_runtime_role`;

@@ -371,6 +371,36 @@ describe('SPEC03 §146 Static Contract Preflight Suite (28 Checks)', () => {
     expect(migrationContent).toContain("REVOKE contentos_standalone_role FROM contentos_runtime_role");
     expect(migrationContent).not.toContain("GRANT contentos_standalone_role TO contentos_runtime_role");
 
+    // 1d-ii. Forward migration exists and enforces least-privilege closure without broad grants
+    const forwardMigrationPath = path.resolve(
+      import.meta.dirname,
+      '../../persistence/relational/migrations/0003_m2_standalone_privilege_closure.sql',
+    );
+    expect(fs.existsSync(forwardMigrationPath)).toBe(true);
+    const forwardMigrationContent = fs.readFileSync(forwardMigrationPath, 'utf-8');
+
+    // No standalone production migration contains broad table grants
+    const migrationsDir = path.resolve(import.meta.dirname, '../../persistence/relational/migrations');
+    for (const mFile of fs.readdirSync(migrationsDir)) {
+      if (!mFile.endsWith('.sql')) continue;
+      const mContent = fs.readFileSync(path.join(migrationsDir, mFile), 'utf-8');
+      expect(mContent).not.toMatch(/GRANT\s+ALL\s+ON\s+ALL\s+TABLES.*TO\s+contentos_standalone_role/i);
+      expect(mContent).not.toMatch(/GRANT\s+ALL\s+PRIVILEGES.*TO\s+contentos_standalone_role/i);
+      expect(mContent).not.toMatch(/GRANT\s+SELECT,\s*INSERT,\s*UPDATE,\s*DELETE\s+ON\s+ALL\s+TABLES.*TO\s+contentos_standalone_role/i);
+    }
+
+    // Exact required privilege statements exist for the access matrix
+    expect(forwardMigrationContent).toContain('CREATE ROLE contentos_standalone_role NOLOGIN');
+    expect(forwardMigrationContent).toContain('REVOKE contentos_standalone_role FROM contentos_runtime_role');
+    expect(forwardMigrationContent).toContain('"rights_policies"');
+    expect(forwardMigrationContent).toContain('"object_references"');
+    expect(forwardMigrationContent).toContain('"epistemic_state_assessments"');
+    expect(forwardMigrationContent).toContain('"object_registry"');
+    expect(forwardMigrationContent).toMatch(/GRANT\s+SELECT,\s*INSERT\s+ON[\s\S]*"object_references"[\s\S]*TO\s+contentos_standalone_role/);
+    expect(forwardMigrationContent).toMatch(/GRANT\s+SELECT,\s*INSERT\s+ON[\s\S]*"epistemic_state_assessments"[\s\S]*TO\s+contentos_standalone_role/);
+    expect(forwardMigrationContent).toMatch(/GRANT\s+SELECT\s+ON[\s\S]*"rights_policies"[\s\S]*TO\s+contentos_standalone_role/);
+    expect(forwardMigrationContent).toMatch(/GRANT\s+UPDATE\s+ON\s+"object_registry"\s+TO\s+contentos_standalone_role/);
+
     // 1e. AST check: Persistence public surface does NOT export any privilege-minting standalone factory or constructor
     const persistenceDir = path.resolve(import.meta.dirname, '../../persistence/relational/services');
     for (const pFile of fs.readdirSync(persistenceDir)) {
