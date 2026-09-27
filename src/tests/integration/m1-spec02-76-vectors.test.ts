@@ -20,6 +20,7 @@ import { DecisionPersistenceService } from '../../persistence/relational/service
 import { RetentionDeletionService } from '../../persistence/relational/services/retention-deletion-service.js';
 import { claimObjectForGC } from '../../persistence/relational/services/object-registry-service.js';
 import { GovernanceControlPlaneGateway, GovernanceActivationAuthority } from '../../control-plane/authority/control-plane-authority.js';
+import { TRUSTED_STANDALONE_CAPABILITY } from '../../persistence/relational/services/stage-fencing-coordinator.js';
 import {
   RegistryValidationError,
   validateSupersession,
@@ -444,9 +445,9 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
     await epiService.appendEpistemicState({
       epistemicStateId: uid('eps-root-11'),
       propositionId: propId,
-      supportStatus: 'STRONGLY_SUPPORTED',
-      causalStatus: 'DIRECT_OBSERVATION',
-      uncertainty: 'LOW',
+      supportStatus: 'UNKNOWN',
+      causalStatus: 'NOT_APPLICABLE',
+      uncertainty: 'NONE',
       derivationMethod: 'EXPERIMENTAL',
       derivationEntityType: 'ResearchTrace',
       derivationStableId: 'trace-1',
@@ -454,6 +455,7 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
       validFrom: new Date('2026-01-01T00:00:00Z'),
       knownFrom: new Date('2026-01-01T00:00:00Z'),
       tenantId: tenantA,
+      trustedCapability: TRUSTED_STANDALONE_CAPABILITY,
     });
 
     let err: any;
@@ -461,9 +463,9 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
       await epiService.appendEpistemicState({
         epistemicStateId: uid('eps-root-11-second'),
         propositionId: propId,
-        supportStatus: 'STRONGLY_SUPPORTED',
-        causalStatus: 'DIRECT_OBSERVATION',
-        uncertainty: 'LOW',
+        supportStatus: 'UNKNOWN',
+        causalStatus: 'NOT_APPLICABLE',
+        uncertainty: 'NONE',
         derivationMethod: 'EXPERIMENTAL',
         derivationEntityType: 'ResearchTrace',
         derivationStableId: 'trace-1',
@@ -471,6 +473,7 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
         validFrom: new Date('2026-02-01T00:00:00Z'),
         knownFrom: new Date('2026-02-01T00:00:00Z'),
         tenantId: tenantA,
+        trustedCapability: TRUSTED_STANDALONE_CAPABILITY,
       });
     } catch (e) {
       err = e;
@@ -498,9 +501,9 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
     await epiService.appendEpistemicState({
       epistemicStateId: rootId,
       propositionId: propId,
-      supportStatus: 'STRONGLY_SUPPORTED',
-      causalStatus: 'DIRECT_OBSERVATION',
-      uncertainty: 'LOW',
+      supportStatus: 'UNKNOWN',
+      causalStatus: 'NOT_APPLICABLE',
+      uncertainty: 'NONE',
       derivationMethod: 'EXPERIMENTAL',
       derivationEntityType: 'ResearchTrace',
       derivationStableId: 'trace-1',
@@ -508,15 +511,16 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
       validFrom: new Date('2026-01-01T00:00:00Z'),
       knownFrom: new Date('2026-01-01T00:00:00Z'),
       tenantId: tenantA,
+      trustedCapability: TRUSTED_STANDALONE_CAPABILITY,
     });
 
     await epiService.appendEpistemicState({
       epistemicStateId: uid('eps-succ-12-1'),
       propositionId: propId,
       supersedesEpistemicStateId: rootId,
-      supportStatus: 'WEAKLY_SUPPORTED',
-      causalStatus: 'DIRECT_OBSERVATION',
-      uncertainty: 'MEDIUM',
+      supportStatus: 'UNKNOWN',
+      causalStatus: 'NOT_APPLICABLE',
+      uncertainty: 'NONE',
       derivationMethod: 'EXPERIMENTAL',
       derivationEntityType: 'ResearchTrace',
       derivationStableId: 'trace-1',
@@ -524,6 +528,7 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
       validFrom: new Date('2026-02-01T00:00:00Z'),
       knownFrom: new Date('2026-02-01T00:00:00Z'),
       tenantId: tenantA,
+      trustedCapability: TRUSTED_STANDALONE_CAPABILITY,
     });
 
     let err: any;
@@ -532,9 +537,9 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
         epistemicStateId: uid('eps-succ-12-branch'),
         propositionId: propId,
         supersedesEpistemicStateId: rootId, // Branch attempt
-        supportStatus: 'CONTRADICTED',
-        causalStatus: 'NO_EVIDENCE',
-        uncertainty: 'HIGH',
+        supportStatus: 'UNKNOWN',
+        causalStatus: 'NOT_APPLICABLE',
+        uncertainty: 'NONE',
         derivationMethod: 'EXPERIMENTAL',
         derivationEntityType: 'ResearchTrace',
         derivationStableId: 'trace-1',
@@ -542,6 +547,7 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
         validFrom: new Date('2026-03-01T00:00:00Z'),
         knownFrom: new Date('2026-03-01T00:00:00Z'),
         tenantId: tenantA,
+        trustedCapability: TRUSTED_STANDALONE_CAPABILITY,
       });
     } catch (e) {
       err = e;
@@ -557,9 +563,9 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
         epistemicStateId: 'eps-self-cycle',
         propositionId: 'some-prop',
         supersedesEpistemicStateId: 'eps-self-cycle',
-        supportStatus: 'STRONGLY_SUPPORTED',
-        causalStatus: 'DIRECT_OBSERVATION',
-        uncertainty: 'LOW',
+        supportStatus: 'UNKNOWN',
+        causalStatus: 'NOT_APPLICABLE',
+        uncertainty: 'NONE',
         derivationMethod: 'EXPERIMENTAL',
         derivationEntityType: 'ResearchTrace',
         derivationStableId: 'trace-1',
@@ -567,6 +573,7 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
         validFrom: new Date('2026-01-01T00:00:00Z'),
         knownFrom: new Date('2026-01-01T00:00:00Z'),
         tenantId: tenantA,
+        trustedCapability: TRUSTED_STANDALONE_CAPABILITY,
       });
     } catch (e) {
       err = e;
@@ -593,9 +600,9 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
     await epiService.appendEpistemicState({
       epistemicStateId: rootId,
       propositionId: propId,
-      supportStatus: 'STRONGLY_SUPPORTED',
-      causalStatus: 'DIRECT_OBSERVATION',
-      uncertainty: 'LOW',
+      supportStatus: 'UNKNOWN',
+      causalStatus: 'NOT_APPLICABLE',
+      uncertainty: 'NONE',
       derivationMethod: 'EXPERIMENTAL',
       derivationEntityType: 'ResearchTrace',
       derivationStableId: 'trace-1',
@@ -603,6 +610,7 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
       validFrom: new Date('2026-01-01T00:00:00Z'),
       knownFrom: new Date('2026-01-01T00:00:00Z'),
       tenantId: tenantA,
+      trustedCapability: TRUSTED_STANDALONE_CAPABILITY,
     });
 
     let err: any;
@@ -611,9 +619,9 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
         epistemicStateId: uid('eps-retro-14'),
         propositionId: propId,
         supersedesEpistemicStateId: rootId,
-        supportStatus: 'WEAKLY_SUPPORTED',
-        causalStatus: 'DIRECT_OBSERVATION',
-        uncertainty: 'MEDIUM',
+        supportStatus: 'UNKNOWN',
+        causalStatus: 'NOT_APPLICABLE',
+        uncertainty: 'NONE',
         derivationMethod: 'EXPERIMENTAL',
         derivationEntityType: 'ResearchTrace',
         derivationStableId: 'trace-1',
@@ -621,6 +629,7 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
         validFrom: new Date('2025-12-01T00:00:00Z'),
         knownFrom: new Date('2025-12-01T00:00:00Z'), // non-increasing
         tenantId: tenantA,
+        trustedCapability: TRUSTED_STANDALONE_CAPABILITY,
       });
     } catch (e) {
       err = e;

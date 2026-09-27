@@ -24,6 +24,9 @@ import { ControlPlanePersistenceService } from '../../persistence/relational/ser
 import { GovernanceControlPlaneGateway, GovernanceActivationAuthority } from '../../control-plane/authority/control-plane-authority.js';
 import { StrategyKnowledgeGateService } from '../../persistence/relational/services/strategy-knowledge-gate-service.js';
 import { claimObjectForGC } from '../../persistence/relational/services/object-registry-service.js';
+import { TRUSTED_STANDALONE_CAPABILITY } from '../../persistence/relational/services/stage-fencing-coordinator.js';
+import { StandaloneIngestionAdapter } from '../../persistence/relational/services/standalone-ingestion-adapter.js';
+import { getDefaultObjectStore } from '../../persistence/objects/default-object-store.js';
 import {
   deriveEpistemicState,
   validateCausalSupportGuard,
@@ -69,6 +72,12 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
   let cpService: ControlPlanePersistenceService;
   let strategyGateService: StrategyKnowledgeGateService;
 
+  let basePropService: PropositionPersistenceService;
+  let baseEvService: EvidencePersistenceService;
+  let baseGapService: KnowledgeGapPersistenceService;
+  let baseEpiService: EpistemicPersistenceService;
+  let standaloneAdapter: StandaloneIngestionAdapter;
+
   const tenantA = 'tenant-spec03-a';
   const tenantB = 'tenant-spec03-b';
   const workspaceA = 'ws-spec03-a';
@@ -91,12 +100,99 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
     assertTestDatabase(DB_URL);
     sql = postgres(DB_URL, { max: 5 });
 
-    propService = new PropositionPersistenceService(sql);
-    evService = new EvidencePersistenceService(sql);
-    gapService = new KnowledgeGapPersistenceService(sql);
-    epiService = new EpistemicPersistenceService(sql);
+    basePropService = new PropositionPersistenceService(sql);
+    baseEvService = new EvidencePersistenceService(sql);
+    baseGapService = new KnowledgeGapPersistenceService(sql);
+    baseEpiService = new EpistemicPersistenceService(sql);
+    standaloneAdapter = new StandaloneIngestionAdapter(sql);
     cpService = new ControlPlanePersistenceService(sql);
     strategyGateService = new StrategyKnowledgeGateService(sql);
+
+    // Provide default trusted capability for standalone test fixture setup
+    propService = {
+      resolveOrCreateProposition: (p: any) =>
+        basePropService.resolveOrCreateProposition(
+          p.fencingContext || p.writeMode === 'DECISION_CYCLE'
+            ? p
+            : { trustedCapability: TRUSTED_STANDALONE_CAPABILITY, ...p },
+        ),
+      resolveOrCreatePropositionForDecisionCycle: (p: any) =>
+        basePropService.resolveOrCreatePropositionForDecisionCycle(p),
+    } as any;
+
+    evService = {
+      ingestSourceArtifact: (p: any) =>
+        baseEvService.ingestSourceArtifact(
+          p.fencingContext || p.writeMode === 'DECISION_CYCLE'
+            ? p
+            : { trustedCapability: TRUSTED_STANDALONE_CAPABILITY, ...p },
+        ),
+      extractEvidenceItem: (p: any) =>
+        baseEvService.extractEvidenceItem(
+          p.fencingContext || p.writeMode === 'DECISION_CYCLE'
+            ? p
+            : { trustedCapability: TRUSTED_STANDALONE_CAPABILITY, ...p },
+        ),
+      extractEvidenceItemForDecisionCycle: (p: any) =>
+        baseEvService.extractEvidenceItemForDecisionCycle(p),
+      linkEvidenceToProposition: (p: any) =>
+        baseEvService.linkEvidenceToProposition(
+          p.fencingContext || p.writeMode === 'DECISION_CYCLE'
+            ? p
+            : { trustedCapability: TRUSTED_STANDALONE_CAPABILITY, ...p },
+        ),
+      linkEvidenceToPropositionForDecisionCycle: (p: any) =>
+        baseEvService.linkEvidenceToPropositionForDecisionCycle(p),
+      createEvidenceAssessment: (p: any) =>
+        baseEvService.createEvidenceAssessment(
+          p.fencingContext || p.writeMode === 'DECISION_CYCLE'
+            ? p
+            : { trustedCapability: TRUSTED_STANDALONE_CAPABILITY, ...p },
+        ),
+      createEvidenceAssessmentForDecisionCycle: (p: any) =>
+        baseEvService.createEvidenceAssessmentForDecisionCycle(p),
+    } as any;
+
+    gapService = {
+      createOrTransitionKnowledgeGap: (p: any) =>
+        baseGapService.createOrTransitionKnowledgeGap(
+          p.fencingContext || p.writeMode === 'DECISION_CYCLE'
+            ? p
+            : { trustedCapability: TRUSTED_STANDALONE_CAPABILITY, ...p },
+        ),
+      createOrTransitionKnowledgeGapForDecisionCycle: (p: any) =>
+        baseGapService.createOrTransitionKnowledgeGapForDecisionCycle(p),
+      assertTaskUnknownPreservationGate: (taskRevId: string, tenantId?: string) =>
+        baseGapService.assertTaskUnknownPreservationGate(taskRevId, tenantId),
+      recordResearchTrace: (p: any) =>
+        baseGapService.recordResearchTrace(
+          p.fencingContext || p.writeMode === 'DECISION_CYCLE'
+            ? p
+            : { trustedCapability: TRUSTED_STANDALONE_CAPABILITY, ...p },
+        ),
+      recordResearchTraceForDecisionCycle: (p: any) =>
+        baseGapService.recordResearchTraceForDecisionCycle(p),
+    } as any;
+
+    epiService = {
+      appendEpistemicState: (p: any) =>
+        baseEpiService.appendEpistemicState(
+          p.fencingContext || p.writeMode === 'DECISION_CYCLE'
+            ? p
+            : { trustedCapability: TRUSTED_STANDALONE_CAPABILITY, ...p },
+        ),
+      appendEpistemicStateForDecisionCycle: (p: any) =>
+        baseEpiService.appendEpistemicStateForDecisionCycle(p),
+      getEpistemicStateReplay: (id: string, auth?: any) =>
+        baseEpiService.getEpistemicStateReplay(id, auth ?? { tenantId: tenantA }),
+    } as any;
+
+    // Seed default object store with snapshotObjId bytes
+    const defaultStore = getDefaultObjectStore();
+    const snapBytes = Buffer.from('Authoritative snapshot content for test suite', 'utf-8');
+    await defaultStore.put(snapBytes, 'text/html');
+    const storePath = path.resolve((defaultStore as any).basePath, snapshotObjId);
+    await fs.writeFile(storePath, snapBytes);
 
     // Apply M2 triggers if tables were reset
     const m2TriggersPath = path.resolve(
@@ -1167,25 +1263,65 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
     expect(resA.propositionId === resB.propositionId).toBe(true);
   });
 
-  it('Vector 29: semantic fingerprint collision forces identity', () => {
-    // Proves that even if two propositions had a simulated fingerprint collision,
-    // evaluateSemanticEquivalence does full material attribute checking and rejects false identity
-    const p1 = {
-      propositionType: 'FACTUAL' as const,
-      canonicalMeaning: 'Meaning 1',
-      subject: 'Subject 1',
-      predicate: 'P',
-      object: 'O',
-      qualifiers: 'qualifier 1',
-      conditions: '',
-      populationScope: '',
-      jurisdictionScope: '',
-    };
-    const p2 = {
-      ...p1,
-      qualifiers: 'qualifier 2', // Material difference
-    };
-    expect(evaluateSemanticEquivalence(p1, p2)).toBe('CREATE_NEW');
+  it('Vector 29: semantic fingerprint collision forces identity', async () => {
+    // Proves that when candidate propositions match or share semantic fields,
+    // resolveOrCreateProposition against live PostgreSQL executes evaluateSemanticEquivalence
+    // with full material attribute checking, rejecting false identity and creating a new record.
+    const propId1 = uid('prop-29-base');
+    const sharedMeaning = uid('Canonical Proposition 29 Meaning');
+
+    // 1. Create first proposition with qualifier A
+    const res1 = await propService.resolveOrCreateProposition({
+      propositionId: propId1,
+      tenantId: tenantA,
+      propositionType: 'FACTUAL',
+      canonicalMeaning: sharedMeaning,
+      subject: 'Subject 29',
+      predicate: 'hasProperty',
+      object: 'Value 29',
+      qualifiers: 'qualifier A',
+    });
+    expect(res1.outcome).toBe('CREATED_NEW');
+    expect(res1.propositionId).toBe(propId1);
+
+    // 2. Call resolveOrCreateProposition with differing material qualifier B
+    // In database, candidate propId1 is loaded. evaluateSemanticEquivalence detects material difference
+    // and returns CREATE_NEW rather than reusing propId1.
+    const propId2 = uid('prop-29-collision');
+    const res2 = await propService.resolveOrCreateProposition({
+      propositionId: propId2,
+      tenantId: tenantA,
+      propositionType: 'FACTUAL',
+      canonicalMeaning: sharedMeaning,
+      subject: 'Subject 29',
+      predicate: 'hasProperty',
+      object: 'Value 29',
+      qualifiers: 'qualifier B', // Material difference!
+    });
+    expect(res2.outcome).toBe('CREATED_NEW');
+    expect(res2.propositionId).toBe(propId2);
+    expect(res2.propositionId).not.toBe(res1.propositionId);
+
+    // 3. Re-resolving exact identical identity to propId1 correctly reuses it
+    const res3 = await propService.resolveOrCreateProposition({
+      propositionId: uid('prop-29-reuse'),
+      tenantId: tenantA,
+      propositionType: 'FACTUAL',
+      canonicalMeaning: sharedMeaning,
+      subject: 'Subject 29',
+      predicate: 'hasProperty',
+      object: 'Value 29',
+      qualifiers: 'qualifier A',
+    });
+    expect(res3.outcome).toBe('REUSE_EXISTING');
+    expect(res3.propositionId).toBe(propId1);
+
+    // 4. Verify both propositions coexist safely in PostgreSQL
+    const rows = await sql`
+      SELECT proposition_id, qualifiers FROM propositions
+      WHERE proposition_id IN (${propId1}, ${propId2})
+    `;
+    expect(rows.length).toBe(2);
   });
 
   it('Vector 30: inaccessible cross-tenant Proposition reused & existence leak', async () => {
@@ -3368,6 +3504,140 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
     }
     expect(errMissing).toBeDefined();
     expect(errMissing.code).toBe('UNAVAILABLE_EVIDENCE_IN_DERIVATION');
+
+    // 4. SourceArtifact registry payload_state becomes REDACTED while object remains AVAILABLE -> future derivation rejected
+    const objId2 = uid('obj-66-avail2');
+    const srcId2 = uid('src-66-avail2');
+    const evId2 = uid('ev-66-avail2');
+    const linkId2 = uid('link-66-avail2');
+    const assId2 = uid('ass-66-avail2');
+
+    const rawUniqueText2 = uid('Source content 66-2');
+    const contentBytes2 = Buffer.from(rawUniqueText2, 'utf-8');
+    const hash662 = crypto.createHash('sha256').update(contentBytes2).digest('hex');
+
+    await sql`
+      INSERT INTO object_registry (object_id, tenant_id, content_hash, object_key, size_bytes, media_type, state)
+      VALUES (${objId2}, ${tenantA}, ${hash662}, ${uid('k-66-2')}, 100, 'text/plain', 'AVAILABLE')
+    `;
+    const defaultStore = getDefaultObjectStore();
+    await defaultStore.put(contentBytes2, 'text/plain');
+    await fs.writeFile(path.resolve((defaultStore as any).basePath, objId2), contentBytes2);
+
+    await evService.ingestSourceArtifact({
+      sourceId: srcId2,
+      tenantId: tenantA,
+      sourceType: 'WEB_PAGE',
+      publisher: 'Publisher',
+      author: 'Author',
+      jurisdiction: 'US',
+      sourceVersion: '1.0',
+      retrievedAt: new Date(),
+      contentHash: hash662,
+      snapshotReference: objId2,
+      rightsPolicyId: rightsPolicyId,
+      dataScope: 'GLOBAL_PUBLIC',
+      rawText: rawUniqueText2,
+    });
+    await evService.extractEvidenceItem({
+      evidenceId: evId2,
+      tenantId: tenantA,
+      originType: 'SOURCE_ARTIFACT',
+      originId: srcId2,
+      statement: 'Evidence statement 66-2',
+      statementType: 'ASSERTION',
+      assertionMethod: 'EXTRACTED',
+      evidenceDomain: 'ACADEMIC_STUDY',
+      studyDesign: 'OBSERVATIONAL',
+      causalIdentification: 'NONE',
+      mechanismSupport: 'NONE',
+      validFrom: new Date('2026-01-01T00:00:00Z'),
+      limitations: 'None',
+      sourceContent: rawUniqueText2,
+    });
+    await evService.linkEvidenceToProposition({
+      linkId: linkId2,
+      tenantId: tenantA,
+      evidenceId: evId2,
+      propositionId: propId,
+    });
+    await evService.createEvidenceAssessment({
+      assessmentId: assId2,
+      tenantId: tenantA,
+      linkId: linkId2,
+      compatibilityStatus: 'COMPATIBLE',
+      relationship: 'SUPPORTS',
+      assessorType: 'AUTOMATED_PIPELINE',
+      evaluatorStableId: evalStable,
+      evaluatorRevisionId: evalRevId,
+    });
+
+    // Object is still AVAILABLE, but SourceArtifact ImmutableEntityRegistry becomes REDACTED
+    await sql.begin(async (sqlTx) => {
+      await sqlTx`SET LOCAL session_replication_role = 'replica'`;
+      await sqlTx`
+        UPDATE immutable_entity_registry
+        SET payload_state = 'REDACTED'
+        WHERE entity_type = 'SourceArtifact' AND entity_id = ${srcId2}
+      `;
+    });
+
+    let errRedactedSource: any;
+    try {
+      await epiService.appendEpistemicState({
+        epistemicStateId: uid('epi-66-redacted'),
+        propositionId: propId,
+        assessmentIds: [assId2],
+        derivationMethod: 'RULE_BASED',
+        derivationEntityType: 'EvaluatorConfig',
+        derivationStableId: evalStable,
+        derivationRevisionId: evalRevId,
+        validFrom: new Date('2026-02-01T00:00:00Z'),
+        knownFrom: new Date('2026-02-01T00:00:00Z'),
+        tenantId: tenantA,
+      });
+    } catch (e) {
+      errRedactedSource = e;
+    }
+    expect(errRedactedSource).toBeDefined();
+    expect(errRedactedSource.code).toBe('UNAVAILABLE_EVIDENCE_IN_DERIVATION');
+
+    // 5. SourceArtifact tombstone inserted -> future derivation rejected
+    await sql.begin(async (sqlTx) => {
+      await sqlTx`SET LOCAL session_replication_role = 'replica'`;
+      await sqlTx`
+        UPDATE immutable_entity_registry
+        SET payload_state = 'AVAILABLE'
+        WHERE entity_type = 'SourceArtifact' AND entity_id = ${srcId2}
+      `;
+    });
+    await sql`
+      INSERT INTO deleted_target_tombstones (
+        entity_type, entity_id, tenant_id, deletion_reason_code, payload_retained, deleted_at
+      ) VALUES (
+        'SourceArtifact', ${srcId2}, ${tenantA}, 'USER_REQUESTED_DELETION', false, now()
+      )
+    `;
+
+    let errTombstone: any;
+    try {
+      await epiService.appendEpistemicState({
+        epistemicStateId: uid('epi-66-tombstone'),
+        propositionId: propId,
+        assessmentIds: [assId2],
+        derivationMethod: 'RULE_BASED',
+        derivationEntityType: 'EvaluatorConfig',
+        derivationStableId: evalStable,
+        derivationRevisionId: evalRevId,
+        validFrom: new Date('2026-02-01T00:00:00Z'),
+        knownFrom: new Date('2026-02-01T00:00:00Z'),
+        tenantId: tenantA,
+      });
+    } catch (e) {
+      errTombstone = e;
+    }
+    expect(errTombstone).toBeDefined();
+    expect(errTombstone.code).toBe('UNAVAILABLE_EVIDENCE_IN_DERIVATION');
   });
 
   it('Vector 67: deletion causes fabricated replacement evidence', async () => {
@@ -3614,18 +3884,18 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
     expect(err2).toBeDefined();
     expect(err2.code).toBe('STRATEGY_KNOWLEDGE_GATE_BLOCKED');
 
-    // Attack 3: Canonical blocking knowledge gap exists in DB, caller passes activeKnowledgeGaps: [] -> gate still blocks
-    const gapId70 = uid('gap-70-db');
+    // Attack 3: Canonical blocking knowledge gap G1 exists in DB, caller passes activeKnowledgeGaps: [] -> gate still blocks
+    const gapId70G1 = uid('gap-70-g1');
     await sql`
       INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id)
-      VALUES ('KnowledgeGap', ${gapId70}, ${tenantA})
+      VALUES ('KnowledgeGap', ${gapId70G1}, ${tenantA})
     `;
     await sql`
       INSERT INTO knowledge_gaps (
         gap_id, tenant_id, task_revision_id, question, decision_relevance,
         blocking, researchable, user_resolvable, assumption_allowed, risk_if_wrong, status
       ) VALUES (
-        ${gapId70}, ${tenantA}, ${taskRev70}, 'Blocking gap in DB', 'High',
+        ${gapId70G1}, ${tenantA}, ${taskRev70}, 'Blocking gap G1 in DB', 'High',
         true, true, true, false, 'High', 'BLOCKING'
       )
     `;
@@ -3644,6 +3914,103 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
     }
     expect(err3).toBeDefined();
     expect(err3.code).toBe('UNKNOWN_PRESERVATION_GATE_BLOCKED');
+
+    // Attack 3b: G2 RESOLVED_BY_RESEARCH supersedes G1 -> deterministic terminal resolution treats G2 as final state
+    const gapId70G2 = uid('gap-70-g2');
+    await sql`
+      INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id)
+      VALUES ('KnowledgeGap', ${gapId70G2}, ${tenantA})
+    `;
+    await sql`
+      INSERT INTO knowledge_gaps (
+        gap_id, supersedes_gap_id, tenant_id, task_revision_id, question, decision_relevance,
+        blocking, researchable, user_resolvable, assumption_allowed, risk_if_wrong, status
+      ) VALUES (
+        ${gapId70G2}, ${gapId70G1}, ${tenantA}, ${taskRev70}, 'Resolved gap G2', 'High',
+        false, true, true, false, 'High', 'RESOLVED_BY_RESEARCH'
+      )
+    `;
+
+    // Now gate allows progression because final terminal gap G2 is resolved, despite historical G1 being BLOCKING
+    const resResolvedGap = await strategyGateService.evaluateKnowledgeGate({
+      strategyId: stratId,
+      tenantId: tenantA,
+      knowledgeBoundaryTime: new Date('2026-05-01T00:00:00Z'),
+      targetValidTime: new Date('2026-01-01T00:00:00Z'),
+    });
+    expect(resResolvedGap.canProceed).toBe(true);
+
+    // Attack 3c: Branching gap lineage (G3 also supersedes G1) fails closed
+    const gapId70G3 = uid('gap-70-g3');
+    await sql`
+      INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id)
+      VALUES ('KnowledgeGap', ${gapId70G3}, ${tenantA})
+    `;
+    await sql`
+      INSERT INTO knowledge_gaps (
+        gap_id, supersedes_gap_id, tenant_id, task_revision_id, question, decision_relevance,
+        blocking, researchable, user_resolvable, assumption_allowed, risk_if_wrong, status
+      ) VALUES (
+        ${gapId70G3}, ${gapId70G1}, ${tenantA}, ${taskRev70}, 'Branching gap G3', 'High',
+        false, true, true, false, 'High', 'RESOLVED_BY_USER'
+      )
+    `;
+    let errBranch: any;
+    try {
+      await strategyGateService.evaluateKnowledgeGate({
+        strategyId: stratId,
+        tenantId: tenantA,
+        knowledgeBoundaryTime: new Date('2026-05-01T00:00:00Z'),
+        targetValidTime: new Date('2026-01-01T00:00:00Z'),
+      });
+    } catch (e) {
+      errBranch = e;
+    }
+    expect(errBranch).toBeDefined();
+    expect(errBranch.code).toBe('KNOWLEDGE_GAP_LINEAGE_INVALID');
+
+    // Clean up branching gap G3
+    await sql.begin(async (sqlTx) => {
+      await sqlTx`SET LOCAL session_replication_role = 'replica'`;
+      await sqlTx`DELETE FROM knowledge_gaps WHERE gap_id = ${gapId70G3}`;
+      await sqlTx`DELETE FROM immutable_entity_registry WHERE entity_id = ${gapId70G3}`;
+    });
+
+    // Attack 3d: Cyclic gap lineage (G4 -> G5 -> G4) fails closed
+    const gapId70G4 = uid('gap-70-g4');
+    const gapId70G5 = uid('gap-70-g5');
+    await sql`
+      INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id)
+      VALUES ('KnowledgeGap', ${gapId70G4}, ${tenantA}), ('KnowledgeGap', ${gapId70G5}, ${tenantA})
+    `;
+    await sql`
+      INSERT INTO knowledge_gaps (
+        gap_id, supersedes_gap_id, tenant_id, task_revision_id, question, decision_relevance,
+        blocking, researchable, user_resolvable, assumption_allowed, risk_if_wrong, status
+      ) VALUES 
+        (${gapId70G4}, ${gapId70G5}, ${tenantA}, ${taskRev70}, 'Cycle G4', 'High', false, true, true, false, 'High', 'RESOLVED_BY_RESEARCH'),
+        (${gapId70G5}, ${gapId70G4}, ${tenantA}, ${taskRev70}, 'Cycle G5', 'High', false, true, true, false, 'High', 'RESOLVED_BY_RESEARCH')
+    `;
+    let errCycle: any;
+    try {
+      await strategyGateService.evaluateKnowledgeGate({
+        strategyId: stratId,
+        tenantId: tenantA,
+        knowledgeBoundaryTime: new Date('2026-05-01T00:00:00Z'),
+        targetValidTime: new Date('2026-01-01T00:00:00Z'),
+      });
+    } catch (e) {
+      errCycle = e;
+    }
+    expect(errCycle).toBeDefined();
+    expect(errCycle.code).toBe('KNOWLEDGE_GAP_LINEAGE_INVALID');
+
+    // Clean up cyclic gaps G4 & G5
+    await sql.begin(async (sqlTx) => {
+      await sqlTx`SET LOCAL session_replication_role = 'replica'`;
+      await sqlTx`DELETE FROM knowledge_gaps WHERE gap_id IN (${gapId70G4}, ${gapId70G5})`;
+      await sqlTx`DELETE FROM immutable_entity_registry WHERE entity_id IN (${gapId70G4}, ${gapId70G5})`;
+    });
 
     // Attack 4: Workspace-private StrategyHypothesis evaluated with caller workspace omitted
     const taskRev70b = uid('task-rev-70b');
@@ -4065,6 +4432,98 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
     }
     expect(errStale).toBeDefined();
     expect(errStale.code).toBe('STALE_WORKER_COMMIT_REJECTED');
+
+    // 7. Stale worker attempts to invoke generic/base APIs directly without cycle metadata or capability -> WRITE_AUTHORITY_REQUIRED
+    let errBaseAss: any;
+    try {
+      await baseEvService.createEvidenceAssessment({
+        assessmentId: uid('ass-73-base-stale'),
+        tenantId: tenantA,
+        linkId,
+        compatibilityStatus: 'COMPATIBLE',
+        relationship: 'SUPPORTS',
+        assessorType: 'AUTOMATED_PIPELINE',
+        evaluatorStableId: evalStable,
+        evaluatorRevisionId: evalRevId,
+      });
+    } catch (e) {
+      errBaseAss = e;
+    }
+    expect(errBaseAss).toBeDefined();
+    expect(errBaseAss.code).toBe('WRITE_AUTHORITY_REQUIRED');
+
+    let errBaseProp: any;
+    try {
+      await basePropService.resolveOrCreateProposition({
+        propositionId: uid('prop-73-base-stale'),
+        tenantId: tenantA,
+        propositionType: 'FACTUAL',
+        canonicalMeaning: uid('Prop 73 Base Stale'),
+        subject: 'S',
+        predicate: 'P',
+        object: 'O',
+      });
+    } catch (e) {
+      errBaseProp = e;
+    }
+    expect(errBaseProp).toBeDefined();
+    expect(errBaseProp.code).toBe('WRITE_AUTHORITY_REQUIRED');
+
+    let errBaseEv: any;
+    try {
+      await baseEvService.extractEvidenceItem({
+        evidenceId: uid('ev-73-base-stale'),
+        tenantId: tenantA,
+        originType: 'SOURCE_ARTIFACT',
+        originId: srcId,
+        statement: 'Statement Base Stale',
+        statementType: 'ASSERTION',
+        assertionMethod: 'EXTRACTED',
+        evidenceDomain: 'ACADEMIC_STUDY',
+        studyDesign: 'OBSERVATIONAL',
+        causalIdentification: 'NONE',
+        mechanismSupport: 'NONE',
+        validFrom: new Date(),
+        limitations: 'None',
+      });
+    } catch (e) {
+      errBaseEv = e;
+    }
+    expect(errBaseEv).toBeDefined();
+    expect(errBaseEv.code).toBe('WRITE_AUTHORITY_REQUIRED');
+
+    let errBaseLink: any;
+    try {
+      await baseEvService.linkEvidenceToProposition({
+        linkId: uid('link-73-base-stale'),
+        evidenceId: evId,
+        propositionId: propId,
+        tenantId: tenantA,
+      });
+    } catch (e) {
+      errBaseLink = e;
+    }
+    expect(errBaseLink).toBeDefined();
+    expect(errBaseLink.code).toBe('WRITE_AUTHORITY_REQUIRED');
+
+    let errBaseEpi: any;
+    try {
+      await baseEpiService.appendEpistemicState({
+        epistemicStateId: uid('epi-73-base-stale'),
+        propositionId: propId,
+        derivationMethod: 'RULE_BASED',
+        derivationEntityType: 'EvaluatorConfig',
+        derivationStableId: evalStable,
+        derivationRevisionId: evalRevId,
+        validFrom: new Date(),
+        knownFrom: new Date(),
+        tenantId: tenantA,
+      });
+    } catch (e) {
+      errBaseEpi = e;
+    }
+    expect(errBaseEpi).toBeDefined();
+    expect(errBaseEpi.code).toBe('WRITE_AUTHORITY_REQUIRED');
   });
 
   it('Vector 74: stale worker creates EpistemicState after cancellation', async () => {
@@ -4211,13 +4670,218 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
       tenantId: tenantA,
     });
 
-    const replay = await epiService.getEpistemicStateReplay(epiId);
+    // 1. Knowing an ID never grants access: omitted authorization context rejected
+    let errNoAuth: any;
+    try {
+      await baseEpiService.getEpistemicStateReplay(epiId, undefined as any);
+    } catch (e) {
+      errNoAuth = e;
+    }
+    expect(errNoAuth).toBeDefined();
+    expect(errNoAuth.code).toBe('AUTHORIZATION_REQUIRED');
+
+    // 2. Cross-tenant attack: Tenant B attempts to replay Tenant A state by ID -> reject
+    let errCrossTenant: any;
+    try {
+      await baseEpiService.getEpistemicStateReplay(epiId, { tenantId: tenantB });
+    } catch (e) {
+      errCrossTenant = e;
+    }
+    expect(errCrossTenant).toBeDefined();
+    expect(errCrossTenant.code).toBe('TENANT_ISOLATION_VIOLATION');
+
+    // 3. Authorized tenant replay succeeds
+    const replay = await baseEpiService.getEpistemicStateReplay(epiId, { tenantId: tenantA });
     expect(replay.epistemicState.epistemic_state_id).toBe(epiId);
     expect(replay.proposition.proposition_id).toBe(propId);
     expect(replay.assessments.length).toBe(1);
     expect(replay.assessments[0].assessment_id).toBe(assId);
     expect(replay.assessments[0].evidence_id).toBe(evId);
     expect(replay.assessments[0].statement).toBe('Historical claim');
+
+    // 4. Workspace-private EpistemicState requires matching workspace authorization
+    const propWsId = uid('prop-75-ws');
+    await propService.resolveOrCreateProposition({
+      propositionId: propWsId,
+      tenantId: tenantA,
+      workspaceId: 'workspace-alpha',
+      propositionType: 'FACTUAL',
+      canonicalMeaning: uid('Prop 75 WS'),
+      subject: 'S',
+      predicate: 'P',
+      object: 'O',
+    });
+
+    const epiWsId = uid('epi-75-ws');
+    await epiService.appendEpistemicState({
+      epistemicStateId: epiWsId,
+      propositionId: propWsId,
+      workspaceId: 'workspace-alpha',
+      supportStatus: 'UNKNOWN',
+      causalStatus: 'NOT_APPLICABLE',
+      uncertainty: 'None',
+      derivationMethod: 'RULE_BASED',
+      derivationEntityType: 'EvaluatorConfig',
+      derivationStableId: evalStable,
+      derivationRevisionId: evalRevId,
+      validFrom: new Date(),
+      knownFrom: new Date(),
+      tenantId: tenantA,
+    });
+
+    // Caller from wrong workspace -> reject
+    let errWrongWs: any;
+    try {
+      await baseEpiService.getEpistemicStateReplay(epiWsId, { tenantId: tenantA, workspaceId: 'workspace-beta' });
+    } catch (e) {
+      errWrongWs = e;
+    }
+    expect(errWrongWs).toBeDefined();
+    expect(errWrongWs.code).toBe('WORKSPACE_ISOLATION_VIOLATION');
+
+    // Caller omitting workspace for workspace-private state -> reject
+    let errOmitWs: any;
+    try {
+      await baseEpiService.getEpistemicStateReplay(epiWsId, { tenantId: tenantA });
+    } catch (e) {
+      errOmitWs = e;
+    }
+    expect(errOmitWs).toBeDefined();
+    expect(errOmitWs.code).toBe('WORKSPACE_ISOLATION_VIOLATION');
+
+    // Authorized workspace caller succeeds
+    const replayWs = await baseEpiService.getEpistemicStateReplay(epiWsId, {
+      tenantId: tenantA,
+      workspaceId: 'workspace-alpha',
+    });
+    expect(replayWs.epistemicState.epistemic_state_id).toBe(epiWsId);
+
+    // 5. Public Proposition does not expose inaccessible private assessments/evidence
+    const propMixedId = uid('prop-75-mixed');
+    await propService.resolveOrCreateProposition({
+      propositionId: propMixedId,
+      tenantId: tenantA,
+      propositionType: 'FACTUAL',
+      canonicalMeaning: uid('Prop 75 Mixed'),
+      subject: 'S',
+      predicate: 'P',
+      object: 'O',
+    });
+
+    const linkMixedPubId = uid('link-75-mixed-pub');
+    await evService.linkEvidenceToProposition({
+      linkId: linkMixedPubId,
+      tenantId: tenantA,
+      evidenceId: evId,
+      propositionId: propMixedId,
+    });
+    const assMixedPubId = uid('ass-75-mixed-pub');
+    await evService.createEvidenceAssessment({
+      assessmentId: assMixedPubId,
+      tenantId: tenantA,
+      linkId: linkMixedPubId,
+      compatibilityStatus: 'COMPATIBLE',
+      relationship: 'SUPPORTS',
+      assessor: 'Evaluator',
+      assessmentMethod: 'RULE_BASED',
+      authority: 'HIGH',
+      methodologicalQuality: 'HIGH',
+      directness: 'DIRECT',
+      applicability: 'HIGH',
+      populationMatch: 'EXACT',
+      contextMatch: 'EXACT',
+      freshness: 'FRESH',
+      independence: 'INDEPENDENT',
+      precision: 'EXACT',
+      limitations: 'None',
+      uncertainty: 'None',
+      assessedAt: new Date(),
+    });
+
+    const evWsId = uid('ev-75-ws-priv');
+    await evService.extractEvidenceItem({
+      evidenceId: evWsId,
+      tenantId: tenantA,
+      workspaceId: 'workspace-alpha',
+      originType: 'SOURCE_ARTIFACT',
+      originId: srcId,
+      statement: 'Private internal evidence',
+      statementType: 'ASSERTION',
+      assertionMethod: 'EXTRACTED',
+      evidenceDomain: 'ACADEMIC_STUDY',
+      studyDesign: 'NONE',
+      causalIdentification: 'NONE',
+      mechanismSupport: 'NONE',
+      validFrom: new Date(),
+      limitations: 'None',
+    });
+    const linkWsId = uid('link-75-ws-priv');
+    await evService.linkEvidenceToProposition({
+      linkId: linkWsId,
+      tenantId: tenantA,
+      workspaceId: 'workspace-alpha',
+      evidenceId: evWsId,
+      propositionId: propMixedId,
+    });
+    const assWsId = uid('ass-75-ws-priv');
+    await evService.createEvidenceAssessment({
+      assessmentId: assWsId,
+      tenantId: tenantA,
+      workspaceId: 'workspace-alpha',
+      linkId: linkWsId,
+      compatibilityStatus: 'COMPATIBLE',
+      relationship: 'SUPPORTS',
+      assessor: 'Evaluator',
+      assessmentMethod: 'RULE_BASED',
+      authority: 'HIGH',
+      methodologicalQuality: 'HIGH',
+      directness: 'DIRECT',
+      applicability: 'HIGH',
+      populationMatch: 'EXACT',
+      contextMatch: 'EXACT',
+      freshness: 'FRESH',
+      independence: 'INDEPENDENT',
+      precision: 'EXACT',
+      limitations: 'None',
+      uncertainty: 'None',
+      assessedAt: new Date(),
+    });
+
+    const epiMixedId = uid('epi-75-mixed');
+    await epiService.appendEpistemicState({
+      epistemicStateId: epiMixedId,
+      propositionId: propMixedId,
+      supportStatus: 'SUPPORTED',
+      causalStatus: 'NOT_APPLICABLE',
+      uncertainty: 'None',
+      derivationMethod: 'RULE_BASED',
+      derivationEntityType: 'EvaluatorConfig',
+      derivationStableId: evalStable,
+      derivationRevisionId: evalRevId,
+      validFrom: new Date(),
+      knownFrom: new Date(),
+      assessmentIds: [assMixedPubId],
+      tenantId: tenantA,
+    });
+
+    // Simulate public proposition state referencing private assessment
+    await sql`
+      INSERT INTO epistemic_state_assessments (epistemic_state_id, assessment_id)
+      VALUES (${epiMixedId}, ${assWsId})
+    `;
+
+    // Caller without workspace access sees only public assessment assMixedPubId; private assWsId is NOT exposed
+    const replayPublic = await baseEpiService.getEpistemicStateReplay(epiMixedId, { tenantId: tenantA });
+    expect(replayPublic.assessments.length).toBe(1);
+    expect(replayPublic.assessments[0].assessment_id).toBe(assMixedPubId);
+    expect(replayPublic.assessments.some((a: any) => a.assessment_id === assWsId)).toBe(false);
+
+    // Authorized workspace caller sees both
+    const replayAlpha = await baseEpiService.getEpistemicStateReplay(epiMixedId, {
+      tenantId: tenantA,
+      workspaceId: 'workspace-alpha',
+    });
+    expect(replayAlpha.assessments.length).toBe(2);
   });
 
   it('Vector 76: runtime Evidence learning directly activates Control Plane change', async () => {

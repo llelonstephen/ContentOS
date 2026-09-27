@@ -19,6 +19,9 @@ export interface StageFencingContext {
 
 export type WriteMode = 'STANDALONE' | 'DECISION_CYCLE';
 
+export const TRUSTED_STANDALONE_CAPABILITY: unique symbol = Symbol('TRUSTED_STANDALONE_CAPABILITY');
+export type TrustedWriteCapability = typeof TRUSTED_STANDALONE_CAPABILITY;
+
 export async function verifyStageFencing(
   sqlTx: any,
   params: {
@@ -27,28 +30,37 @@ export async function verifyStageFencing(
     workspaceId?: string | null;
     requireCycleContext?: boolean;
     writeMode?: WriteMode;
+    trustedCapability?: TrustedWriteCapability;
   },
 ): Promise<void> {
-  const { fencingContext, tenantId, workspaceId, requireCycleContext, writeMode } = params;
+  const { fencingContext, tenantId, workspaceId, requireCycleContext, writeMode, trustedCapability } = params;
 
-  const isCycleMode = writeMode === 'DECISION_CYCLE' || requireCycleContext;
+  const hasCycleContext = !!fencingContext?.decisionCycleId;
+  const isCycleMode = writeMode === 'DECISION_CYCLE' || requireCycleContext || hasCycleContext;
 
-  if (isCycleMode && (!fencingContext || !fencingContext.decisionCycleId)) {
-    throw new RegistryValidationError(
-      'DECISION_CYCLE_CONTEXT_REQUIRED',
-      'Canonical decision-cycle commit requires an explicit DecisionCycle context. Omitting stage authorization fails closed.',
-    );
-  }
-
-  if (writeMode === 'STANDALONE' && fencingContext?.decisionCycleId) {
+  if (writeMode === 'STANDALONE' && hasCycleContext) {
     throw new RegistryValidationError(
       'DECISION_CYCLE_CONTEXT_INVALID',
       'Standalone write mode cannot attach to a DecisionCycle. Use decision-cycle commit boundary.',
     );
   }
 
-  if (!fencingContext || !fencingContext.decisionCycleId) {
-    // Non-cycle direct ingestion path (e.g. standalone origin registration outside a run)
+  if (!isCycleMode && trustedCapability !== TRUSTED_STANDALONE_CAPABILITY) {
+    throw new RegistryValidationError(
+      'WRITE_AUTHORITY_REQUIRED',
+      'Direct invocation of canonical knowledge persistence without verified write authority is forbidden. Decision-cycle writes require DecisionCycle and StageExecution fencing context; standalone writes require trusted StandaloneIngestionAdapter capability.',
+    );
+  }
+
+  if (isCycleMode && !hasCycleContext) {
+    throw new RegistryValidationError(
+      'DECISION_CYCLE_CONTEXT_REQUIRED',
+      'Canonical decision-cycle commit requires an explicit DecisionCycle context. Omitting stage authorization fails closed.',
+    );
+  }
+
+  if (!hasCycleContext) {
+    // Verified standalone write path under trusted capability
     return;
   }
 

@@ -22,13 +22,20 @@ import {
   validateCausalSupportGuard,
   type AssessmentForDerivation,
 } from '../../../domain/knowledge/epistemic-derivation.js';
-import type {
-  CausalStatus,
-  PropositionType,
-  EvidenceCompatibilityStatus,
-  EvidenceRelationship,
+import {
+  EPISTEMIC_SUPPORT_STATUSES,
+  CAUSAL_STATUSES,
+  type CausalStatus,
+  type PropositionType,
+  type EvidenceCompatibilityStatus,
+  type EvidenceRelationship,
 } from '../../../domain/knowledge/types.js';
-import { verifyStageFencing, type StageFencingContext, type WriteMode } from './stage-fencing-coordinator.js';
+import {
+  verifyStageFencing,
+  type StageFencingContext,
+  type WriteMode,
+  type TrustedWriteCapability,
+} from './stage-fencing-coordinator.js';
 import { RegistryValidationError } from '../../../domain/services/registry-validator.js';
 
 export interface AppendEpistemicStateParams {
@@ -52,6 +59,13 @@ export interface AppendEpistemicStateParams {
   runConfigId?: string | null;
   fencingContext?: StageFencingContext | null;
   writeMode?: WriteMode;
+  trustedCapability?: TrustedWriteCapability;
+}
+
+export interface EpistemicReplayAuthContext {
+  tenantId: string;
+  workspaceId?: string | null;
+  dataScope?: 'TENANT' | 'WORKSPACE' | 'SHARED' | 'PUBLIC';
 }
 
 export type ReplayabilityStatus =
@@ -88,12 +102,27 @@ export class EpistemicPersistenceService {
       runConfigId,
       fencingContext,
       writeMode,
+      trustedCapability,
     } = params;
 
     if (supersedesEpistemicStateId && supersedesEpistemicStateId === epistemicStateId) {
       throw new RegistryValidationError(
         'EPISTEMIC_CYCLE',
         `EpistemicStateVersion '${epistemicStateId}' cannot supersede itself.`,
+      );
+    }
+
+    // Validate frozen vocabulary for caller-supplied statuses
+    if (params.supportStatus && !EPISTEMIC_SUPPORT_STATUSES.includes(params.supportStatus as any)) {
+      throw new RegistryValidationError(
+        'INVALID_EPISTEMIC_STATUS',
+        `Invalid supportStatus '${params.supportStatus}'. Must be one of: ${EPISTEMIC_SUPPORT_STATUSES.join(', ')}.`,
+      );
+    }
+    if (params.causalStatus && !CAUSAL_STATUSES.includes(params.causalStatus as any)) {
+      throw new RegistryValidationError(
+        'INVALID_CAUSAL_STATUS',
+        `Invalid causalStatus '${params.causalStatus}'. Must be one of: ${CAUSAL_STATUSES.join(', ')}.`,
       );
     }
 
@@ -134,6 +163,7 @@ export class EpistemicPersistenceService {
         workspaceId,
         requireCycleContext: isCycle,
         writeMode,
+        trustedCapability,
       });
 
       // 1. Verify target proposition exists and belongs to tenant
@@ -300,7 +330,7 @@ export class EpistemicPersistenceService {
           );
         }
 
-        // SPEC02 Retention boundary check: if underlying payload is unavailable or deleted, reject new derivation
+        // SPEC02 Retention & deletion boundary check: check ObjectRegistry, IER, and tombstones
         if (row.origin_type === 'SOURCE_ARTIFACT') {
           const [source] = await sqlTx`
             SELECT sa.snapshot_reference, obr.state as payload_state
@@ -308,10 +338,30 @@ export class EpistemicPersistenceService {
             LEFT JOIN object_registry obr ON sa.snapshot_reference = obr.object_id
             WHERE sa.source_id = ${row.origin_id}
           `;
-          if (!source || !source.payload_state || source.payload_state === 'DELETED' || source.payload_state === 'GC_CLAIMED' || source.payload_state !== 'AVAILABLE') {
+          const [tombstone] = await sqlTx`
+            SELECT deletion_reason_code FROM deleted_target_tombstones
+            WHERE (entity_type = 'Object' AND entity_id = ${source?.snapshot_reference ?? ''})
+               OR (entity_type = 'SourceArtifact' AND entity_id = ${row.origin_id})
+          `;
+          const [ier] = await sqlTx`
+            SELECT payload_state FROM immutable_entity_registry
+            WHERE entity_type = 'SourceArtifact' AND entity_id = ${row.origin_id}
+          `;
+
+          if (
+            !source ||
+            !source.payload_state ||
+            source.payload_state === 'DELETED' ||
+            source.payload_state === 'GC_CLAIMED' ||
+            source.payload_state !== 'AVAILABLE' ||
+            ier?.payload_state === 'REDACTED' ||
+            ier?.payload_state === 'DELETED' ||
+            ier?.payload_state !== 'AVAILABLE' ||
+            Boolean(tombstone)
+          ) {
             throw new RegistryValidationError(
               'UNAVAILABLE_EVIDENCE_IN_DERIVATION',
-              `EvidenceItem '${row.evidence_id}' payload is unavailable (state: '${source?.payload_state ?? 'MISSING'}'). Unavailable prohibited evidence cannot contribute to new epistemic derivations.`,
+              `EvidenceItem '${row.evidence_id}' source payload is unavailable, redacted, deleted, or tombstoned (object: '${source?.payload_state ?? 'MISSING'}', IER: '${ier?.payload_state ?? 'MISSING'}', tombstone: ${Boolean(tombstone)}). Unavailable prohibited evidence cannot contribute to new epistemic derivations.`,
             );
           }
         }
@@ -431,7 +481,11 @@ export class EpistemicPersistenceService {
       let finalCausalStatus = prop.proposition_type === 'CAUSAL' ? 'UNKNOWN' : 'NOT_APPLICABLE';
       let finalUncertainty = 'NONE';
 
-      if (derivationEntityType === 'EvaluatorConfig' || derivationMethod === 'RULE_BASED' || derivationMethod === 'BAYESIAN') {
+      if (
+        derivationEntityType === 'EvaluatorConfig' ||
+        derivationMethod === 'RULE_BASED' ||
+        derivationMethod === 'BAYESIAN'
+      ) {
         const derived = deriveEpistemicState({
           propositionId,
           propositionType: prop.proposition_type as PropositionType,
@@ -475,7 +529,7 @@ export class EpistemicPersistenceService {
         finalUncertainty = derived.uncertainty;
       } else if (derivationMethod === 'EXPERIMENTAL' && derivationEntityType === 'ResearchTrace') {
         const [trace] = await sqlTx`
-          SELECT research_trace_id, tenant_id FROM research_traces WHERE research_trace_id = ${derivationStableId}
+          SELECT research_trace_id, tenant_id, outcome FROM research_traces WHERE research_trace_id = ${derivationStableId}
         `;
         if (trace && trace.tenant_id !== tenantId) {
           throw new RegistryValidationError(
@@ -483,13 +537,75 @@ export class EpistemicPersistenceService {
             `ResearchTrace belongs to tenant '${trace.tenant_id}', not '${tenantId}'.`,
           );
         }
-        finalSupportStatus = params.supportStatus ?? 'STRONGLY_SUPPORTED';
-        finalCausalStatus = params.causalStatus ?? 'DIRECT_OBSERVATION';
-        finalUncertainty = params.uncertainty ?? 'LOW';
+
+        // Mechanical derivation from actual assessments under pinned revision
+        const derived = deriveEpistemicState({
+          propositionId,
+          propositionType: prop.proposition_type as PropositionType,
+          assessments: assessmentsForDerivation,
+          derivationRevisionRef: {
+            entityType: derivationEntityType as any,
+            stableId: derivationStableId,
+            revisionId: derivationRevisionId,
+          },
+          validFrom,
+          validUntilIfKnown,
+          knownFrom,
+        });
+
+        // If research trace found no evidence or incomplete, support cannot be SUPPORTED
+        if (trace && (trace.outcome === 'NO_EVIDENCE_FOUND' || trace.outcome === 'SEARCH_FAILED')) {
+          if (params.supportStatus && params.supportStatus !== 'UNKNOWN' && params.supportStatus !== 'INSUFFICIENT') {
+            throw new RegistryValidationError(
+              'DERIVED_STATE_MISMATCH',
+              `ResearchTrace outcome '${trace.outcome}' cannot produce supportStatus '${params.supportStatus}'. Adequate evidence is required.`,
+            );
+          }
+        }
+
+        // Caller cannot supply arbitrary assertions that differ from mechanical derivation
+        if (params.supportStatus && params.supportStatus !== derived.supportStatus) {
+          throw new RegistryValidationError(
+            'DERIVED_STATE_MISMATCH',
+            `Caller-supplied supportStatus '${params.supportStatus}' does not match mechanically derived status '${derived.supportStatus}'.`,
+          );
+        }
+        if (params.causalStatus && params.causalStatus !== derived.causalStatus) {
+          throw new RegistryValidationError(
+            'DERIVED_STATE_MISMATCH',
+            `Caller-supplied causalStatus '${params.causalStatus}' does not match mechanically derived causalStatus '${derived.causalStatus}'.`,
+          );
+        }
+        const normCallerUncertainty = params.uncertainty?.trim().toUpperCase();
+        const normDerivedUncertainty = derived.uncertainty?.trim().toUpperCase();
+        if (normCallerUncertainty && normCallerUncertainty !== normDerivedUncertainty) {
+          throw new RegistryValidationError(
+            'DERIVED_STATE_MISMATCH',
+            `Caller-supplied uncertainty '${params.uncertainty}' does not match mechanically derived uncertainty '${derived.uncertainty}'.`,
+          );
+        }
+
+        finalSupportStatus = derived.supportStatus;
+        finalCausalStatus = derived.causalStatus;
+        finalUncertainty = derived.uncertainty;
       } else {
         throw new RegistryValidationError(
           'CANONICAL_DERIVATION_UNSUPPORTED',
           `Derivation method '${derivationMethod}' with entity '${derivationEntityType}' cannot produce canonical epistemic state without an authoritative validator.`,
+        );
+      }
+
+      // Enforce frozen vocabulary preservation
+      if (!EPISTEMIC_SUPPORT_STATUSES.includes(finalSupportStatus as any)) {
+        throw new RegistryValidationError(
+          'INVALID_EPISTEMIC_STATUS',
+          `Derived supportStatus '${finalSupportStatus}' is not a canonical frozen SPEC03 status.`,
+        );
+      }
+      if (!CAUSAL_STATUSES.includes(finalCausalStatus as any)) {
+        throw new RegistryValidationError(
+          'INVALID_CAUSAL_STATUS',
+          `Derived causalStatus '${finalCausalStatus}' is not a canonical frozen SPEC03 status.`,
         );
       }
 
@@ -546,17 +662,29 @@ export class EpistemicPersistenceService {
   }
 
   /**
-   * Performs an exact historical replay traversal for an EpistemicStateVersion.
+   * Performs an authorized exact historical replay traversal for an EpistemicStateVersion.
    * Implements SPEC03 §110, §111:
-   * Traverses EpistemicStateVersion -> exact assessment_ids -> EvidenceAssessment -> EvidencePropositionLink -> EvidenceItem -> SourceArtifact/PerformanceObservation.
-   * Checks payload availability across ObjectRegistry, deleted tombstones, and ImmutableEntityRegistry.
+   *   - Enforces tenant and workspace authorization (knowing an ID never grants access).
+   *   - Public Proposition does not expose inaccessible private assessments/evidence.
+   *   - Traverses EpistemicStateVersion -> exact assessment_ids -> EvidenceAssessment -> EvidencePropositionLink -> EvidenceItem -> SourceArtifact/PerformanceObservation.
+   *   - Checks payload availability across ObjectRegistry, deleted tombstones, and ImmutableEntityRegistry.
    */
-  async getEpistemicStateReplay(epistemicStateId: string): Promise<{
+  async getEpistemicStateReplay(
+    epistemicStateId: string,
+    authContext: EpistemicReplayAuthContext,
+  ): Promise<{
     epistemicState: any;
     proposition: any;
     assessments: any[];
     replayability: ReplayabilityStatus;
   }> {
+    if (!authContext || !authContext.tenantId) {
+      throw new RegistryValidationError(
+        'AUTHORIZATION_REQUIRED',
+        'Replay authorization context with tenantId is required. Knowing an ID does not grant access.',
+      );
+    }
+
     const [epistemicState] = await this.sql`
       SELECT * FROM epistemic_state_versions WHERE epistemic_state_id = ${epistemicStateId}
     `;
@@ -567,23 +695,68 @@ export class EpistemicPersistenceService {
       );
     }
 
+    // Tenant isolation
+    if (epistemicState.tenant_id !== authContext.tenantId) {
+      throw new RegistryValidationError(
+        'TENANT_ISOLATION_VIOLATION',
+        `EpistemicStateVersion '${epistemicStateId}' belongs to tenant '${epistemicState.tenant_id}', not '${authContext.tenantId}'.`,
+      );
+    }
+
+    // Workspace isolation: workspace-private epistemic state requires matching workspace
+    if (epistemicState.workspace_id) {
+      if (!authContext.workspaceId || authContext.workspaceId !== epistemicState.workspace_id) {
+        throw new RegistryValidationError(
+          'WORKSPACE_ISOLATION_VIOLATION',
+          `EpistemicStateVersion '${epistemicStateId}' is scoped to workspace '${epistemicState.workspace_id}'. Caller workspace '${authContext.workspaceId || 'NONE'}' does not have access.`,
+        );
+      }
+    }
+
     const [proposition] = await this.sql`
       SELECT * FROM propositions WHERE proposition_id = ${epistemicState.proposition_id}
     `;
 
-    const assessments = await this.sql`
+    if (proposition && proposition.tenant_id !== authContext.tenantId) {
+      throw new RegistryValidationError(
+        'TENANT_ISOLATION_VIOLATION',
+        `Proposition '${proposition.proposition_id}' belongs to tenant '${proposition.tenant_id}', not '${authContext.tenantId}'.`,
+      );
+    }
+
+    const rawAssessments = await this.sql`
       SELECT 
         ea.*,
+        ea.tenant_id as assessment_tenant,
+        ea.workspace_id as assessment_workspace,
         epl.evidence_id,
+        epl.tenant_id as link_tenant,
+        epl.workspace_id as link_workspace,
         ei.statement,
         ei.origin_type,
-        ei.origin_id
+        ei.origin_id,
+        ei.tenant_id as evidence_tenant,
+        ei.workspace_id as evidence_workspace
       FROM epistemic_state_assessments esa
       JOIN evidence_assessments ea ON esa.assessment_id = ea.assessment_id
       JOIN evidence_proposition_links epl ON ea.link_id = epl.link_id
       JOIN evidence_items ei ON epl.evidence_id = ei.evidence_id
       WHERE esa.epistemic_state_id = ${epistemicStateId}
     `;
+
+    // Filter assessments: public proposition does not expose inaccessible private assessments/evidence
+    const assessments = rawAssessments.filter((a: any) => {
+      if (a.assessment_tenant && a.assessment_tenant !== authContext.tenantId) return false;
+      if (a.link_tenant && a.link_tenant !== authContext.tenantId) return false;
+      if (a.evidence_tenant && a.evidence_tenant !== authContext.tenantId) return false;
+      if (a.assessment_workspace && (!authContext.workspaceId || a.assessment_workspace !== authContext.workspaceId)) {
+        return false;
+      }
+      if (a.evidence_workspace && (!authContext.workspaceId || a.evidence_workspace !== authContext.workspaceId)) {
+        return false;
+      }
+      return true;
+    });
 
     // Check payload states in object_registry, tombstones, and immutable_entity_registry (SPEC03 §111, SPEC02 §30, §31)
     let hasDeletedPayload = false;

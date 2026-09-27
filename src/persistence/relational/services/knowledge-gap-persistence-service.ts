@@ -16,7 +16,12 @@ import {
   assertUnknownPreservationGate,
   type KnowledgeGapState,
 } from '../../../domain/knowledge/unknown-preservation-gate.js';
-import { verifyStageFencing, type StageFencingContext, type WriteMode } from './stage-fencing-coordinator.js';
+import {
+  verifyStageFencing,
+  type StageFencingContext,
+  type WriteMode,
+  type TrustedWriteCapability,
+} from './stage-fencing-coordinator.js';
 import { RegistryValidationError } from '../../../domain/services/registry-validator.js';
 
 export interface CreateKnowledgeGapParams {
@@ -35,6 +40,7 @@ export interface CreateKnowledgeGapParams {
   supersedesGapId?: string | null;
   fencingContext?: StageFencingContext | null;
   writeMode?: WriteMode;
+  trustedCapability?: TrustedWriteCapability;
 }
 
 export interface RecordResearchTraceParams {
@@ -55,6 +61,7 @@ export interface RecordResearchTraceParams {
   completedAt: Date;
   fencingContext?: StageFencingContext | null;
   writeMode?: WriteMode;
+  trustedCapability?: TrustedWriteCapability;
 }
 
 export class KnowledgeGapPersistenceService {
@@ -81,6 +88,7 @@ export class KnowledgeGapPersistenceService {
       supersedesGapId,
       fencingContext,
       writeMode,
+      trustedCapability,
     } = params;
 
     // Validate EXPLICIT_ASSUMPTION (SPEC03 §9)
@@ -99,6 +107,7 @@ export class KnowledgeGapPersistenceService {
         workspaceId,
         requireCycleContext: writeMode === 'DECISION_CYCLE' || !!fencingContext?.decisionCycleId,
         writeMode,
+        trustedCapability,
       });
 
       // 1. Verify task revision exists
@@ -199,6 +208,7 @@ export class KnowledgeGapPersistenceService {
       completedAt,
       fencingContext,
       writeMode,
+      trustedCapability,
     } = params;
 
     await this.sql.begin(async (sqlTx) => {
@@ -209,6 +219,7 @@ export class KnowledgeGapPersistenceService {
         workspaceId,
         requireCycleContext: writeMode === 'DECISION_CYCLE' || !!fencingContext?.decisionCycleId,
         writeMode,
+        trustedCapability,
       });
 
       // 1. Verify gap exists and matches tenant

@@ -18,10 +18,12 @@ import type { KnowledgeGapStatus } from '../../../domain/knowledge/types.js';
 
 export interface StrategyKnowledgeGateGapInput {
   gapId: string;
+  supersedesGapId?: string | null;
   propositionId?: string;
   blocking: boolean;
   assumptionAllowed: boolean;
   status: KnowledgeGapStatus;
+  question?: string;
 }
 
 export interface EvaluateStrategyKnowledgeGateParams {
@@ -83,40 +85,105 @@ export class StrategyKnowledgeGateService {
     }
 
     // 2. Resolve canonical active KnowledgeGaps for the strategy's task contract
+    // KnowledgeGap transitions are immutable (new gap_id + supersedes_gap_id).
+    // The Unknown-Preservation Gate applies to terminal/final KnowledgeGaps in the lineage,
+    // not superseded historical rows.
     const dbGaps = await this.sql`
-      SELECT gap_id, blocking, assumption_allowed, status
+      SELECT gap_id, supersedes_gap_id, blocking, assumption_allowed, status, question
       FROM knowledge_gaps
       WHERE task_revision_id = ${strategy.task_revision_id}
         AND tenant_id = ${tenantId}
     `;
 
-    // Merge DB gaps with any caller-supplied gaps (caller cannot omit DB gaps!)
-    const allGapsMap = new Map<string, { gapId: string; blocking: boolean; assumptionAllowed: boolean; status: KnowledgeGapStatus }>();
+    interface GapNode {
+      gapId: string;
+      supersedesGapId: string | null;
+      blocking: boolean;
+      assumptionAllowed: boolean;
+      status: KnowledgeGapStatus;
+      question: string;
+    }
+
+    const gapMap = new Map<string, GapNode>();
+
+    // Canonical DB records always take precedence over caller assertions
     for (const g of dbGaps) {
-      allGapsMap.set(g.gap_id, {
+      gapMap.set(g.gap_id, {
         gapId: g.gap_id,
+        supersedesGapId: (g.supersedes_gap_id as string | null) ?? null,
         blocking: g.blocking as boolean,
         assumptionAllowed: g.assumption_allowed as boolean,
         status: g.status as KnowledgeGapStatus,
+        question: (g.question as string) || 'Knowledge gap relevance',
       });
     }
+
+    // Caller cannot omit or alter DB gaps; only newly introduced transient gaps can be merged
     for (const g of activeKnowledgeGaps) {
-      if (!allGapsMap.has(g.gapId)) {
-        allGapsMap.set(g.gapId, {
+      if (!gapMap.has(g.gapId)) {
+        gapMap.set(g.gapId, {
           gapId: g.gapId,
+          supersedesGapId: g.supersedesGapId ?? null,
           blocking: g.blocking,
           assumptionAllowed: g.assumptionAllowed,
           status: g.status,
+          question: g.question || 'Knowledge gap relevance',
         });
       }
     }
 
-    if (allGapsMap.size > 0) {
+    // Validate lineage invariants: non-branching & acyclic
+    const successorMap = new Map<string, string[]>();
+    for (const node of gapMap.values()) {
+      if (node.supersedesGapId) {
+        if (node.supersedesGapId === node.gapId) {
+          throw new RegistryValidationError(
+            'KNOWLEDGE_GAP_LINEAGE_INVALID',
+            `Knowledge gap '${node.gapId}' cannot supersede itself.`,
+          );
+        }
+        const existing = successorMap.get(node.supersedesGapId) || [];
+        existing.push(node.gapId);
+        successorMap.set(node.supersedesGapId, existing);
+      }
+    }
+
+    // Non-branching invariant: at most one direct successor per predecessor
+    for (const [predId, succs] of successorMap.entries()) {
+      if (succs.length > 1) {
+        throw new RegistryValidationError(
+          'KNOWLEDGE_GAP_LINEAGE_INVALID',
+          `Branching lineage detected for knowledge gap '${predId}' (successors: ${succs.join(', ')}). Branching is prohibited.`,
+        );
+      }
+    }
+
+    // Acyclic invariant: traverse ancestor chains
+    for (const node of gapMap.values()) {
+      let curr: string | null = node.supersedesGapId;
+      const pathSet = new Set<string>([node.gapId]);
+      while (curr) {
+        if (pathSet.has(curr)) {
+          throw new RegistryValidationError(
+            'KNOWLEDGE_GAP_LINEAGE_INVALID',
+            `Cycle detected in knowledge gap lineage at '${curr}'. Chains must be strictly acyclic.`,
+          );
+        }
+        pathSet.add(curr);
+        const parentNode = gapMap.get(curr);
+        curr = parentNode ? parentNode.supersedesGapId : null;
+      }
+    }
+
+    // Terminal gaps: nodes that are not superseded by any successor in the lineage
+    const terminalGaps = Array.from(gapMap.values()).filter((g) => !successorMap.has(g.gapId));
+
+    if (terminalGaps.length > 0) {
       assertUnknownPreservationGate(
-        Array.from(allGapsMap.values()).map((g) => ({
+        terminalGaps.map((g) => ({
           gapId: g.gapId,
           taskRevisionId: strategy.task_revision_id,
-          question: 'Knowledge gap relevance',
+          question: g.question,
           blocking: g.blocking,
           assumptionAllowed: g.assumptionAllowed,
           status: g.status,

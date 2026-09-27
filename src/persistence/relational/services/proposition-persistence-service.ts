@@ -17,7 +17,12 @@ import {
   computeAdvisoryLockKey,
   evaluateSemanticEquivalence,
 } from '../../../domain/knowledge/semantic-fingerprint.js';
-import { verifyStageFencing, type StageFencingContext, type WriteMode } from './stage-fencing-coordinator.js';
+import {
+  verifyStageFencing,
+  type StageFencingContext,
+  type WriteMode,
+  type TrustedWriteCapability,
+} from './stage-fencing-coordinator.js';
 import { RegistryValidationError } from '../../../domain/services/registry-validator.js';
 
 export interface ResolveOrCreatePropositionParams {
@@ -36,6 +41,7 @@ export interface ResolveOrCreatePropositionParams {
   supersedesPropositionId?: string | null;
   fencingContext?: StageFencingContext | null;
   writeMode?: WriteMode;
+  trustedCapability?: TrustedWriteCapability;
 }
 
 export interface PropositionResolutionResult {
@@ -70,6 +76,7 @@ export class PropositionPersistenceService {
       supersedesPropositionId,
       fencingContext,
       writeMode,
+      trustedCapability,
     } = params;
 
     const identity: PropositionSemanticIdentity = {
@@ -95,6 +102,7 @@ export class PropositionPersistenceService {
         workspaceId,
         requireCycleContext: writeMode === 'DECISION_CYCLE' || !!fencingContext?.decisionCycleId,
         writeMode,
+        trustedCapability,
       });
 
       // 1. Acquire transaction-level advisory lock on derived semantic fingerprint (SPEC03 §34)

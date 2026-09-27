@@ -20,6 +20,7 @@ import { EpistemicPersistenceService } from '../../persistence/relational/servic
 import { MeasurementPersistenceService } from '../../persistence/relational/services/measurement-persistence-service.js';
 import { DecisionPersistenceService } from '../../persistence/relational/services/decision-persistence-service.js';
 import { GovernanceControlPlaneGateway } from '../../control-plane/authority/control-plane-authority.js';
+import { TRUSTED_STANDALONE_CAPABILITY } from '../../persistence/relational/services/stage-fencing-coordinator.js';
 
 function assertTestDatabase(url: string): void {
   const parsed = new URL(url);
@@ -749,9 +750,9 @@ describe('M1 Adversarial Verification Suite: Live PostgreSQL Invariants', () => 
       await epiService.appendEpistemicState({
         epistemicStateId: rootEpsId,
         propositionId: prop1,
-        supportStatus: 'STRONGLY_SUPPORTED',
-        causalStatus: 'DIRECT_OBSERVATION',
-        uncertainty: 'LOW',
+        supportStatus: 'UNKNOWN',
+        causalStatus: 'NOT_APPLICABLE',
+        uncertainty: 'NONE',
         derivationMethod: 'EXPERIMENTAL',
         derivationEntityType: 'ResearchTrace',
         derivationStableId: 'trace-1',
@@ -759,6 +760,7 @@ describe('M1 Adversarial Verification Suite: Live PostgreSQL Invariants', () => 
         validFrom: new Date('2026-01-01T00:00:00Z'),
         knownFrom: new Date('2026-01-01T00:00:00Z'),
         tenantId: tenantA,
+        trustedCapability: TRUSTED_STANDALONE_CAPABILITY,
       });
     });
 
@@ -768,9 +770,9 @@ describe('M1 Adversarial Verification Suite: Live PostgreSQL Invariants', () => 
         await epiService.appendEpistemicState({
           epistemicStateId: `eps-second-root-attack-${timestamp}`,
           propositionId: prop1,
-          supportStatus: 'STRONGLY_SUPPORTED',
-          causalStatus: 'DIRECT_OBSERVATION',
-          uncertainty: 'LOW',
+          supportStatus: 'UNKNOWN',
+          causalStatus: 'NOT_APPLICABLE',
+          uncertainty: 'NONE',
           derivationMethod: 'EXPERIMENTAL',
           derivationEntityType: 'ResearchTrace',
           derivationStableId: 'trace-1',
@@ -778,6 +780,7 @@ describe('M1 Adversarial Verification Suite: Live PostgreSQL Invariants', () => 
           validFrom: new Date('2026-02-01T00:00:00Z'),
           knownFrom: new Date('2026-02-01T00:00:00Z'),
           tenantId: tenantA,
+          trustedCapability: TRUSTED_STANDALONE_CAPABILITY,
         });
       } catch (e) {
         err = e;
@@ -794,16 +797,17 @@ describe('M1 Adversarial Verification Suite: Live PostgreSQL Invariants', () => 
           epistemicStateId: `eps-cross-prop-attack-${timestamp}`,
           propositionId: prop2, // Different proposition
           supersedesEpistemicStateId: rootEpsId, // Points to prop1 root
-          supportStatus: 'CONTRADICTED',
-          causalStatus: 'NO_EVIDENCE',
-          uncertainty: 'HIGH',
-          derivationMethod: 'REVISION',
+          supportStatus: 'UNKNOWN',
+          causalStatus: 'NOT_APPLICABLE',
+          uncertainty: 'NONE',
+          derivationMethod: 'EXPERIMENTAL',
           derivationEntityType: 'ResearchTrace',
           derivationStableId: 'trace-1',
           derivationRevisionId: 'rev-1',
           validFrom: new Date('2026-03-01T00:00:00Z'),
           knownFrom: new Date('2026-03-01T00:00:00Z'),
           tenantId: tenantA,
+          trustedCapability: TRUSTED_STANDALONE_CAPABILITY,
         });
       } catch (e) {
         err = e;
@@ -820,16 +824,17 @@ describe('M1 Adversarial Verification Suite: Live PostgreSQL Invariants', () => 
           epistemicStateId: `eps-retro-attack-${timestamp}`,
           propositionId: prop1,
           supersedesEpistemicStateId: rootEpsId,
-          supportStatus: 'WEAKLY_SUPPORTED',
-          causalStatus: 'INDIRECT',
-          uncertainty: 'MEDIUM',
-          derivationMethod: 'REVISION',
+          supportStatus: 'UNKNOWN',
+          causalStatus: 'NOT_APPLICABLE',
+          uncertainty: 'NONE',
+          derivationMethod: 'EXPERIMENTAL',
           derivationEntityType: 'ResearchTrace',
           derivationStableId: 'trace-1',
           derivationRevisionId: 'rev-1',
           validFrom: new Date('2026-01-01T00:00:00Z'),
           knownFrom: new Date('2025-12-01T00:00:00Z'), // Prior to root knownFrom (2026-01-01)
           tenantId: tenantA,
+          trustedCapability: TRUSTED_STANDALONE_CAPABILITY,
         });
       } catch (e) {
         err = e;

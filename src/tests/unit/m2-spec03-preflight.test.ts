@@ -34,6 +34,7 @@
 import { describe, it, expect } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
+import ts from 'typescript';
 import {
   EVIDENCE_DOMAINS,
   DATA_SCOPES,
@@ -308,41 +309,91 @@ describe('SPEC03 §146 Static Contract Preflight Suite (28 Checks)', () => {
   });
 
   it('Check 23: FREEZING boundary consistent with SPEC01 and all decision-cycle writes wire to mandatory fencing', () => {
-    const coordinatorContent = fs.readFileSync(
-      path.resolve(import.meta.dirname, '../../persistence/relational/services/stage-fencing-coordinator.ts'),
-      'utf-8',
+    const coordinatorPath = path.resolve(
+      import.meta.dirname,
+      '../../persistence/relational/services/stage-fencing-coordinator.ts',
     );
+    const coordinatorContent = fs.readFileSync(coordinatorPath, 'utf-8');
     expect(coordinatorContent).toContain('KNOWLEDGE_COMMIT_REJECTED_AFTER_FREEZING');
     expect(coordinatorContent).toContain("cycle.status === 'FREEZING' || cycle.status === 'FROZEN'");
     expect(coordinatorContent).toContain('DECISION_CYCLE_CONTEXT_REQUIRED');
     expect(coordinatorContent).toContain('STAGE_EXECUTION_CONTEXT_REQUIRED');
     expect(coordinatorContent).toContain('FENCING_TOKEN_REQUIRED');
     expect(coordinatorContent).toContain('STALE_WORKER_COMMIT_REJECTED');
+    expect(coordinatorContent).toContain('WRITE_AUTHORITY_REQUIRED');
 
-    // Verify all canonical decision-cycle write services enforce stage fencing
-    const services = [
-      'evidence-persistence-service.ts',
-      'proposition-persistence-service.ts',
-      'epistemic-persistence-service.ts',
-      'knowledge-gap-persistence-service.ts',
-    ];
-
-    for (const serviceFile of services) {
-      const content = fs.readFileSync(
-        path.resolve(import.meta.dirname, `../../persistence/relational/services/${serviceFile}`),
-        'utf-8',
-      );
-      expect(content).toContain('verifyStageFencing');
-      expect(content).toContain('DECISION_CYCLE');
-      expect(content).toContain('writeMode');
+    // AST / import-graph analysis: Prove decision-cycle runtime modules cannot import StandaloneIngestionAdapter or TRUSTED_STANDALONE_CAPABILITY
+    const srcDir = path.resolve(import.meta.dirname, '../..');
+    const allFiles: string[] = [];
+    function walk(dir: string) {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          if (entry.name !== 'tests' && entry.name !== 'node_modules') {
+            walk(full);
+          }
+        } else if (entry.name.endsWith('.ts')) {
+          allFiles.push(full);
+        }
+      }
     }
+    walk(srcDir);
+
+    for (const file of allFiles) {
+      // Exclude standalone adapter itself and the coordinator definition
+      if (file.endsWith('standalone-ingestion-adapter.ts') || file.endsWith('stage-fencing-coordinator.ts')) {
+        continue;
+      }
+      const code = fs.readFileSync(file, 'utf-8');
+      const sf = ts.createSourceFile(file, code, ts.ScriptTarget.Latest, true);
+      ts.forEachChild(sf, (node) => {
+        if (ts.isImportDeclaration(node)) {
+          const namedBindings = node.importClause?.namedBindings;
+          if (namedBindings && ts.isNamedImports(namedBindings)) {
+            for (const spec of namedBindings.elements) {
+              const name = spec.name.text;
+              expect(name).not.toBe('StandaloneIngestionAdapter');
+              expect(name).not.toBe('TRUSTED_STANDALONE_CAPABILITY');
+            }
+          }
+        }
+      });
+    }
+
+    // AST analysis: DecisionCycleKnowledgeAdapter requires StageExecution/fencing on all methods
+    const adapterPath = path.resolve(
+      import.meta.dirname,
+      '../../persistence/relational/services/decision-cycle-knowledge-adapter.ts',
+    );
+    const adapterCode = fs.readFileSync(adapterPath, 'utf-8');
+    const adapterSf = ts.createSourceFile(adapterPath, adapterCode, ts.ScriptTarget.Latest, true);
+    let classFound = false;
+    ts.forEachChild(adapterSf, (node) => {
+      if (ts.isClassDeclaration(node) && node.name?.text === 'DecisionCycleKnowledgeAdapter') {
+        classFound = true;
+        for (const member of node.members) {
+          if (ts.isMethodDeclaration(member) && member.name && ts.isIdentifier(member.name)) {
+            const methodName = member.name.text;
+            if (methodName !== 'validateFencingContext') {
+              const methodBody = member.body?.getText(adapterSf) ?? '';
+              expect(methodBody).toContain('this.validateFencingContext');
+              expect(methodBody).toContain("writeMode: 'DECISION_CYCLE'");
+            }
+          }
+        }
+      }
+    });
+    expect(classFound).toBe(true);
   });
 
   it('Check 24: deletion/replay consistent with SPEC02', () => {
-    const serviceContent = fs.readFileSync(
-      path.resolve(import.meta.dirname, '../../persistence/relational/services/epistemic-persistence-service.ts'),
-      'utf-8',
+    const servicePath = path.resolve(
+      import.meta.dirname,
+      '../../persistence/relational/services/epistemic-persistence-service.ts',
     );
+    const serviceContent = fs.readFileSync(servicePath, 'utf-8');
+    const sf = ts.createSourceFile(servicePath, serviceContent, ts.ScriptTarget.Latest, true);
+
     // Replayability outcomes
     expect(serviceContent).toContain("'FULL'");
     expect(serviceContent).toContain("'PARTIAL_REDACTED'");
@@ -356,6 +407,36 @@ describe('SPEC03 §146 Static Contract Preflight Suite (28 Checks)', () => {
     expect(serviceContent).toContain("source.payload_state === 'DELETED'");
     expect(serviceContent).toContain("source.payload_state === 'GC_CLAIMED'");
     expect(serviceContent).toContain("tombstone?.deletion_reason_code === 'USER_REQUESTED_DELETION'");
+
+    // AST check: verify getEpistemicStateReplay contains conditional branches mapping each state
+    let replayMethodFound = false;
+    let appendMethodFound = false;
+    ts.forEachChild(sf, (node) => {
+      if (ts.isClassDeclaration(node) && node.name?.text === 'EpistemicPersistenceService') {
+        for (const member of node.members) {
+          if (ts.isMethodDeclaration(member) && member.name && ts.isIdentifier(member.name)) {
+            if (member.name.text === 'getEpistemicStateReplay') {
+              replayMethodFound = true;
+              const body = member.body?.getText(sf) ?? '';
+              expect(body).toContain("replayability = 'INVALIDATED_BY_DELETION'");
+              expect(body).toContain("replayability = 'UNAVAILABLE_DUE_TO_RETENTION'");
+              expect(body).toContain("replayability = 'PARTIAL_REDACTED'");
+              expect(body).toContain("replayability: ReplayabilityStatus = 'FULL'");
+            }
+            if (member.name.text === 'appendEpistemicState') {
+              appendMethodFound = true;
+              const body = member.body?.getText(sf) ?? '';
+              // Verify future derivation checks SourceArtifact immutable_entity_registry and tombstones
+              expect(body).toContain('UNAVAILABLE_EVIDENCE_IN_DERIVATION');
+              expect(body).toContain('immutable_entity_registry');
+              expect(body).toContain('deleted_target_tombstones');
+            }
+          }
+        }
+      }
+    });
+    expect(replayMethodFound).toBe(true);
+    expect(appendMethodFound).toBe(true);
   });
 
   it('Check 25: tenant/data-scope isolation intact', () => {
@@ -367,10 +448,11 @@ describe('SPEC03 §146 Static Contract Preflight Suite (28 Checks)', () => {
       path.resolve(import.meta.dirname, '../../persistence/relational/services/evidence-persistence-service.ts'),
       'utf-8',
     );
-    const epiService = fs.readFileSync(
-      path.resolve(import.meta.dirname, '../../persistence/relational/services/epistemic-persistence-service.ts'),
-      'utf-8',
+    const epiServicePath = path.resolve(
+      import.meta.dirname,
+      '../../persistence/relational/services/epistemic-persistence-service.ts',
     );
+    const epiService = fs.readFileSync(epiServicePath, 'utf-8');
     const gateService = fs.readFileSync(
       path.resolve(import.meta.dirname, '../../persistence/relational/services/strategy-knowledge-gate-service.ts'),
       'utf-8',
@@ -390,6 +472,25 @@ describe('SPEC03 §146 Static Contract Preflight Suite (28 Checks)', () => {
     expect(evService).toContain('Cannot link EvidenceItem scoped to workspace');
     expect(evService).toContain("data_scope === 'TENANT_PRIVATE'");
     expect(evService).toContain('TENANT_ISOLATION_VIOLATION');
+
+    // AST check: getEpistemicStateReplay requires mandatory EpistemicReplayAuthContext and enforces tenant/workspace isolation
+    const sf = ts.createSourceFile(epiServicePath, epiService, ts.ScriptTarget.Latest, true);
+    let replayAuthVerified = false;
+    ts.forEachChild(sf, (node) => {
+      if (ts.isClassDeclaration(node) && node.name?.text === 'EpistemicPersistenceService') {
+        for (const member of node.members) {
+          if (ts.isMethodDeclaration(member) && member.name && ts.isIdentifier(member.name) && member.name.text === 'getEpistemicStateReplay') {
+            const body = member.body?.getText(sf) ?? '';
+            expect(body).toContain('AUTHORIZATION_REQUIRED');
+            expect(body).toContain('TENANT_ISOLATION_VIOLATION');
+            expect(body).toContain('WORKSPACE_ISOLATION_VIOLATION');
+            expect(body).toContain('assessment_workspace');
+            replayAuthVerified = true;
+          }
+        }
+      }
+    });
+    expect(replayAuthVerified).toBe(true);
   });
 
   it('Check 26: no CURRENT/LATEST/ACTIVE historical substitution', () => {
@@ -420,16 +521,45 @@ describe('SPEC03 §146 Static Contract Preflight Suite (28 Checks)', () => {
     expect(schemaContent).not.toContain('current_support_status');
     expect(schemaContent).not.toContain('latest_epistemic_state_id');
 
-    const epiService = fs.readFileSync(
-      path.resolve(import.meta.dirname, '../../persistence/relational/services/epistemic-persistence-service.ts'),
-      'utf-8',
+    const domainTypesPath = path.resolve(import.meta.dirname, '../../domain/knowledge/types.ts');
+    const domainTypes = fs.readFileSync(domainTypesPath, 'utf-8');
+    // Frozen SPEC03 vocabularies only: STRONGLY_SUPPORTED and DIRECT_OBSERVATION must NOT be present
+    expect(domainTypes).not.toContain("'STRONGLY_SUPPORTED'");
+    expect(domainTypes).not.toContain("'DIRECT_OBSERVATION'");
+
+    const epiServicePath = path.resolve(
+      import.meta.dirname,
+      '../../persistence/relational/services/epistemic-persistence-service.ts',
     );
+    const epiService = fs.readFileSync(epiServicePath, 'utf-8');
+    const sf = ts.createSourceFile(epiServicePath, epiService, ts.ScriptTarget.Latest, true);
+
     // Mechanical derivation validation for all derivation methods
     expect(epiService).toContain('UNKNOWN_DERIVATION_METHOD');
     expect(epiService).toContain('DERIVED_STATE_MISMATCH');
     expect(epiService).toContain('DERIVATION_REVISION_NOT_PINNED');
     expect(epiService).toContain('RUN_CONFIG_NOT_FOUND');
     expect(epiService).toContain('deriveEpistemicState');
+    expect(epiService).toContain('INVALID_EPISTEMIC_STATUS');
+    expect(epiService).toContain('INVALID_CAUSAL_STATUS');
+
+    // AST check: verify EXPERIMENTAL derivation path is mechanically validated and caller assertions cannot be trusted
+    let experimentalValidated = false;
+    ts.forEachChild(sf, (node) => {
+      if (ts.isClassDeclaration(node) && node.name?.text === 'EpistemicPersistenceService') {
+        for (const member of node.members) {
+          if (ts.isMethodDeclaration(member) && member.name && ts.isIdentifier(member.name) && member.name.text === 'appendEpistemicState') {
+            const body = member.body?.getText(sf) ?? '';
+            expect(body).toContain("derivationMethod === 'EXPERIMENTAL'");
+            expect(body).toContain("trace.outcome === 'NO_EVIDENCE_FOUND'");
+            expect(body).toContain("deriveEpistemicState");
+            expect(body).toContain("DERIVED_STATE_MISMATCH");
+            experimentalValidated = true;
+          }
+        }
+      }
+    });
+    expect(experimentalValidated).toBe(true);
   });
 });
 

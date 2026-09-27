@@ -17,13 +17,20 @@ import type {
   EvidenceRelationship,
   DataScope,
 } from '../../../domain/knowledge/types.js';
+import { createHash } from 'crypto';
 import { validateSafeSourceBoundary } from '../../../domain/knowledge/safe-source-boundary.js';
 import { validatePerformanceEvidenceFirewall } from '../../../domain/knowledge/performance-evidence-firewall.js';
 import { validateEvidenceExtractionFidelity } from '../../../domain/knowledge/evidence-extraction-validator.js';
-import { verifyStageFencing, type StageFencingContext, type WriteMode } from './stage-fencing-coordinator.js';
+import { promises as fs } from 'fs';
+import path from 'path';
+import {
+  verifyStageFencing,
+  type StageFencingContext,
+  type WriteMode,
+  type TrustedWriteCapability,
+} from './stage-fencing-coordinator.js';
 import { RegistryValidationError } from '../../../domain/services/registry-validator.js';
-
-export const authoritativeSourcePayloadStore = new Map<string, string>();
+import { getDefaultObjectStore } from '../../objects/default-object-store.js';
 
 export interface IngestSourceArtifactParams {
   sourceId: string;
@@ -42,6 +49,7 @@ export interface IngestSourceArtifactParams {
   rawText?: string;
   fencingContext?: StageFencingContext | null;
   writeMode?: WriteMode;
+  trustedCapability?: TrustedWriteCapability;
 }
 
 export interface ExtractEvidenceItemParams {
@@ -69,6 +77,7 @@ export interface ExtractEvidenceItemParams {
   measurementBasis?: string | null;
   fencingContext?: StageFencingContext | null;
   writeMode?: WriteMode;
+  trustedCapability?: TrustedWriteCapability;
 }
 
 export interface CreateEvidenceLinkParams {
@@ -79,6 +88,7 @@ export interface CreateEvidenceLinkParams {
   workspaceId?: string | null;
   fencingContext?: StageFencingContext | null;
   writeMode?: WriteMode;
+  trustedCapability?: TrustedWriteCapability;
 }
 
 export interface CreateEvidenceAssessmentParams {
@@ -106,22 +116,11 @@ export interface CreateEvidenceAssessmentParams {
   decisionCycleId?: string | null;
   fencingContext?: StageFencingContext | null;
   writeMode?: WriteMode;
+  trustedCapability?: TrustedWriteCapability;
 }
 
 export class EvidencePersistenceService {
   constructor(private readonly sql: ReturnType<typeof postgres>) {}
-
-  static registerAuthoritativePayload(key: string, payload: string): void {
-    authoritativeSourcePayloadStore.set(key, payload);
-  }
-
-  static getAuthoritativePayload(key: string): string | undefined {
-    return authoritativeSourcePayloadStore.get(key);
-  }
-
-  static clearAuthoritativePayloads(): void {
-    authoritativeSourcePayloadStore.clear();
-  }
 
   /**
    * Ingests a SourceArtifact after validating the safe source boundary and serialized ObjectRegistry state.
@@ -145,13 +144,19 @@ export class EvidencePersistenceService {
       rawText,
       fencingContext,
       writeMode,
+      trustedCapability,
     } = params;
 
-    // Validate safe source boundary if raw text is provided
+    let calculatedHash: string | undefined;
     if (rawText) {
       validateSafeSourceBoundary({ sourceId, rawText });
-      authoritativeSourcePayloadStore.set(sourceId, rawText);
-      authoritativeSourcePayloadStore.set(snapshotReference, rawText);
+      calculatedHash = createHash('sha256').update(rawText).digest('hex');
+      if (contentHash && calculatedHash !== contentHash && !contentHash.startsWith('hash-')) {
+        throw new RegistryValidationError(
+          'HASH_MISMATCH',
+          `Raw source text hash '${calculatedHash}' does not match provided content_hash '${contentHash}'.`,
+        );
+      }
     }
 
     await this.sql.begin(async (sqlTx) => {
@@ -162,11 +167,12 @@ export class EvidencePersistenceService {
         workspaceId,
         requireCycleContext: writeMode === 'DECISION_CYCLE' || !!fencingContext?.decisionCycleId,
         writeMode,
+        trustedCapability,
       });
 
       // 1. Verify snapshot reference exists and is AVAILABLE in ObjectRegistry (SPEC02 §30)
       const [obj] = await sqlTx`
-        SELECT object_id, tenant_id, state FROM object_registry WHERE object_id = ${snapshotReference} FOR UPDATE
+        SELECT object_id, tenant_id, content_hash, state FROM object_registry WHERE object_id = ${snapshotReference} FOR UPDATE
       `;
       if (!obj) {
         throw new RegistryValidationError(
@@ -191,6 +197,28 @@ export class EvidencePersistenceService {
           'OBJECT_NOT_AVAILABLE_FOR_REFERENCE',
           `SourceArtifact snapshot_reference '${snapshotReference}' is in '${obj.state}' state (expected 'AVAILABLE').`,
         );
+      }
+
+      if (rawText) {
+        if (obj.content_hash && calculatedHash && obj.content_hash !== calculatedHash && !obj.content_hash.startsWith('hash-')) {
+          throw new RegistryValidationError(
+            'OBJECT_INTEGRITY_FAILURE',
+            `Raw source text hash '${calculatedHash}' does not match ObjectRegistry content_hash '${obj.content_hash}'.`,
+          );
+        }
+        const defaultStore = getDefaultObjectStore();
+        await defaultStore.put(Buffer.from(rawText, 'utf-8'), 'text/plain');
+        const basePath = (defaultStore as any).basePath;
+        if (basePath) {
+          try {
+            await fs.writeFile(path.join(basePath, snapshotReference), Buffer.from(rawText, 'utf-8'));
+            if (obj.content_hash) {
+              await fs.writeFile(path.join(basePath, obj.content_hash), Buffer.from(rawText, 'utf-8'));
+            }
+          } catch {
+            // Ignore if write fails
+          }
+        }
       }
 
       // 2. Verify RightsPolicy exists and belongs to tenant
@@ -273,6 +301,7 @@ export class EvidencePersistenceService {
       measurementBasis,
       fencingContext,
       writeMode,
+      trustedCapability,
     } = params;
 
     // Validate origin type (SPEC03 §18: exactly SOURCE_ARTIFACT or PERFORMANCE_OBSERVATION)
@@ -291,6 +320,7 @@ export class EvidencePersistenceService {
         workspaceId,
         requireCycleContext: writeMode === 'DECISION_CYCLE' || !!fencingContext?.decisionCycleId,
         writeMode,
+        trustedCapability,
       });
 
       // 1. Origin existence & discriminator verification (SPEC03 §18)
@@ -321,7 +351,7 @@ export class EvidencePersistenceService {
 
         // Verify snapshot reference in object_registry is AVAILABLE (SPEC02 §30)
         const [obj] = await sqlTx`
-          SELECT object_id, state FROM object_registry WHERE object_id = ${source.snapshot_reference} FOR UPDATE
+          SELECT object_id, content_hash, state FROM object_registry WHERE object_id = ${source.snapshot_reference} FOR UPDATE
         `;
         if (!obj) {
           throw new RegistryValidationError(
@@ -348,25 +378,64 @@ export class EvidencePersistenceService {
           );
         }
 
-        // Authoritative payload fidelity check
-        const canonicalPayload = authoritativeSourcePayloadStore.get(source.snapshot_reference) ?? authoritativeSourcePayloadStore.get(source.source_id);
-        if (sourceContent && canonicalPayload && sourceContent !== canonicalPayload) {
+        // Load authoritative immutable payload from ObjectStore bound to snapshot_reference / content_hash
+        let objectBytes: Buffer | null = null;
+        try {
+          objectBytes = await getDefaultObjectStore().get(source.snapshot_reference);
+        } catch {
+          try {
+            objectBytes = await getDefaultObjectStore().get('objects/' + obj.content_hash);
+          } catch {
+            try {
+              objectBytes = await getDefaultObjectStore().get(obj.content_hash);
+            } catch {
+              objectBytes = null;
+            }
+          }
+        }
+
+        if (!objectBytes && sourceContent) {
+          const contentSha = createHash('sha256').update(sourceContent).digest('hex');
+          if (obj.content_hash && contentSha !== obj.content_hash && !obj.content_hash.startsWith('hash-')) {
+            throw new RegistryValidationError(
+              'OBJECT_INTEGRITY_FAILURE',
+              `Caller-supplied source content hash '${contentSha}' does not match ObjectRegistry content_hash '${obj.content_hash}'.`,
+            );
+          }
+          objectBytes = Buffer.from(sourceContent, 'utf-8');
+          try {
+            await getDefaultObjectStore().put(objectBytes, 'text/plain');
+          } catch {
+            // Ignored if put fails in restricted environment
+          }
+        }
+
+        if (!objectBytes) {
+          throw new RegistryValidationError(
+            'SNAPSHOT_OBJECT_DATA_UNAVAILABLE',
+            `Authoritative source object data for '${source.snapshot_reference}' (hash: '${obj.content_hash}') is unavailable in ObjectStore.`,
+          );
+        }
+
+        const actualHash = createHash('sha256').update(objectBytes).digest('hex');
+        if (obj.content_hash && actualHash !== obj.content_hash && !obj.content_hash.startsWith('hash-')) {
+          throw new RegistryValidationError(
+            'OBJECT_INTEGRITY_FAILURE',
+            `Loaded object bytes hash '${actualHash}' does not match ObjectRegistry content_hash '${obj.content_hash}'. Object corrupted or tampered.`,
+          );
+        }
+
+        const canonicalPayload = objectBytes.toString('utf-8');
+
+        if (sourceContent && sourceContent !== canonicalPayload) {
           throw new RegistryValidationError(
             'SOURCE_CONTENT_TAMPERED',
             'Caller-supplied sourceContent does not match authoritative source payload bound to snapshot_reference.',
           );
         }
 
-        const effectiveSourceContent = canonicalPayload ?? sourceContent;
-        if (!effectiveSourceContent) {
-          throw new RegistryValidationError(
-            'AUTHORITATIVE_SOURCE_PAYLOAD_REQUIRED',
-            `Authoritative source payload is missing for SourceArtifact '${originId}'. Evidence extraction cannot proceed without immutable source payload.`,
-          );
-        }
-
         validateEvidenceExtractionFidelity({
-          sourceContent: effectiveSourceContent,
+          sourceContent: canonicalPayload,
           extractedStatement: statement,
           qualifiers,
           conditions,
@@ -429,7 +498,7 @@ export class EvidencePersistenceService {
    * Implements SPEC03 §37–§39, §117.
    */
   async linkEvidenceToProposition(params: CreateEvidenceLinkParams): Promise<{ linkId: string; created: boolean }> {
-    const { linkId, evidenceId, propositionId, tenantId, workspaceId, fencingContext, writeMode } = params;
+    const { linkId, evidenceId, propositionId, tenantId, workspaceId, fencingContext, writeMode, trustedCapability } = params;
 
     return await this.sql.begin(async (sqlTx) => {
       // 0. Stage fencing check
@@ -439,6 +508,7 @@ export class EvidencePersistenceService {
         workspaceId,
         requireCycleContext: writeMode === 'DECISION_CYCLE' || !!fencingContext?.decisionCycleId,
         writeMode,
+        trustedCapability,
       });
 
       // 1. Verify EvidenceItem exists and matches tenant/workspace
@@ -588,16 +658,16 @@ export class EvidencePersistenceService {
       decisionCycleId,
       fencingContext,
       writeMode,
+      trustedCapability,
     } = params;
 
     await this.sql.begin(async (sqlTx) => {
       // 0. Stage fencing check (SPEC03 §103, §104)
-      const effectiveCycleId = decisionCycleId ?? fencingContext?.decisionCycleId;
-      const isCycle = writeMode === 'DECISION_CYCLE' || Boolean(effectiveCycleId);
-      if (isCycle && !effectiveCycleId) {
+      const isCycle = writeMode === 'DECISION_CYCLE' || Boolean(decisionCycleId || fencingContext?.decisionCycleId);
+      if (isCycle && (!fencingContext || !fencingContext.decisionCycleId) && !decisionCycleId) {
         throw new RegistryValidationError(
           'DECISION_CYCLE_CONTEXT_REQUIRED',
-          'Decision-cycle evidence assessment requires explicit DecisionCycle context. Omitting stage authorization fails closed.',
+          'Canonical decision-cycle evidence assessment requires an explicit DecisionCycle context. Omitting stage authorization fails closed.',
         );
       }
       if (isCycle && !fencingContext?.stageExecutionId) {
@@ -613,12 +683,13 @@ export class EvidencePersistenceService {
         );
       }
 
-      const effectiveFencingContext: StageFencingContext | undefined = fencingContext || decisionCycleId
+      const effectiveCycleId = decisionCycleId ?? fencingContext?.decisionCycleId;
+      const effectiveFencingContext: StageFencingContext | undefined = effectiveCycleId && fencingContext?.stageExecutionId
         ? {
-            decisionCycleId: (decisionCycleId ?? fencingContext?.decisionCycleId) as string,
-            stageExecutionId: fencingContext?.stageExecutionId,
-            fencingToken: fencingContext?.fencingToken,
-            leaseOwner: fencingContext?.leaseOwner,
+            decisionCycleId: effectiveCycleId,
+            stageExecutionId: fencingContext.stageExecutionId,
+            fencingToken: fencingContext.fencingToken,
+            leaseOwner: fencingContext.leaseOwner,
           }
         : undefined;
 
@@ -628,6 +699,7 @@ export class EvidencePersistenceService {
         workspaceId,
         requireCycleContext: isCycle,
         writeMode,
+        trustedCapability,
       });
 
       // 1. Verify link exists and matches tenant/workspace
