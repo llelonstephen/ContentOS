@@ -277,7 +277,7 @@ export class DecisionPersistenceService {
     await this.sql.begin(async (sqlTx) => {
       // 3. Validate snapshot
       const [snapshot] = await sqlTx`
-        SELECT snapshot_id, task_revision_id
+        SELECT snapshot_id, task_revision_id, governance_snapshot_id
         FROM decision_snapshots
         WHERE snapshot_id = ${snapshotId}
       `;
@@ -291,7 +291,7 @@ export class DecisionPersistenceService {
         );
       }
 
-      // 4. Validate selected candidate belongs to snapshot candidates
+      // 4. Validate selected candidate belongs to snapshot candidates (SPEC04 §89, Vector 71)
       if (selectedCandidateId) {
         const [candLink] = await sqlTx`
           SELECT candidate_id
@@ -306,7 +306,136 @@ export class DecisionPersistenceService {
         }
       }
 
-      // 5. Register in ImmutableEntityRegistry
+      // 5. Release authorization validation (SPEC04 §94, Acceptance Criterion 28)
+      if (releaseStatus === 'BLOCKED' && /^(release|publish|approve|distribute|promote)$/i.test(selectedAction.trim())) {
+        throw new RegistryValidationError(
+          'BLOCKED_CANNOT_AUTHORIZE_RELEASE',
+          `release_status='BLOCKED' cannot authorize release action '${selectedAction}'.`,
+        );
+      }
+
+      // 6. Completeness of PolicyResults (SPEC04 §85, §86, Acceptance Criteria 10, 24)
+      const expectedPolicies = snapshot.governance_snapshot_id
+        ? await sqlTx`
+            SELECT policy_revision_id
+            FROM governance_snapshot_policies
+            WHERE governance_snapshot_id = ${snapshot.governance_snapshot_id}
+          `
+        : [];
+
+      const expectedSet = new Set(expectedPolicies.map((p: any) => p.policy_revision_id));
+
+      let results: any[] = [];
+      if (policyResultIds && policyResultIds.length > 0) {
+        results = await sqlTx`
+          SELECT policy_result_id, snapshot_id, policy_revision_id
+          FROM policy_results
+          WHERE policy_result_id = ANY(${policyResultIds})
+        `;
+        if (results.length !== policyResultIds.length) {
+          throw new RegistryValidationError(
+            'POLICY_RESULTS_NOT_FOUND',
+            `One or more policy_result_ids could not be found.`,
+          );
+        }
+        for (const res of results) {
+          if (res.snapshot_id !== snapshotId) {
+            throw new RegistryValidationError(
+              'POLICY_RESULT_WRONG_SNAPSHOT',
+              `PolicyResult '${res.policy_result_id}' belongs to snapshot '${res.snapshot_id}', not '${snapshotId}'.`,
+            );
+          }
+        }
+      }
+
+      if (expectedSet.size > 0) {
+        const actualSet = new Set(results.map((r: any) => r.policy_revision_id));
+        for (const expected of expectedSet) {
+          if (!actualSet.has(expected)) {
+            throw new RegistryValidationError(
+              'INCOMPLETE_POLICY_RESULTS',
+              `DecisionRecord omits required policy_revision_id '${expected}' from snapshot '${snapshotId}'.`,
+            );
+          }
+        }
+      }
+
+      // 7. Conflict resolution closure (SPEC04 §85, §87, Acceptance Criteria 15, 25, Vector 66)
+      const existingResolutions = await sqlTx`
+        SELECT resolution_id, resolution_type, conflict_key
+        FROM policy_conflict_resolutions
+        WHERE snapshot_id = ${snapshotId}
+      `;
+      if (existingResolutions.length > 0) {
+        const providedSet = new Set(conflictResolutionIds ?? []);
+        for (const er of existingResolutions) {
+          if (!providedSet.has(er.resolution_id)) {
+            throw new RegistryValidationError(
+              'UNRESOLVED_CONFLICT_OMITTED',
+              `DecisionRecord omits conflict resolution '${er.resolution_id}' for conflict_key '${er.conflict_key}' (SPEC04 §87).`,
+            );
+          }
+        }
+      }
+
+      if (conflictResolutionIds && conflictResolutionIds.length > 0) {
+        const resolutions = await sqlTx`
+          SELECT resolution_id, snapshot_id, conflict_key
+          FROM policy_conflict_resolutions
+          WHERE resolution_id = ANY(${conflictResolutionIds})
+        `;
+        if (resolutions.length !== conflictResolutionIds.length) {
+          throw new RegistryValidationError(
+            'CONFLICT_RESOLUTIONS_NOT_FOUND',
+            `One or more conflict_resolution_ids could not be found.`,
+          );
+        }
+        const seenKeys = new Set<string>();
+        for (const res of resolutions) {
+          if (res.snapshot_id !== snapshotId) {
+            throw new RegistryValidationError(
+              'CONFLICT_RESOLUTION_WRONG_SNAPSHOT',
+              `ConflictResolution '${res.resolution_id}' belongs to snapshot '${res.snapshot_id}', not '${snapshotId}'.`,
+            );
+          }
+          if (seenKeys.has(res.conflict_key)) {
+            throw new RegistryValidationError(
+              'DUPLICATE_CONFLICT_KEY_RESOLUTION',
+              `DecisionRecord references multiple resolutions for conflict_key '${res.conflict_key}'.`,
+            );
+          }
+          seenKeys.add(res.conflict_key);
+        }
+      }
+
+      // 8. Human Review Record closure (SPEC04 §83, §85, §129, §130, Acceptance Criteria 20, 22, Vector 61)
+      if (humanReviewId) {
+        const [review] = await sqlTx`
+          SELECT review_id, snapshot_id, review_mode
+          FROM human_review_records
+          WHERE review_id = ${humanReviewId}
+        `;
+        if (!review) {
+          throw new RegistryValidationError(
+            'HUMAN_REVIEW_NOT_FOUND',
+            `HumanReviewRecord '${humanReviewId}' not found.`,
+          );
+        }
+        if (review.snapshot_id !== snapshotId) {
+          throw new RegistryValidationError(
+            'HUMAN_REVIEW_WRONG_SNAPSHOT',
+            `HumanReviewRecord '${humanReviewId}' belongs to snapshot '${review.snapshot_id}', not '${snapshotId}'.`,
+          );
+        }
+        if (review.review_mode === 'NEW_INFORMATION_INTRODUCED' && ['READY', 'READY_WITH_WARNINGS'].includes(releaseStatus)) {
+          throw new RegistryValidationError(
+            'NEW_INFORMATION_REQUIRES_NEW_DECISION_CYCLE',
+            `Human review introduced new information. Release requires a new DecisionCycle and new snapshot (SPEC04 §83, §130).`,
+          );
+        }
+      }
+
+      // 9. Register in ImmutableEntityRegistry
       await sqlTx`
         INSERT INTO immutable_entity_registry (
           entity_type, entity_id, tenant_id, workspace_id, payload_state, created_at
@@ -315,7 +444,7 @@ export class DecisionPersistenceService {
         )
       `;
 
-      // 6. Insert decision_records
+      // 10. Insert decision_records
       await sqlTx`
         INSERT INTO decision_records (
           decision_id, tenant_id, workspace_id, decision_type, task_revision_id,
@@ -328,7 +457,7 @@ export class DecisionPersistenceService {
         )
       `;
 
-      // 7. Insert policy result links
+      // 11. Insert policy result links
       for (const policyResultId of policyResultIds) {
         await sqlTx`
           INSERT INTO decision_policy_results (
@@ -339,7 +468,7 @@ export class DecisionPersistenceService {
         `;
       }
 
-      // 8. Insert conflict resolution links
+      // 12. Insert conflict resolution links
       if (conflictResolutionIds) {
         for (const resolutionId of conflictResolutionIds) {
           await sqlTx`

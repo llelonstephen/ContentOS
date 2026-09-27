@@ -406,4 +406,159 @@ export class ControlPlanePersistenceService {
 
     return rows.length === 1 ? (rows[0]?.active_revision_id as string) : null;
   }
+
+  /**
+   * Registers a GuidanceRevision atomically with RevisionRegistry.
+   */
+  async createGuidanceRevision(params: {
+    guidanceRevisionId: string;
+    guidanceId: string;
+    supersedesGuidanceRevisionId?: string | null;
+    guidanceType?: string;
+    recommendationType?: string;
+    recommendation?: string;
+    guidanceText?: string;
+    title?: string;
+    scope?: string;
+    limitations?: string;
+    effectiveFrom?: Date;
+    scheduledExpiration?: Date | null;
+    tenantId: string;
+    workspaceId?: string | null;
+  }): Promise<void> {
+    const guidanceType = params.guidanceType ?? params.recommendationType ?? 'CONTENT';
+    const recommendation = params.recommendation ?? params.guidanceText ?? params.title ?? 'Recommendation';
+    const scope = params.scope ?? 'GLOBAL';
+    const limitations = params.limitations ?? 'NONE';
+    const effectiveFrom = params.effectiveFrom ?? new Date();
+
+    await this.registerTypedRevision({
+      entityType: 'GuidanceRevision',
+      stableId: params.guidanceId,
+      revisionId: params.guidanceRevisionId,
+      supersedesRevisionId: params.supersedesGuidanceRevisionId,
+      tenantId: params.tenantId,
+      workspaceId: params.workspaceId,
+      insertTypedRow: async (sqlTx) => {
+        await sqlTx`
+          INSERT INTO guidance_revisions (
+            guidance_id, guidance_revision_id, supersedes_guidance_revision_id,
+            guidance_type, recommendation, scope, limitations,
+            effective_from, scheduled_expiration, created_at, tenant_id, workspace_id
+          ) VALUES (
+            ${params.guidanceId}, ${params.guidanceRevisionId}, ${params.supersedesGuidanceRevisionId ?? null},
+            ${guidanceType}, ${recommendation}, ${scope}, ${limitations},
+            ${effectiveFrom}, ${params.scheduledExpiration ?? null}, now(), ${params.tenantId}, ${params.workspaceId ?? null}
+          )
+        `;
+      },
+    });
+  }
+
+  /**
+   * Registers a NormativeRuleRevision atomically with RevisionRegistry.
+   */
+  async createNormativeRuleRevision(params: {
+    ruleRevisionId: string;
+    ruleId: string;
+    supersedesRuleRevisionId?: string | null;
+    ruleType?: string;
+    statement?: string;
+    jurisdiction?: string;
+    scope?: string;
+    applicabilityConditions?: string;
+    enforcementLevel?: string;
+    validFrom?: Date;
+    knownFrom?: Date;
+    scheduledExpiration?: Date | null;
+    tenantId: string;
+    workspaceId?: string | null;
+  }): Promise<void> {
+    const ruleType = params.ruleType ?? 'REGULATORY';
+    const statement = params.statement ?? 'Rule statement';
+    const jurisdiction = params.jurisdiction ?? 'GLOBAL';
+    const scope = params.scope ?? 'GLOBAL';
+    const applicabilityConditions = params.applicabilityConditions ?? '{}';
+    const enforcementLevel = params.enforcementLevel ?? 'MANDATORY';
+    const validFrom = params.validFrom ?? new Date();
+    const knownFrom = params.knownFrom ?? new Date();
+
+    await this.registerTypedRevision({
+      entityType: 'NormativeRuleRevision',
+      stableId: params.ruleId,
+      revisionId: params.ruleRevisionId,
+      supersedesRevisionId: params.supersedesRuleRevisionId,
+      tenantId: params.tenantId,
+      workspaceId: params.workspaceId,
+      insertTypedRow: async (sqlTx) => {
+        await sqlTx`
+          INSERT INTO normative_rule_revisions (
+            rule_id, rule_revision_id, supersedes_rule_revision_id,
+            rule_type, statement, jurisdiction, scope,
+            applicability_conditions, enforcement_level, valid_from, known_from,
+            scheduled_expiration, created_at, tenant_id, workspace_id
+          ) VALUES (
+            ${params.ruleId}, ${params.ruleRevisionId}, ${params.supersedesRuleRevisionId ?? null},
+            ${ruleType}, ${statement}, ${jurisdiction}, ${scope},
+            ${applicabilityConditions}, ${enforcementLevel}, ${validFrom}, ${knownFrom},
+            ${params.scheduledExpiration ?? null}, now(), ${params.tenantId}, ${params.workspaceId ?? null}
+          )
+        `;
+      },
+    });
+  }
+
+  /**
+   * Registers a DecisionPolicyRevision atomically with RevisionRegistry.
+   */
+  async createDecisionPolicyRevision(params: {
+    policyRevisionId: string;
+    policyId: string;
+    supersedesPolicyRevisionId?: string | null;
+    conditions?: string | Record<string, any>;
+    requiredInputs?: string | string[];
+    action?: string | Record<string, any>;
+    priorityClass?: string;
+    scope?: string;
+    overrideAllowed?: boolean;
+    overrideAuthorityRequirements?: string | null;
+    overrideScopeConstraints?: string | null;
+    tenantId: string;
+    workspaceId?: string | null;
+  }): Promise<void> {
+    const conditions =
+      typeof params.conditions === 'object' ? JSON.stringify(params.conditions) : (params.conditions ?? '{}');
+    const requiredInputs =
+      Array.isArray(params.requiredInputs) ? JSON.stringify(params.requiredInputs) : (params.requiredInputs ?? '[]');
+    const action =
+      typeof params.action === 'object' ? JSON.stringify(params.action) : (params.action ?? JSON.stringify({ effect: 'PASS' }));
+    const priorityClass = params.priorityClass ?? 'STANDARD';
+    const scope = params.scope ?? 'GLOBAL';
+    const overrideAllowed = params.overrideAllowed ?? false;
+
+    await this.registerTypedRevision({
+      entityType: 'DecisionPolicyRevision',
+      stableId: params.policyId,
+      revisionId: params.policyRevisionId,
+      supersedesRevisionId: params.supersedesPolicyRevisionId,
+      tenantId: params.tenantId,
+      workspaceId: params.workspaceId,
+      insertTypedRow: async (sqlTx) => {
+        await sqlTx`
+          INSERT INTO decision_policy_revisions (
+            policy_id, policy_revision_id, supersedes_policy_revision_id,
+            conditions, required_inputs, action, priority_class, scope,
+            override_allowed, override_authority_requirements, override_scope_constraints,
+            created_at, tenant_id, workspace_id
+          ) VALUES (
+            ${params.policyId}, ${params.policyRevisionId}, ${params.supersedesPolicyRevisionId ?? null},
+            ${conditions}, ${requiredInputs}, ${action}, ${priorityClass}, ${scope},
+            ${overrideAllowed}, ${params.overrideAuthorityRequirements ?? null}, ${params.overrideScopeConstraints ?? null},
+            now(), ${params.tenantId}, ${params.workspaceId ?? null}
+          )
+        `;
+      },
+    });
+  }
 }
+
