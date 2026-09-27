@@ -16,7 +16,7 @@ import {
   assertUnknownPreservationGate,
   type KnowledgeGapState,
 } from '../../../domain/knowledge/unknown-preservation-gate.js';
-import { verifyStageFencing, type StageFencingContext } from './stage-fencing-coordinator.js';
+import { verifyStageFencing, type StageFencingContext, type WriteMode } from './stage-fencing-coordinator.js';
 import { RegistryValidationError } from '../../../domain/services/registry-validator.js';
 
 export interface CreateKnowledgeGapParams {
@@ -34,6 +34,7 @@ export interface CreateKnowledgeGapParams {
   status: KnowledgeGapStatus;
   supersedesGapId?: string | null;
   fencingContext?: StageFencingContext | null;
+  writeMode?: WriteMode;
 }
 
 export interface RecordResearchTraceParams {
@@ -53,6 +54,7 @@ export interface RecordResearchTraceParams {
   startedAt: Date;
   completedAt: Date;
   fencingContext?: StageFencingContext | null;
+  writeMode?: WriteMode;
 }
 
 export class KnowledgeGapPersistenceService {
@@ -78,6 +80,7 @@ export class KnowledgeGapPersistenceService {
       status,
       supersedesGapId,
       fencingContext,
+      writeMode,
     } = params;
 
     // Validate EXPLICIT_ASSUMPTION (SPEC03 §9)
@@ -94,12 +97,13 @@ export class KnowledgeGapPersistenceService {
         fencingContext,
         tenantId,
         workspaceId,
-        requireCycleContext: !!fencingContext?.decisionCycleId,
+        requireCycleContext: writeMode === 'DECISION_CYCLE' || !!fencingContext?.decisionCycleId,
+        writeMode,
       });
 
       // 1. Verify task revision exists
       const [task] = await sqlTx`
-        SELECT task_revision_id, tenant_id FROM task_contract_revisions WHERE task_revision_id = ${taskRevisionId}
+        SELECT task_revision_id, tenant_id, workspace_id FROM task_contract_revisions WHERE task_revision_id = ${taskRevisionId}
       `;
       if (!task) {
         throw new RegistryValidationError(
@@ -111,6 +115,12 @@ export class KnowledgeGapPersistenceService {
         throw new RegistryValidationError(
           'TENANT_ISOLATION_VIOLATION',
           `Task revision '${taskRevisionId}' belongs to tenant '${task.tenant_id}', not '${tenantId}'.`,
+        );
+      }
+      if (task.workspace_id && task.workspace_id !== workspaceId) {
+        throw new RegistryValidationError(
+          'WORKSPACE_ISOLATION_VIOLATION',
+          `Task revision '${taskRevisionId}' belongs to workspace '${task.workspace_id}', not '${workspaceId || 'NONE'}'.`,
         );
       }
 
@@ -188,6 +198,7 @@ export class KnowledgeGapPersistenceService {
       startedAt,
       completedAt,
       fencingContext,
+      writeMode,
     } = params;
 
     await this.sql.begin(async (sqlTx) => {
@@ -196,12 +207,13 @@ export class KnowledgeGapPersistenceService {
         fencingContext,
         tenantId,
         workspaceId,
-        requireCycleContext: !!fencingContext?.decisionCycleId,
+        requireCycleContext: writeMode === 'DECISION_CYCLE' || !!fencingContext?.decisionCycleId,
+        writeMode,
       });
 
       // 1. Verify gap exists and matches tenant
       const [gap] = await sqlTx`
-        SELECT gap_id, tenant_id, blocking, status FROM knowledge_gaps WHERE gap_id = ${gapId}
+        SELECT gap_id, tenant_id, workspace_id, blocking, status FROM knowledge_gaps WHERE gap_id = ${gapId}
       `;
       if (!gap) {
         throw new RegistryValidationError(
@@ -213,6 +225,12 @@ export class KnowledgeGapPersistenceService {
         throw new RegistryValidationError(
           'TENANT_ISOLATION_VIOLATION',
           `KnowledgeGap belongs to tenant '${gap.tenant_id}', not '${tenantId}'.`,
+        );
+      }
+      if (gap.workspace_id && gap.workspace_id !== workspaceId) {
+        throw new RegistryValidationError(
+          'WORKSPACE_ISOLATION_VIOLATION',
+          `KnowledgeGap is scoped to workspace '${gap.workspace_id}', which does not match caller workspace '${workspaceId || 'NONE'}'.`,
         );
       }
 
@@ -246,6 +264,20 @@ export class KnowledgeGapPersistenceService {
         )
       `;
     });
+  }
+
+  /**
+   * Explicit decision-cycle KnowledgeGap creation or transition. Requires valid stage fencing context.
+   */
+  async createOrTransitionKnowledgeGapForDecisionCycle(params: CreateKnowledgeGapParams): Promise<void> {
+    return this.createOrTransitionKnowledgeGap({ ...params, writeMode: 'DECISION_CYCLE' });
+  }
+
+  /**
+   * Explicit decision-cycle ResearchTrace recording. Requires valid stage fencing context.
+   */
+  async recordResearchTraceForDecisionCycle(params: RecordResearchTraceParams): Promise<void> {
+    return this.recordResearchTrace({ ...params, writeMode: 'DECISION_CYCLE' });
   }
 
   /**

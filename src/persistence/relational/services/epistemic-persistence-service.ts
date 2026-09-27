@@ -28,7 +28,7 @@ import type {
   EvidenceCompatibilityStatus,
   EvidenceRelationship,
 } from '../../../domain/knowledge/types.js';
-import { verifyStageFencing, type StageFencingContext } from './stage-fencing-coordinator.js';
+import { verifyStageFencing, type StageFencingContext, type WriteMode } from './stage-fencing-coordinator.js';
 import { RegistryValidationError } from '../../../domain/services/registry-validator.js';
 
 export interface AppendEpistemicStateParams {
@@ -51,6 +51,7 @@ export interface AppendEpistemicStateParams {
   cycleId?: string | null;
   runConfigId?: string | null;
   fencingContext?: StageFencingContext | null;
+  writeMode?: WriteMode;
 }
 
 export type ReplayabilityStatus =
@@ -58,6 +59,8 @@ export type ReplayabilityStatus =
   | 'PARTIAL_REDACTED'
   | 'UNAVAILABLE_DUE_TO_RETENTION'
   | 'INVALIDATED_BY_DELETION';
+
+const ALLOWED_DERIVATION_METHODS = ['RULE_BASED', 'BAYESIAN', 'EXPERIMENTAL', 'EXPERT_CONSENSUS'];
 
 export class EpistemicPersistenceService {
   constructor(private readonly sql: ReturnType<typeof postgres>) {}
@@ -84,6 +87,7 @@ export class EpistemicPersistenceService {
       cycleId,
       runConfigId,
       fencingContext,
+      writeMode,
     } = params;
 
     if (supersedesEpistemicStateId && supersedesEpistemicStateId === epistemicStateId) {
@@ -95,19 +99,41 @@ export class EpistemicPersistenceService {
 
     await this.sql.begin(async (sqlTx) => {
       // 0. Stage fencing & DecisionCycle state check (SPEC03 §103, §104)
+      const isCycle = writeMode === 'DECISION_CYCLE' || Boolean(cycleId || fencingContext?.decisionCycleId);
+      if (isCycle && (!fencingContext || !fencingContext.decisionCycleId) && !cycleId) {
+        throw new RegistryValidationError(
+          'DECISION_CYCLE_CONTEXT_REQUIRED',
+          'Canonical decision-cycle epistemic commit requires an explicit DecisionCycle context. Omitting stage authorization fails closed.',
+        );
+      }
+      if (isCycle && !fencingContext?.stageExecutionId) {
+        throw new RegistryValidationError(
+          'STAGE_EXECUTION_CONTEXT_REQUIRED',
+          'Decision-cycle epistemic commit requires stageExecutionId. Omitting stage authorization fails closed.',
+        );
+      }
+      if (isCycle && (fencingContext?.fencingToken === undefined || fencingContext?.fencingToken === null)) {
+        throw new RegistryValidationError(
+          'FENCING_TOKEN_REQUIRED',
+          'Decision-cycle epistemic commit requires fencingToken. Omitting fencing token fails closed.',
+        );
+      }
+
       const effectiveFencingContext: StageFencingContext | undefined = fencingContext || cycleId
         ? {
-            decisionCycleId: cycleId ?? fencingContext?.decisionCycleId,
+            decisionCycleId: (cycleId ?? fencingContext?.decisionCycleId) as string,
             stageExecutionId: fencingContext?.stageExecutionId,
             fencingToken: fencingContext?.fencingToken,
             leaseOwner: fencingContext?.leaseOwner,
           }
         : undefined;
+
       await verifyStageFencing(sqlTx, {
         fencingContext: effectiveFencingContext,
         tenantId,
         workspaceId,
-        requireCycleContext: !!(effectiveFencingContext?.decisionCycleId),
+        requireCycleContext: isCycle,
+        writeMode,
       });
 
       // 1. Verify target proposition exists and belongs to tenant
@@ -128,10 +154,10 @@ export class EpistemicPersistenceService {
           `Proposition '${propositionId}' belongs to tenant '${prop.tenant_id}', not caller '${tenantId}'.`,
         );
       }
-      if (prop.workspace_id && workspaceId && prop.workspace_id !== workspaceId) {
+      if (prop.workspace_id && (!workspaceId || prop.workspace_id !== workspaceId)) {
         throw new RegistryValidationError(
           'WORKSPACE_ISOLATION_VIOLATION',
-          `Proposition '${propositionId}' is scoped to workspace '${prop.workspace_id}', not '${workspaceId}'.`,
+          `Proposition '${propositionId}' is scoped to workspace '${prop.workspace_id}', not '${workspaceId || 'NONE'}'.`,
         );
       }
 
@@ -151,22 +177,64 @@ export class EpistemicPersistenceService {
         }
       }
 
-      // If runConfigId is provided, verify derivation revision is pinned in the RunConfig
+      // Authoritative Pinning for run-created decision knowledge
+      if (isCycle && !runConfigId) {
+        throw new RegistryValidationError(
+          'RUN_CONFIG_REQUIRED',
+          'Caller omitted RunConfig on a run-created derivation. RunConfig pinning is required.',
+        );
+      }
+
       if (runConfigId) {
+        if (isCycle && effectiveFencingContext?.decisionCycleId) {
+          const [cycleRow] = await sqlTx`
+            SELECT run_id FROM decision_cycles WHERE decision_cycle_id = ${effectiveFencingContext.decisionCycleId}
+          `;
+          if (cycleRow?.run_id) {
+            const [runRow] = await sqlTx`
+              SELECT initial_run_config_id FROM runs WHERE run_id = ${cycleRow.run_id}
+            `;
+            if (runRow?.initial_run_config_id && runRow.initial_run_config_id !== runConfigId) {
+              throw new RegistryValidationError(
+                'RUN_CONFIG_MISMATCH',
+                `Supplied RunConfig '${runConfigId}' does not match DecisionCycle RunConfig '${runRow.initial_run_config_id}'.`,
+              );
+            }
+          }
+        }
+
         const [rc] = await sqlTx`
           SELECT run_config_id, runtime_parameters FROM run_configs WHERE run_config_id = ${runConfigId}
         `;
-        if (rc && rc.runtime_parameters) {
-          const paramsObj = typeof rc.runtime_parameters === 'string'
-            ? JSON.parse(rc.runtime_parameters)
-            : rc.runtime_parameters;
-          const pinnedRevision = paramsObj.derivation_revision_ref ?? paramsObj.derivation_revision_id;
-          if (pinnedRevision && pinnedRevision !== derivationRevisionId && pinnedRevision !== `${derivationEntityType}/${derivationStableId}/${derivationRevisionId}`) {
-            throw new RegistryValidationError(
-              'DERIVATION_REVISION_NOT_PINNED',
-              `Derivation revision '${derivationRevisionId}' is not pinned by RunConfig '${runConfigId}' (pinned: '${pinnedRevision}'). Mid-run evaluator drift prohibited.`,
-            );
-          }
+        if (!rc) {
+          throw new RegistryValidationError(
+            'RUN_CONFIG_NOT_FOUND',
+            `RunConfig '${runConfigId}' does not exist.`,
+          );
+        }
+        if (!rc.runtime_parameters) {
+          throw new RegistryValidationError(
+            'DERIVATION_REVISION_NOT_PINNED',
+            `RunConfig '${runConfigId}' runtime parameters contain no applicable derivation pin.`,
+          );
+        }
+
+        const paramsObj = typeof rc.runtime_parameters === 'string'
+          ? JSON.parse(rc.runtime_parameters)
+          : rc.runtime_parameters;
+        const pinnedRevision = paramsObj.derivation_revision_ref ?? paramsObj.derivation_revision_id;
+        if (!pinnedRevision) {
+          throw new RegistryValidationError(
+            'DERIVATION_REVISION_NOT_PINNED',
+            `RunConfig '${runConfigId}' runtime parameters do not pin a derivation revision.`,
+          );
+        }
+
+        if (pinnedRevision !== derivationRevisionId && pinnedRevision !== `${derivationEntityType}/${derivationStableId}/${derivationRevisionId}`) {
+          throw new RegistryValidationError(
+            'DERIVATION_REVISION_NOT_PINNED',
+            `Derivation revision '${derivationRevisionId}' is not pinned by RunConfig '${runConfigId}' (pinned: '${pinnedRevision}'). Mid-run evaluator drift prohibited.`,
+          );
         }
       }
 
@@ -178,8 +246,10 @@ export class EpistemicPersistenceService {
           SELECT 
             ea.assessment_id, ea.link_id, ea.compatibility_status, ea.relationship,
             ea.supersedes_assessment_id, ea.limitations, ea.tenant_id as assessment_tenant,
-            epl.proposition_id, epl.tenant_id as link_tenant,
-            ei.evidence_id, ei.tenant_id as evidence_tenant, ei.valid_from, ei.valid_until_if_known,
+            ea.workspace_id as assessment_workspace,
+            epl.proposition_id, epl.tenant_id as link_tenant, epl.workspace_id as link_workspace,
+            ei.evidence_id, ei.tenant_id as evidence_tenant, ei.workspace_id as evidence_workspace,
+            ei.valid_from, ei.valid_until_if_known,
             ei.origin_type, ei.origin_id
           FROM evidence_assessments ea
           JOIN evidence_proposition_links epl ON ea.link_id = epl.link_id
@@ -210,18 +280,38 @@ export class EpistemicPersistenceService {
           );
         }
 
-        // SPEC02 Retention boundary check: if underlying payload is deleted, evidence is unavailable for new derivations
+        // Fail-closed workspace isolation
+        if (row.assessment_workspace && (!workspaceId || row.assessment_workspace !== workspaceId)) {
+          throw new RegistryValidationError(
+            'WORKSPACE_ISOLATION_VIOLATION',
+            `Assessment '${assId}' is scoped to workspace '${row.assessment_workspace}', which does not match caller workspace '${workspaceId || 'NONE'}'.`,
+          );
+        }
+        if (row.link_workspace && (!workspaceId || row.link_workspace !== workspaceId)) {
+          throw new RegistryValidationError(
+            'WORKSPACE_ISOLATION_VIOLATION',
+            `EvidencePropositionLink is scoped to workspace '${row.link_workspace}', which does not match caller workspace '${workspaceId || 'NONE'}'.`,
+          );
+        }
+        if (row.evidence_workspace && (!workspaceId || row.evidence_workspace !== workspaceId)) {
+          throw new RegistryValidationError(
+            'WORKSPACE_ISOLATION_VIOLATION',
+            `EvidenceItem is scoped to workspace '${row.evidence_workspace}', which does not match caller workspace '${workspaceId || 'NONE'}'.`,
+          );
+        }
+
+        // SPEC02 Retention boundary check: if underlying payload is unavailable or deleted, reject new derivation
         if (row.origin_type === 'SOURCE_ARTIFACT') {
           const [source] = await sqlTx`
             SELECT sa.snapshot_reference, obr.state as payload_state
             FROM source_artifacts sa
-            JOIN object_registry obr ON sa.snapshot_reference = obr.object_id
+            LEFT JOIN object_registry obr ON sa.snapshot_reference = obr.object_id
             WHERE sa.source_id = ${row.origin_id}
           `;
-          if (source && source.payload_state === 'DELETED') {
+          if (!source || !source.payload_state || source.payload_state === 'DELETED' || source.payload_state === 'GC_CLAIMED' || source.payload_state !== 'AVAILABLE') {
             throw new RegistryValidationError(
               'UNAVAILABLE_EVIDENCE_IN_DERIVATION',
-              `EvidenceItem '${row.evidence_id}' payload has been deleted under retention policy. Unavailable prohibited evidence cannot contribute to new epistemic derivations.`,
+              `EvidenceItem '${row.evidence_id}' payload is unavailable (state: '${source?.payload_state ?? 'MISSING'}'). Unavailable prohibited evidence cannot contribute to new epistemic derivations.`,
             );
           }
         }
@@ -330,11 +420,18 @@ export class EpistemicPersistenceService {
       }
 
       // 5. Mechanically Derive Canonical Epistemic State (SPEC03 §60–§64)
-      let finalSupportStatus = params.supportStatus ?? 'UNKNOWN';
-      let finalCausalStatus = params.causalStatus ?? (prop.proposition_type === 'CAUSAL' ? 'UNKNOWN' : 'NOT_APPLICABLE');
-      let finalUncertainty = params.uncertainty ?? 'NONE';
+      if (!ALLOWED_DERIVATION_METHODS.includes(derivationMethod)) {
+        throw new RegistryValidationError(
+          'UNKNOWN_DERIVATION_METHOD',
+          `Unrecognized derivation method '${derivationMethod}'. Allowed canonical methods are: ${ALLOWED_DERIVATION_METHODS.join(', ')}.`,
+        );
+      }
 
-      if (derivationEntityType === 'EvaluatorConfig' || derivationMethod === 'RULE_BASED') {
+      let finalSupportStatus = 'UNKNOWN';
+      let finalCausalStatus = prop.proposition_type === 'CAUSAL' ? 'UNKNOWN' : 'NOT_APPLICABLE';
+      let finalUncertainty = 'NONE';
+
+      if (derivationEntityType === 'EvaluatorConfig' || derivationMethod === 'RULE_BASED' || derivationMethod === 'BAYESIAN') {
         const derived = deriveEpistemicState({
           propositionId,
           propositionType: prop.proposition_type as PropositionType,
@@ -376,6 +473,24 @@ export class EpistemicPersistenceService {
         finalSupportStatus = derived.supportStatus;
         finalCausalStatus = derived.causalStatus;
         finalUncertainty = derived.uncertainty;
+      } else if (derivationMethod === 'EXPERIMENTAL' && derivationEntityType === 'ResearchTrace') {
+        const [trace] = await sqlTx`
+          SELECT research_trace_id, tenant_id FROM research_traces WHERE research_trace_id = ${derivationStableId}
+        `;
+        if (trace && trace.tenant_id !== tenantId) {
+          throw new RegistryValidationError(
+            'TENANT_ISOLATION_VIOLATION',
+            `ResearchTrace belongs to tenant '${trace.tenant_id}', not '${tenantId}'.`,
+          );
+        }
+        finalSupportStatus = params.supportStatus ?? 'STRONGLY_SUPPORTED';
+        finalCausalStatus = params.causalStatus ?? 'DIRECT_OBSERVATION';
+        finalUncertainty = params.uncertainty ?? 'LOW';
+      } else {
+        throw new RegistryValidationError(
+          'CANONICAL_DERIVATION_UNSUPPORTED',
+          `Derivation method '${derivationMethod}' with entity '${derivationEntityType}' cannot produce canonical epistemic state without an authoritative validator.`,
+        );
       }
 
       // Causal Support Guard (SPEC03 §6.7, §65)
@@ -424,10 +539,17 @@ export class EpistemicPersistenceService {
   }
 
   /**
+   * Explicit decision-cycle EpistemicStateVersion appending. Requires valid stage fencing context.
+   */
+  async appendEpistemicStateForDecisionCycle(params: AppendEpistemicStateParams): Promise<void> {
+    return this.appendEpistemicState({ ...params, writeMode: 'DECISION_CYCLE' });
+  }
+
+  /**
    * Performs an exact historical replay traversal for an EpistemicStateVersion.
    * Implements SPEC03 §110, §111:
    * Traverses EpistemicStateVersion -> exact assessment_ids -> EvidenceAssessment -> EvidencePropositionLink -> EvidenceItem -> SourceArtifact/PerformanceObservation.
-   * Checks payload availability to report degraded retention replayability.
+   * Checks payload availability across ObjectRegistry, deleted tombstones, and ImmutableEntityRegistry.
    */
   async getEpistemicStateReplay(epistemicStateId: string): Promise<{
     epistemicState: any;
@@ -463,25 +585,52 @@ export class EpistemicPersistenceService {
       WHERE esa.epistemic_state_id = ${epistemicStateId}
     `;
 
-    // Check payload states in object_registry (SPEC03 §111, SPEC02 §30)
+    // Check payload states in object_registry, tombstones, and immutable_entity_registry (SPEC03 §111, SPEC02 §30, §31)
     let hasDeletedPayload = false;
+    let hasRedactedPayload = false;
+    let hasInvalidatedPayload = false;
+    let hasMissingPayload = false;
+
     for (const a of assessments) {
       if (a.origin_type === 'SOURCE_ARTIFACT') {
         const [source] = await this.sql`
-          SELECT sa.snapshot_reference, obr.state as payload_state
+          SELECT sa.snapshot_reference, sa.source_id, obr.state as payload_state
           FROM source_artifacts sa
-          JOIN object_registry obr ON sa.snapshot_reference = obr.object_id
+          LEFT JOIN object_registry obr ON sa.snapshot_reference = obr.object_id
           WHERE sa.source_id = ${a.origin_id}
         `;
-        if (source && source.payload_state === 'DELETED') {
+        const [tombstone] = await this.sql`
+          SELECT deletion_reason_code FROM deleted_target_tombstones
+          WHERE (entity_type = 'Object' AND entity_id = ${source?.snapshot_reference ?? ''})
+             OR (entity_type = 'SourceArtifact' AND entity_id = ${a.origin_id})
+        `;
+        const [ier] = await this.sql`
+          SELECT payload_state FROM immutable_entity_registry
+          WHERE entity_type = 'SourceArtifact' AND entity_id = ${a.origin_id}
+        `;
+
+        if (tombstone?.deletion_reason_code === 'USER_REQUESTED_DELETION') {
+          hasInvalidatedPayload = true;
+        } else if (ier && ier.payload_state === 'REDACTED') {
+          hasRedactedPayload = true;
+        } else if (source && (source.payload_state === 'DELETED' || source.payload_state === 'GC_CLAIMED')) {
           hasDeletedPayload = true;
+        } else if (tombstone) {
+          hasDeletedPayload = true;
+        } else if (!source || !source.payload_state || source.payload_state !== 'AVAILABLE') {
+          hasMissingPayload = true;
         }
       }
     }
 
-    const replayability: ReplayabilityStatus = hasDeletedPayload
-      ? 'UNAVAILABLE_DUE_TO_RETENTION'
-      : 'FULL';
+    let replayability: ReplayabilityStatus = 'FULL';
+    if (hasInvalidatedPayload) {
+      replayability = 'INVALIDATED_BY_DELETION';
+    } else if (hasRedactedPayload) {
+      replayability = 'PARTIAL_REDACTED';
+    } else if (hasDeletedPayload || hasMissingPayload) {
+      replayability = 'UNAVAILABLE_DUE_TO_RETENTION';
+    }
 
     return {
       epistemicState,

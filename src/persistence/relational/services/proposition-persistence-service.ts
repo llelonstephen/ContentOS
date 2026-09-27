@@ -17,7 +17,7 @@ import {
   computeAdvisoryLockKey,
   evaluateSemanticEquivalence,
 } from '../../../domain/knowledge/semantic-fingerprint.js';
-import { verifyStageFencing, type StageFencingContext } from './stage-fencing-coordinator.js';
+import { verifyStageFencing, type StageFencingContext, type WriteMode } from './stage-fencing-coordinator.js';
 import { RegistryValidationError } from '../../../domain/services/registry-validator.js';
 
 export interface ResolveOrCreatePropositionParams {
@@ -35,6 +35,7 @@ export interface ResolveOrCreatePropositionParams {
   jurisdictionScope?: string;
   supersedesPropositionId?: string | null;
   fencingContext?: StageFencingContext | null;
+  writeMode?: WriteMode;
 }
 
 export interface PropositionResolutionResult {
@@ -68,6 +69,7 @@ export class PropositionPersistenceService {
       jurisdictionScope = '',
       supersedesPropositionId,
       fencingContext,
+      writeMode,
     } = params;
 
     const identity: PropositionSemanticIdentity = {
@@ -91,7 +93,8 @@ export class PropositionPersistenceService {
         fencingContext,
         tenantId,
         workspaceId,
-        requireCycleContext: !!fencingContext?.decisionCycleId,
+        requireCycleContext: writeMode === 'DECISION_CYCLE' || !!fencingContext?.decisionCycleId,
+        writeMode,
       });
 
       // 1. Acquire transaction-level advisory lock on derived semantic fingerprint (SPEC03 §34)
@@ -163,10 +166,10 @@ export class PropositionPersistenceService {
             `Prior proposition '${supersedesPropositionId}' belongs to tenant '${prior.tenant_id}', not caller '${tenantId}'.`,
           );
         }
-        if (prior.workspace_id && workspaceId && prior.workspace_id !== workspaceId) {
+        if (prior.workspace_id && (!workspaceId || prior.workspace_id !== workspaceId)) {
           throw new RegistryValidationError(
             'WORKSPACE_ISOLATION_VIOLATION',
-            `Prior proposition '${supersedesPropositionId}' belongs to workspace '${prior.workspace_id}', not '${workspaceId}'.`,
+            `Prior proposition '${supersedesPropositionId}' belongs to workspace '${prior.workspace_id}', not '${workspaceId || 'NONE'}'.`,
           );
         }
         if (supersedesPropositionId === propositionId) {
@@ -205,5 +208,14 @@ export class PropositionPersistenceService {
         fingerprint,
       };
     });
+  }
+
+  /**
+   * Explicit decision-cycle proposition resolution. Requires valid stage fencing context.
+   */
+  async resolveOrCreatePropositionForDecisionCycle(
+    params: ResolveOrCreatePropositionParams,
+  ): Promise<PropositionResolutionResult> {
+    return this.resolveOrCreateProposition({ ...params, writeMode: 'DECISION_CYCLE' });
   }
 }

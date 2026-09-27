@@ -17,6 +17,8 @@ export interface StageFencingContext {
   leaseOwner?: string | null;
 }
 
+export type WriteMode = 'STANDALONE' | 'DECISION_CYCLE';
+
 export async function verifyStageFencing(
   sqlTx: any,
   params: {
@@ -24,14 +26,24 @@ export async function verifyStageFencing(
     tenantId: string;
     workspaceId?: string | null;
     requireCycleContext?: boolean;
+    writeMode?: WriteMode;
   },
 ): Promise<void> {
-  const { fencingContext, tenantId, workspaceId: _workspaceId, requireCycleContext } = params;
+  const { fencingContext, tenantId, workspaceId, requireCycleContext, writeMode } = params;
 
-  if (requireCycleContext && (!fencingContext || !fencingContext.decisionCycleId)) {
+  const isCycleMode = writeMode === 'DECISION_CYCLE' || requireCycleContext;
+
+  if (isCycleMode && (!fencingContext || !fencingContext.decisionCycleId)) {
     throw new RegistryValidationError(
       'DECISION_CYCLE_CONTEXT_REQUIRED',
-      'Canonical commit requires an explicit DecisionCycle context.',
+      'Canonical decision-cycle commit requires an explicit DecisionCycle context. Omitting stage authorization fails closed.',
+    );
+  }
+
+  if (writeMode === 'STANDALONE' && fencingContext?.decisionCycleId) {
+    throw new RegistryValidationError(
+      'DECISION_CYCLE_CONTEXT_INVALID',
+      'Standalone write mode cannot attach to a DecisionCycle. Use decision-cycle commit boundary.',
     );
   }
 
@@ -60,6 +72,13 @@ export async function verifyStageFencing(
     throw new RegistryValidationError(
       'TENANT_ISOLATION_VIOLATION',
       `DecisionCycle tenant '${cycle.tenant_id}' does not match caller tenant '${tenantId}'.`,
+    );
+  }
+
+  if (cycle.workspace_id && cycle.workspace_id !== workspaceId) {
+    throw new RegistryValidationError(
+      'WORKSPACE_ISOLATION_VIOLATION',
+      `DecisionCycle is scoped to workspace '${cycle.workspace_id}', which does not match caller workspace '${workspaceId || 'NONE'}'.`,
     );
   }
 
@@ -115,6 +134,13 @@ export async function verifyStageFencing(
     throw new RegistryValidationError(
       'TENANT_ISOLATION_VIOLATION',
       `StageExecution tenant '${stage.tenant_id}' does not match caller tenant '${tenantId}'.`,
+    );
+  }
+
+  if (stage.workspace_id && stage.workspace_id !== workspaceId) {
+    throw new RegistryValidationError(
+      'WORKSPACE_ISOLATION_VIOLATION',
+      `StageExecution is scoped to workspace '${stage.workspace_id}', which does not match caller workspace '${workspaceId || 'NONE'}'.`,
     );
   }
 

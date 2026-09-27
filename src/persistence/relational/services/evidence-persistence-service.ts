@@ -20,8 +20,10 @@ import type {
 import { validateSafeSourceBoundary } from '../../../domain/knowledge/safe-source-boundary.js';
 import { validatePerformanceEvidenceFirewall } from '../../../domain/knowledge/performance-evidence-firewall.js';
 import { validateEvidenceExtractionFidelity } from '../../../domain/knowledge/evidence-extraction-validator.js';
-import { verifyStageFencing, type StageFencingContext } from './stage-fencing-coordinator.js';
+import { verifyStageFencing, type StageFencingContext, type WriteMode } from './stage-fencing-coordinator.js';
 import { RegistryValidationError } from '../../../domain/services/registry-validator.js';
+
+export const authoritativeSourcePayloadStore = new Map<string, string>();
 
 export interface IngestSourceArtifactParams {
   sourceId: string;
@@ -39,6 +41,7 @@ export interface IngestSourceArtifactParams {
   dataScope: DataScope;
   rawText?: string;
   fencingContext?: StageFencingContext | null;
+  writeMode?: WriteMode;
 }
 
 export interface ExtractEvidenceItemParams {
@@ -65,6 +68,7 @@ export interface ExtractEvidenceItemParams {
   jurisdictionScope?: string | null;
   measurementBasis?: string | null;
   fencingContext?: StageFencingContext | null;
+  writeMode?: WriteMode;
 }
 
 export interface CreateEvidenceLinkParams {
@@ -74,6 +78,7 @@ export interface CreateEvidenceLinkParams {
   tenantId: string;
   workspaceId?: string | null;
   fencingContext?: StageFencingContext | null;
+  writeMode?: WriteMode;
 }
 
 export interface CreateEvidenceAssessmentParams {
@@ -100,10 +105,23 @@ export interface CreateEvidenceAssessmentParams {
   supersedesAssessmentId?: string | null;
   decisionCycleId?: string | null;
   fencingContext?: StageFencingContext | null;
+  writeMode?: WriteMode;
 }
 
 export class EvidencePersistenceService {
   constructor(private readonly sql: ReturnType<typeof postgres>) {}
+
+  static registerAuthoritativePayload(key: string, payload: string): void {
+    authoritativeSourcePayloadStore.set(key, payload);
+  }
+
+  static getAuthoritativePayload(key: string): string | undefined {
+    return authoritativeSourcePayloadStore.get(key);
+  }
+
+  static clearAuthoritativePayloads(): void {
+    authoritativeSourcePayloadStore.clear();
+  }
 
   /**
    * Ingests a SourceArtifact after validating the safe source boundary and serialized ObjectRegistry state.
@@ -126,11 +144,14 @@ export class EvidencePersistenceService {
       dataScope,
       rawText,
       fencingContext,
+      writeMode,
     } = params;
 
     // Validate safe source boundary if raw text is provided
     if (rawText) {
       validateSafeSourceBoundary({ sourceId, rawText });
+      authoritativeSourcePayloadStore.set(sourceId, rawText);
+      authoritativeSourcePayloadStore.set(snapshotReference, rawText);
     }
 
     await this.sql.begin(async (sqlTx) => {
@@ -139,7 +160,8 @@ export class EvidencePersistenceService {
         fencingContext,
         tenantId,
         workspaceId,
-        requireCycleContext: !!fencingContext?.decisionCycleId,
+        requireCycleContext: writeMode === 'DECISION_CYCLE' || !!fencingContext?.decisionCycleId,
+        writeMode,
       });
 
       // 1. Verify snapshot reference exists and is AVAILABLE in ObjectRegistry (SPEC02 §30)
@@ -250,6 +272,7 @@ export class EvidencePersistenceService {
       jurisdictionScope,
       measurementBasis,
       fencingContext,
+      writeMode,
     } = params;
 
     // Validate origin type (SPEC03 §18: exactly SOURCE_ARTIFACT or PERFORMANCE_OBSERVATION)
@@ -260,32 +283,22 @@ export class EvidencePersistenceService {
       );
     }
 
-    // Extraction fidelity validator (SPEC03 §5.1–5.4)
-    if (sourceContent) {
-      validateEvidenceExtractionFidelity({
-        sourceContent,
-        extractedStatement: statement,
-        qualifiers,
-        conditions,
-        populationScope,
-        jurisdictionScope,
-        measurementBasis,
-      });
-    }
-
     await this.sql.begin(async (sqlTx) => {
       // 0. Stage fencing check
       await verifyStageFencing(sqlTx, {
         fencingContext,
         tenantId,
         workspaceId,
-        requireCycleContext: !!fencingContext?.decisionCycleId,
+        requireCycleContext: writeMode === 'DECISION_CYCLE' || !!fencingContext?.decisionCycleId,
+        writeMode,
       });
 
       // 1. Origin existence & discriminator verification (SPEC03 §18)
       if (originType === 'SOURCE_ARTIFACT') {
         const [source] = await sqlTx`
-          SELECT source_id, tenant_id FROM source_artifacts WHERE source_id = ${originId}
+          SELECT source_id, tenant_id, workspace_id, data_scope, snapshot_reference
+          FROM source_artifacts
+          WHERE source_id = ${originId}
         `;
         if (!source) {
           throw new RegistryValidationError(
@@ -299,9 +312,71 @@ export class EvidencePersistenceService {
             `EvidenceItem tenant '${tenantId}' cannot reference SourceArtifact from tenant '${source.tenant_id}'.`,
           );
         }
+        if (source.workspace_id && (!workspaceId || source.workspace_id !== workspaceId)) {
+          throw new RegistryValidationError(
+            'WORKSPACE_ISOLATION_VIOLATION',
+            `Origin SourceArtifact is scoped to workspace '${source.workspace_id}', which does not match caller workspace '${workspaceId || 'NONE'}'.`,
+          );
+        }
+
+        // Verify snapshot reference in object_registry is AVAILABLE (SPEC02 §30)
+        const [obj] = await sqlTx`
+          SELECT object_id, state FROM object_registry WHERE object_id = ${source.snapshot_reference} FOR UPDATE
+        `;
+        if (!obj) {
+          throw new RegistryValidationError(
+            'SNAPSHOT_REFERENCE_NOT_FOUND',
+            `SourceArtifact snapshot_reference '${source.snapshot_reference}' does not exist in ObjectRegistry.`,
+          );
+        }
+        if (obj.state === 'DELETED') {
+          throw new RegistryValidationError(
+            'CANONICAL_REFERENCE_REJECTED_DELETED',
+            `SourceArtifact snapshot_reference '${source.snapshot_reference}' is in DELETED state. Cannot create evidence from deleted object.`,
+          );
+        }
+        if (obj.state === 'GC_CLAIMED') {
+          throw new RegistryValidationError(
+            'OBJECT_NOT_AVAILABLE_FOR_REFERENCE',
+            `SourceArtifact snapshot_reference '${source.snapshot_reference}' is currently GC_CLAIMED. Cannot create canonical reference.`,
+          );
+        }
+        if (obj.state !== 'AVAILABLE') {
+          throw new RegistryValidationError(
+            'OBJECT_NOT_AVAILABLE_FOR_REFERENCE',
+            `SourceArtifact snapshot_reference '${source.snapshot_reference}' is in '${obj.state}' state (expected 'AVAILABLE').`,
+          );
+        }
+
+        // Authoritative payload fidelity check
+        const canonicalPayload = authoritativeSourcePayloadStore.get(source.snapshot_reference) ?? authoritativeSourcePayloadStore.get(source.source_id);
+        if (sourceContent && canonicalPayload && sourceContent !== canonicalPayload) {
+          throw new RegistryValidationError(
+            'SOURCE_CONTENT_TAMPERED',
+            'Caller-supplied sourceContent does not match authoritative source payload bound to snapshot_reference.',
+          );
+        }
+
+        const effectiveSourceContent = canonicalPayload ?? sourceContent;
+        if (!effectiveSourceContent) {
+          throw new RegistryValidationError(
+            'AUTHORITATIVE_SOURCE_PAYLOAD_REQUIRED',
+            `Authoritative source payload is missing for SourceArtifact '${originId}'. Evidence extraction cannot proceed without immutable source payload.`,
+          );
+        }
+
+        validateEvidenceExtractionFidelity({
+          sourceContent: effectiveSourceContent,
+          extractedStatement: statement,
+          qualifiers,
+          conditions,
+          populationScope,
+          jurisdictionScope,
+          measurementBasis,
+        });
       } else if (originType === 'PERFORMANCE_OBSERVATION') {
         const [obs] = await sqlTx`
-          SELECT observation_id, tenant_id FROM performance_observations WHERE observation_id = ${originId}
+          SELECT observation_id, tenant_id, workspace_id FROM performance_observations WHERE observation_id = ${originId}
         `;
         if (!obs) {
           throw new RegistryValidationError(
@@ -313,6 +388,12 @@ export class EvidencePersistenceService {
           throw new RegistryValidationError(
             'CROSS_TENANT_ORIGIN_ACCESS',
             `EvidenceItem tenant '${tenantId}' cannot reference PerformanceObservation from tenant '${obs.tenant_id}'.`,
+          );
+        }
+        if (obs.workspace_id && (!workspaceId || obs.workspace_id !== workspaceId)) {
+          throw new RegistryValidationError(
+            'WORKSPACE_ISOLATION_VIOLATION',
+            `Origin PerformanceObservation is scoped to workspace '${obs.workspace_id}', which does not match caller workspace '${workspaceId || 'NONE'}'.`,
           );
         }
       }
@@ -348,7 +429,7 @@ export class EvidencePersistenceService {
    * Implements SPEC03 §37–§39, §117.
    */
   async linkEvidenceToProposition(params: CreateEvidenceLinkParams): Promise<{ linkId: string; created: boolean }> {
-    const { linkId, evidenceId, propositionId, tenantId, workspaceId, fencingContext } = params;
+    const { linkId, evidenceId, propositionId, tenantId, workspaceId, fencingContext, writeMode } = params;
 
     return await this.sql.begin(async (sqlTx) => {
       // 0. Stage fencing check
@@ -356,12 +437,13 @@ export class EvidencePersistenceService {
         fencingContext,
         tenantId,
         workspaceId,
-        requireCycleContext: !!fencingContext?.decisionCycleId,
+        requireCycleContext: writeMode === 'DECISION_CYCLE' || !!fencingContext?.decisionCycleId,
+        writeMode,
       });
 
       // 1. Verify EvidenceItem exists and matches tenant/workspace
       const [ev] = await sqlTx`
-        SELECT evidence_id, tenant_id, workspace_id, origin_type, evidence_domain
+        SELECT evidence_id, tenant_id, workspace_id, origin_type, origin_id, evidence_domain
         FROM evidence_items
         WHERE evidence_id = ${evidenceId}
       `;
@@ -377,10 +459,10 @@ export class EvidencePersistenceService {
           `EvidenceItem belongs to tenant '${ev.tenant_id}', but caller operates as tenant '${tenantId}'. Cross-tenant evidence linking is prohibited.`,
         );
       }
-      if (ev.workspace_id && workspaceId && ev.workspace_id !== workspaceId) {
+      if (ev.workspace_id && (!workspaceId || ev.workspace_id !== workspaceId)) {
         throw new RegistryValidationError(
           'WORKSPACE_ISOLATION_VIOLATION',
-          `EvidenceItem is scoped to workspace '${ev.workspace_id}', which does not match caller workspace '${workspaceId}'.`,
+          `EvidenceItem is scoped to workspace '${ev.workspace_id}', which does not match caller workspace '${workspaceId || 'NONE'}'.`,
         );
       }
 
@@ -402,11 +484,40 @@ export class EvidencePersistenceService {
           `Proposition belongs to tenant '${prop.tenant_id}', but caller operates as tenant '${tenantId}'. Cross-tenant proposition linking is prohibited.`,
         );
       }
-      if (prop.workspace_id && workspaceId && prop.workspace_id !== workspaceId) {
+      if (prop.workspace_id && (!workspaceId || prop.workspace_id !== workspaceId)) {
         throw new RegistryValidationError(
           'WORKSPACE_ISOLATION_VIOLATION',
-          `Proposition is scoped to workspace '${prop.workspace_id}', which does not match caller workspace '${workspaceId}'.`,
+          `Proposition is scoped to workspace '${prop.workspace_id}', which does not match caller workspace '${workspaceId || 'NONE'}'.`,
         );
+      }
+
+      // Cross-entity workspace check between evidence and proposition
+      if (ev.workspace_id && prop.workspace_id && ev.workspace_id !== prop.workspace_id) {
+        throw new RegistryValidationError(
+          'WORKSPACE_ISOLATION_VIOLATION',
+          `Cannot link EvidenceItem scoped to workspace '${ev.workspace_id}' to Proposition scoped to workspace '${prop.workspace_id}'.`,
+        );
+      }
+
+      // DataScope validation if origin is SOURCE_ARTIFACT
+      if (ev.origin_type === 'SOURCE_ARTIFACT') {
+        const [source] = await sqlTx`
+          SELECT source_id, data_scope, workspace_id FROM source_artifacts WHERE source_id = ${ev.origin_id}
+        `;
+        if (source && source.data_scope === 'TENANT_PRIVATE') {
+          if (source.workspace_id && (!workspaceId || source.workspace_id !== workspaceId)) {
+            throw new RegistryValidationError(
+              'WORKSPACE_ISOLATION_VIOLATION',
+              `SourceArtifact has TENANT_PRIVATE data scope in workspace '${source.workspace_id}', inaccessible to caller workspace '${workspaceId || 'NONE'}'.`,
+            );
+          }
+          if (prop.workspace_id && source.workspace_id && prop.workspace_id !== source.workspace_id) {
+            throw new RegistryValidationError(
+              'WORKSPACE_ISOLATION_VIOLATION',
+              `SourceArtifact has TENANT_PRIVATE data scope in workspace '${source.workspace_id}', cannot link to Proposition in workspace '${prop.workspace_id}'.`,
+            );
+          }
+        }
       }
 
       // 3. Performance Evidence Firewall (SPEC03 §25)
@@ -476,29 +587,47 @@ export class EvidencePersistenceService {
       supersedesAssessmentId,
       decisionCycleId,
       fencingContext,
+      writeMode,
     } = params;
 
     await this.sql.begin(async (sqlTx) => {
       // 0. Stage fencing check (SPEC03 §103, §104)
-      if (decisionCycleId && !fencingContext) {
+      const effectiveCycleId = decisionCycleId ?? fencingContext?.decisionCycleId;
+      const isCycle = writeMode === 'DECISION_CYCLE' || Boolean(effectiveCycleId);
+      if (isCycle && !effectiveCycleId) {
         throw new RegistryValidationError(
-          'STAGE_EXECUTION_CONTEXT_REQUIRED',
-          'Decision-cycle evidence assessment requires valid stage fencing context',
+          'DECISION_CYCLE_CONTEXT_REQUIRED',
+          'Decision-cycle evidence assessment requires explicit DecisionCycle context. Omitting stage authorization fails closed.',
         );
       }
+      if (isCycle && !fencingContext?.stageExecutionId) {
+        throw new RegistryValidationError(
+          'STAGE_EXECUTION_CONTEXT_REQUIRED',
+          'Decision-cycle evidence assessment requires valid stage fencing context. Omitting stage authorization fails closed.',
+        );
+      }
+      if (isCycle && (fencingContext?.fencingToken === undefined || fencingContext?.fencingToken === null)) {
+        throw new RegistryValidationError(
+          'FENCING_TOKEN_REQUIRED',
+          'Decision-cycle evidence assessment requires fencingToken. Omitting fencing token fails closed.',
+        );
+      }
+
       const effectiveFencingContext: StageFencingContext | undefined = fencingContext || decisionCycleId
         ? {
-            decisionCycleId: decisionCycleId ?? fencingContext?.decisionCycleId,
+            decisionCycleId: (decisionCycleId ?? fencingContext?.decisionCycleId) as string,
             stageExecutionId: fencingContext?.stageExecutionId,
             fencingToken: fencingContext?.fencingToken,
             leaseOwner: fencingContext?.leaseOwner,
           }
         : undefined;
+
       await verifyStageFencing(sqlTx, {
         fencingContext: effectiveFencingContext,
         tenantId,
         workspaceId,
-        requireCycleContext: !!effectiveFencingContext?.decisionCycleId,
+        requireCycleContext: isCycle,
+        writeMode,
       });
 
       // 1. Verify link exists and matches tenant/workspace
@@ -519,17 +648,17 @@ export class EvidencePersistenceService {
           `EvidencePropositionLink belongs to tenant '${link.tenant_id}', but caller operates as tenant '${tenantId}'. Cross-tenant assessment is prohibited.`,
         );
       }
-      if (link.workspace_id && workspaceId && link.workspace_id !== workspaceId) {
+      if (link.workspace_id && (!workspaceId || link.workspace_id !== workspaceId)) {
         throw new RegistryValidationError(
           'WORKSPACE_ISOLATION_VIOLATION',
-          `EvidencePropositionLink belongs to workspace '${link.workspace_id}', not caller workspace '${workspaceId}'.`,
+          `EvidencePropositionLink belongs to workspace '${link.workspace_id}', not caller workspace '${workspaceId || 'NONE'}'.`,
         );
       }
 
       // 2. If reassessment, enforce supersession invariants (SPEC03 §53)
       if (supersedesAssessmentId) {
         const [prior] = await sqlTx`
-          SELECT assessment_id, link_id, assessed_at, tenant_id
+          SELECT assessment_id, link_id, assessed_at, tenant_id, workspace_id
           FROM evidence_assessments
           WHERE assessment_id = ${supersedesAssessmentId}
         `;
@@ -544,6 +673,13 @@ export class EvidencePersistenceService {
           throw new RegistryValidationError(
             'TENANT_ISOLATION_VIOLATION',
             `Prior assessment '${supersedesAssessmentId}' belongs to tenant '${prior.tenant_id}', not '${tenantId}'.`,
+          );
+        }
+
+        if (prior.workspace_id && (!workspaceId || prior.workspace_id !== workspaceId)) {
+          throw new RegistryValidationError(
+            'WORKSPACE_ISOLATION_VIOLATION',
+            `Prior assessment '${supersedesAssessmentId}' belongs to workspace '${prior.workspace_id}', not '${workspaceId || 'NONE'}'.`,
           );
         }
 
@@ -588,5 +724,26 @@ export class EvidencePersistenceService {
         )
       `;
     });
+  }
+
+  /**
+   * Explicit decision-cycle EvidenceItem extraction. Requires valid stage fencing context.
+   */
+  async extractEvidenceItemForDecisionCycle(params: ExtractEvidenceItemParams): Promise<void> {
+    return this.extractEvidenceItem({ ...params, writeMode: 'DECISION_CYCLE' });
+  }
+
+  /**
+   * Explicit decision-cycle evidence-to-proposition linking. Requires valid stage fencing context.
+   */
+  async linkEvidenceToPropositionForDecisionCycle(params: CreateEvidenceLinkParams): Promise<{ linkId: string; created: boolean }> {
+    return this.linkEvidenceToProposition({ ...params, writeMode: 'DECISION_CYCLE' });
+  }
+
+  /**
+   * Explicit decision-cycle evidence assessment creation. Requires valid stage fencing context.
+   */
+  async createEvidenceAssessmentForDecisionCycle(params: CreateEvidenceAssessmentParams): Promise<void> {
+    return this.createEvidenceAssessment({ ...params, writeMode: 'DECISION_CYCLE' });
   }
 }

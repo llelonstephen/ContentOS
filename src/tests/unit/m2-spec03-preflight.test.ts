@@ -307,13 +307,35 @@ describe('SPEC03 §146 Static Contract Preflight Suite (28 Checks)', () => {
     expect(triggersSql).toContain('BEFORE UPDATE OR DELETE ON "run_knowledge_deltas"');
   });
 
-  it('Check 23: FREEZING boundary consistent with SPEC01', () => {
+  it('Check 23: FREEZING boundary consistent with SPEC01 and all decision-cycle writes wire to mandatory fencing', () => {
     const coordinatorContent = fs.readFileSync(
       path.resolve(import.meta.dirname, '../../persistence/relational/services/stage-fencing-coordinator.ts'),
       'utf-8',
     );
     expect(coordinatorContent).toContain('KNOWLEDGE_COMMIT_REJECTED_AFTER_FREEZING');
     expect(coordinatorContent).toContain("cycle.status === 'FREEZING' || cycle.status === 'FROZEN'");
+    expect(coordinatorContent).toContain('DECISION_CYCLE_CONTEXT_REQUIRED');
+    expect(coordinatorContent).toContain('STAGE_EXECUTION_CONTEXT_REQUIRED');
+    expect(coordinatorContent).toContain('FENCING_TOKEN_REQUIRED');
+    expect(coordinatorContent).toContain('STALE_WORKER_COMMIT_REJECTED');
+
+    // Verify all canonical decision-cycle write services enforce stage fencing
+    const services = [
+      'evidence-persistence-service.ts',
+      'proposition-persistence-service.ts',
+      'epistemic-persistence-service.ts',
+      'knowledge-gap-persistence-service.ts',
+    ];
+
+    for (const serviceFile of services) {
+      const content = fs.readFileSync(
+        path.resolve(import.meta.dirname, `../../persistence/relational/services/${serviceFile}`),
+        'utf-8',
+      );
+      expect(content).toContain('verifyStageFencing');
+      expect(content).toContain('DECISION_CYCLE');
+      expect(content).toContain('writeMode');
+    }
   });
 
   it('Check 24: deletion/replay consistent with SPEC02', () => {
@@ -321,8 +343,19 @@ describe('SPEC03 §146 Static Contract Preflight Suite (28 Checks)', () => {
       path.resolve(import.meta.dirname, '../../persistence/relational/services/epistemic-persistence-service.ts'),
       'utf-8',
     );
-    expect(serviceContent).toContain('UNAVAILABLE_DUE_TO_RETENTION');
-    expect(serviceContent).toContain("obr.state as payload_state");
+    // Replayability outcomes
+    expect(serviceContent).toContain("'FULL'");
+    expect(serviceContent).toContain("'PARTIAL_REDACTED'");
+    expect(serviceContent).toContain("'UNAVAILABLE_DUE_TO_RETENTION'");
+    expect(serviceContent).toContain("'INVALIDATED_BY_DELETION'");
+
+    // Canonical resolution semantics: checks object_registry, tombstones, and payload state
+    expect(serviceContent).toContain('object_registry');
+    expect(serviceContent).toContain('deleted_target_tombstones');
+    expect(serviceContent).toContain("ier.payload_state === 'REDACTED'");
+    expect(serviceContent).toContain("source.payload_state === 'DELETED'");
+    expect(serviceContent).toContain("source.payload_state === 'GC_CLAIMED'");
+    expect(serviceContent).toContain("tombstone?.deletion_reason_code === 'USER_REQUESTED_DELETION'");
   });
 
   it('Check 25: tenant/data-scope isolation intact', () => {
@@ -334,9 +367,29 @@ describe('SPEC03 §146 Static Contract Preflight Suite (28 Checks)', () => {
       path.resolve(import.meta.dirname, '../../persistence/relational/services/evidence-persistence-service.ts'),
       'utf-8',
     );
-    expect(propService).toContain('WORKSPACE_ISOLATION_VIOLATION');
+    const epiService = fs.readFileSync(
+      path.resolve(import.meta.dirname, '../../persistence/relational/services/epistemic-persistence-service.ts'),
+      'utf-8',
+    );
+    const gateService = fs.readFileSync(
+      path.resolve(import.meta.dirname, '../../persistence/relational/services/strategy-knowledge-gate-service.ts'),
+      'utf-8',
+    );
+
+    // Fail-closed workspace pattern: target.workspace_id exists -> requires matching caller workspaceId
+    expect(propService).toContain('prior.workspace_id && (!workspaceId || prior.workspace_id !== workspaceId)');
+    expect(evService).toContain('source.workspace_id && (!workspaceId || source.workspace_id !== workspaceId)');
+    expect(evService).toContain('ev.workspace_id && (!workspaceId || ev.workspace_id !== workspaceId)');
+    expect(evService).toContain('prop.workspace_id && (!workspaceId || prop.workspace_id !== workspaceId)');
+    expect(epiService).toContain('prop.workspace_id && (!workspaceId || prop.workspace_id !== workspaceId)');
+    expect(epiService).toContain('row.assessment_workspace && (!workspaceId || row.assessment_workspace !== workspaceId)');
+    expect(gateService).toContain('strategy.workspace_id && (!workspaceId || strategy.workspace_id !== workspaceId)');
+    expect(gateService).toContain('state.workspace_id && (!workspaceId || state.workspace_id !== workspaceId)');
+
+    // DataScope enforcement in Evidence Link
+    expect(evService).toContain('Cannot link EvidenceItem scoped to workspace');
+    expect(evService).toContain("data_scope === 'TENANT_PRIVATE'");
     expect(evService).toContain('TENANT_ISOLATION_VIOLATION');
-    expect(evService).toContain('WORKSPACE_ISOLATION_VIOLATION');
   });
 
   it('Check 26: no CURRENT/LATEST/ACTIVE historical substitution', () => {
@@ -359,12 +412,24 @@ describe('SPEC03 §146 Static Contract Preflight Suite (28 Checks)', () => {
     );
   });
 
-  it('Check 28: no duplicate source of epistemic truth', () => {
+  it('Check 28: no duplicate source of epistemic truth and no caller-controlled truth path', () => {
     const schemaContent = fs.readFileSync(
       path.resolve(import.meta.dirname, '../../persistence/relational/schema/epistemic.ts'),
       'utf-8',
     );
     expect(schemaContent).not.toContain('current_support_status');
     expect(schemaContent).not.toContain('latest_epistemic_state_id');
+
+    const epiService = fs.readFileSync(
+      path.resolve(import.meta.dirname, '../../persistence/relational/services/epistemic-persistence-service.ts'),
+      'utf-8',
+    );
+    // Mechanical derivation validation for all derivation methods
+    expect(epiService).toContain('UNKNOWN_DERIVATION_METHOD');
+    expect(epiService).toContain('DERIVED_STATE_MISMATCH');
+    expect(epiService).toContain('DERIVATION_REVISION_NOT_PINNED');
+    expect(epiService).toContain('RUN_CONFIG_NOT_FOUND');
+    expect(epiService).toContain('deriveEpistemicState');
   });
 });
+

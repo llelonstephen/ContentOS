@@ -85,6 +85,7 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
   const kmId = uid('km-03');
   const bksId = uid('bks-03');
   const bksStable = uid('bks-st-03');
+  const audId = uid('aud-03');
 
   beforeAll(async () => {
     assertTestDatabase(DB_URL);
@@ -154,6 +155,24 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
         ${taskStable}, ${taskRevId}, ${tenantA}, true, 'Objective', 'TWITTER_X',
         'TEXT', 'en', 'US', 'US', 'brand-1', 'prod-1', 'Audience',
         'metric-rev-1', 'None', 'Low', 'Budget'
+      ) ON CONFLICT DO NOTHING
+    `;
+    await sql`
+      INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id)
+      VALUES ('AudienceState', ${audId}, ${tenantA})
+      ON CONFLICT DO NOTHING
+    `;
+    await sql`
+      INSERT INTO audience_states (
+        audience_state_id, tenant_id, task_revision_id, state_stage, context,
+        knowledge_state, problem_state, solution_state, product_state, brand_state,
+        intent_state, desired_outcome, objections, decision_criteria, prior_exposure,
+        origin, uncertainty
+      ) VALUES (
+        ${audId}, ${tenantA}, ${taskRevId}, 'PROVISIONAL', 'Context',
+        'Knowledge', 'Problem', 'Solution', 'Product', 'Brand',
+        'Intent', 'Outcome', 'Objections', 'Criteria', 'None',
+        'Origin', 'None'
       ) ON CONFLICT DO NOTHING
     `;
     await sql`
@@ -589,8 +608,9 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
 
   // --- VECTORS 11 to 20: Evidence Quality & Classification ---
 
-  it('Vector 11: evidence extractor drops material qualifier', async () => {
+  it('Vector 11: evidence extractor drops material qualifier (with tamper & omitted sourceContent bypass attacks)', async () => {
     const srcId = uid('src-11');
+    const authoritativeText = 'The device reduces acoustic noise at 1 metre in laboratory benchmark tests.';
     await evService.ingestSourceArtifact({
       sourceId: srcId,
       tenantId: tenantA,
@@ -604,16 +624,44 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
       snapshotReference: snapshotObjId,
       rightsPolicyId: rightsPolicyId,
       dataScope: 'GLOBAL_PUBLIC',
+      rawText: authoritativeText,
     });
 
-    let err: any;
+    // 1. Attack: fake/sanitized sourceContent differs from immutable origin payload
+    let errTamper: any;
     try {
       await evService.extractEvidenceItem({
-        evidenceId: uid('ev-11'),
+        evidenceId: uid('ev-11-tamper'),
         tenantId: tenantA,
         originType: 'SOURCE_ARTIFACT',
         originId: srcId,
-        sourceContent: 'The device reduces acoustic noise at 1 metre in laboratory benchmark tests.',
+        sourceContent: 'The device reduces acoustic noise in laboratory tests.', // Tampered / sanitized
+        statement: 'The device reduces acoustic noise.',
+        statementType: 'ASSERTION',
+        assertionMethod: 'EXTRACTED',
+        evidenceDomain: 'ACADEMIC_STUDY',
+        studyDesign: 'LABORATORY',
+        causalIdentification: 'NONE',
+        mechanismSupport: 'NONE',
+        validFrom: new Date(),
+        limitations: 'None',
+        conditions: [],
+      });
+    } catch (e) {
+      errTamper = e;
+    }
+    expect(errTamper).toBeDefined();
+    expect(errTamper.code).toBe('SOURCE_CONTENT_TAMPERED');
+
+    // 2. Attack: omitted sourceContent bypass attempt with dropped measurement condition
+    let errOmitted: any;
+    try {
+      await evService.extractEvidenceItem({
+        evidenceId: uid('ev-11-omitted'),
+        tenantId: tenantA,
+        originType: 'SOURCE_ARTIFACT',
+        originId: srcId,
+        // sourceContent omitted! Service must resolve authoritative origin payload
         statement: 'The device reduces acoustic noise.', // Dropped "at 1 metre" measurement condition
         statementType: 'ASSERTION',
         assertionMethod: 'EXTRACTED',
@@ -626,14 +674,15 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
         conditions: [],
       });
     } catch (e) {
-      err = e;
+      errOmitted = e;
     }
-    expect(err).toBeDefined();
-    expect(err.code).toBe('MATERIAL_MEASUREMENT_CONDITION_DROPPED');
+    expect(errOmitted).toBeDefined();
+    expect(errOmitted.code).toBe('MATERIAL_MEASUREMENT_CONDITION_DROPPED');
   });
 
-  it('Vector 12: evidence extractor upgrades association to causation', async () => {
+  it('Vector 12: evidence extractor upgrades association to causation (with tamper & omitted sourceContent bypass attacks)', async () => {
     const srcId = uid('src-12');
+    const authoritativeText = 'Increased ad frequency was associated with higher short-term conversion.';
     await evService.ingestSourceArtifact({
       sourceId: srcId,
       tenantId: tenantA,
@@ -647,17 +696,19 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
       snapshotReference: snapshotObjId,
       rightsPolicyId: rightsPolicyId,
       dataScope: 'GLOBAL_PUBLIC',
+      rawText: authoritativeText,
     });
 
-    let err: any;
+    // 1. Attack: fake/sanitized sourceContent differs from immutable origin payload
+    let errTamper: any;
     try {
       await evService.extractEvidenceItem({
-        evidenceId: uid('ev-12'),
+        evidenceId: uid('ev-12-tamper'),
         tenantId: tenantA,
         originType: 'SOURCE_ARTIFACT',
         originId: srcId,
-        sourceContent: 'Increased ad frequency was associated with higher short-term conversion.',
-        statement: 'Increased ad frequency causes higher short-term conversion.', // Upgraded associated with -> causes
+        sourceContent: 'Increased ad frequency causes higher short-term conversion.', // Fake origin
+        statement: 'Increased ad frequency causes higher short-term conversion.',
         statementType: 'ASSERTION',
         assertionMethod: 'EXTRACTED',
         evidenceDomain: 'OBSERVATIONAL_PERFORMANCE',
@@ -668,10 +719,35 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
         limitations: 'None',
       });
     } catch (e) {
-      err = e;
+      errTamper = e;
     }
-    expect(err).toBeDefined();
-    expect(err.code).toBe('EVIDENCE_SEMANTIC_STRENGTHENING_PROHIBITED');
+    expect(errTamper).toBeDefined();
+    expect(errTamper.code).toBe('SOURCE_CONTENT_TAMPERED');
+
+    // 2. Attack: omitted sourceContent bypass attempt; upgrades associated with -> causes
+    let errOmitted: any;
+    try {
+      await evService.extractEvidenceItem({
+        evidenceId: uid('ev-12-omitted'),
+        tenantId: tenantA,
+        originType: 'SOURCE_ARTIFACT',
+        originId: srcId,
+        // sourceContent omitted! Service must resolve authoritative origin payload
+        statement: 'Increased ad frequency causes higher short-term conversion.',
+        statementType: 'ASSERTION',
+        assertionMethod: 'EXTRACTED',
+        evidenceDomain: 'OBSERVATIONAL_PERFORMANCE',
+        studyDesign: 'OBSERVATIONAL',
+        causalIdentification: 'NONE',
+        mechanismSupport: 'NONE',
+        validFrom: new Date(),
+        limitations: 'None',
+      });
+    } catch (e) {
+      errOmitted = e;
+    }
+    expect(errOmitted).toBeDefined();
+    expect(errOmitted.code).toBe('EVIDENCE_SEMANTIC_STRENGTHENING_PROHIBITED');
   });
 
   it('Vector 13: evidence domain classified as support judgment', () => {
@@ -1232,6 +1308,201 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
     });
     expect(ws2Res.outcome).toBe('CREATED_NEW');
     expect(ws2Res.propositionId).not.toBe(ws1PropId);
+
+    // Fail-Closed Attack 1: workspace-private Proposition with caller workspace omitted (null/undefined)
+    let errPropWs: any;
+    try {
+      await propService.resolveOrCreateProposition({
+        propositionId: uid('prop-ws-attack'),
+        tenantId: tenantA,
+        workspaceId: undefined, // Caller omits workspace context
+        supersedesPropositionId: ws1PropId, // Target is workspace-alpha private
+        propositionType: 'FACTUAL',
+        canonicalMeaning: uid('Superseding meaning'),
+        subject: 'S',
+        predicate: 'P',
+        object: 'O',
+      });
+    } catch (e) {
+      errPropWs = e;
+    }
+    expect(errPropWs).toBeDefined();
+    expect(errPropWs.code).toBe('WORKSPACE_ISOLATION_VIOLATION');
+
+    // Fail-Closed Attack 2: workspace-private SourceArtifact with caller workspace omitted
+    const wsObjId = uid('obj-ws-31');
+    await sql`
+      INSERT INTO object_registry (
+        object_id, tenant_id, workspace_id, content_hash, object_key, size_bytes, media_type, state
+      ) VALUES (
+        ${wsObjId}, ${tenantA}, 'workspace-alpha', ${'hash-' + wsObjId}, ${'key-' + wsObjId}, 1024, 'text/html', 'AVAILABLE'
+      )
+    `;
+
+    const wsSrcId = uid('src-ws-private');
+    await evService.ingestSourceArtifact({
+      sourceId: wsSrcId,
+      tenantId: tenantA,
+      workspaceId: 'workspace-alpha',
+      sourceType: 'DOC',
+      publisher: 'P',
+      author: 'A',
+      jurisdiction: 'US',
+      sourceVersion: '1.0',
+      retrievedAt: new Date(),
+      contentHash: 'hash-ws-src',
+      snapshotReference: wsObjId,
+      rightsPolicyId: rightsPolicyId,
+      dataScope: 'GLOBAL_PUBLIC',
+      rawText: 'Authoritative private doc statement',
+    });
+
+    let errEvWs: any;
+    try {
+      await evService.extractEvidenceItem({
+        evidenceId: uid('ev-ws-attack'),
+        tenantId: tenantA,
+        workspaceId: undefined, // Caller omits workspace context
+        originType: 'SOURCE_ARTIFACT',
+        originId: wsSrcId,
+        statement: 'Authoritative private doc statement',
+        statementType: 'ASSERTION',
+        assertionMethod: 'EXTRACTED',
+        evidenceDomain: 'ACADEMIC_STUDY',
+        studyDesign: 'NONE',
+        causalIdentification: 'NONE',
+        mechanismSupport: 'NONE',
+        validFrom: new Date(),
+        limitations: 'None',
+      });
+    } catch (e) {
+      errEvWs = e;
+    }
+    expect(errEvWs).toBeDefined();
+    expect(errEvWs.code).toBe('WORKSPACE_ISOLATION_VIOLATION');
+
+    // Extract evidence lawfully in workspace-alpha
+    const wsEvId = uid('ev-ws-alpha');
+    await evService.extractEvidenceItem({
+      evidenceId: wsEvId,
+      tenantId: tenantA,
+      workspaceId: 'workspace-alpha',
+      originType: 'SOURCE_ARTIFACT',
+      originId: wsSrcId,
+      statement: 'Authoritative private doc statement',
+      statementType: 'ASSERTION',
+      assertionMethod: 'EXTRACTED',
+      evidenceDomain: 'ACADEMIC_STUDY',
+      studyDesign: 'NONE',
+      causalIdentification: 'NONE',
+      mechanismSupport: 'NONE',
+      validFrom: new Date(),
+      limitations: 'None',
+    });
+
+    // Fail-Closed Attack 3: cross-workspace Evidence-to-Proposition linking (alpha evidence with beta proposition)
+    let errCrossWsLink: any;
+    try {
+      await evService.linkEvidenceToProposition({
+        linkId: uid('link-cross-ws'),
+        evidenceId: wsEvId, // workspace-alpha
+        propositionId: ws2Res.propositionId, // workspace-beta
+        tenantId: tenantA,
+        workspaceId: 'workspace-alpha',
+      });
+    } catch (e) {
+      errCrossWsLink = e;
+    }
+    expect(errCrossWsLink).toBeDefined();
+    expect(errCrossWsLink.code).toBe('WORKSPACE_ISOLATION_VIOLATION');
+
+    // Link lawfully in workspace-alpha
+    const wsLinkId = uid('link-ws-alpha');
+    await evService.linkEvidenceToProposition({
+      linkId: wsLinkId,
+      evidenceId: wsEvId,
+      propositionId: ws1PropId,
+      tenantId: tenantA,
+      workspaceId: 'workspace-alpha',
+    });
+
+    // Fail-Closed Attack 4: workspace-private Link assessment with caller workspace omitted
+    let errAssWs: any;
+    try {
+      await evService.createEvidenceAssessment({
+        assessmentId: uid('ass-ws-attack'),
+        tenantId: tenantA,
+        workspaceId: undefined, // Caller omits workspace context
+        linkId: wsLinkId, // Target is in workspace-alpha
+        compatibilityStatus: 'COMPATIBLE',
+        relationship: 'SUPPORTS',
+        assessor: 'RuleEngine',
+        assessmentMethod: 'RULE_BASED',
+        authority: 'HIGH',
+        methodologicalQuality: 'HIGH',
+        directness: 'DIRECT',
+        applicability: 'HIGH',
+        populationMatch: 'EXACT',
+        contextMatch: 'EXACT',
+        freshness: 'FRESH',
+        independence: 'INDEPENDENT',
+        precision: 'EXACT',
+        limitations: 'None',
+        uncertainty: 'None',
+        assessedAt: new Date(),
+      });
+    } catch (e) {
+      errAssWs = e;
+    }
+    expect(errAssWs).toBeDefined();
+    expect(errAssWs.code).toBe('WORKSPACE_ISOLATION_VIOLATION');
+
+    // Create assessment lawfully in workspace-alpha
+    const wsAssId = uid('ass-ws-alpha');
+    await evService.createEvidenceAssessment({
+      assessmentId: wsAssId,
+      tenantId: tenantA,
+      workspaceId: 'workspace-alpha',
+      linkId: wsLinkId,
+      compatibilityStatus: 'COMPATIBLE',
+      relationship: 'SUPPORTS',
+      assessor: 'RuleEngine',
+      assessmentMethod: 'RULE_BASED',
+      authority: 'HIGH',
+      methodologicalQuality: 'HIGH',
+      directness: 'DIRECT',
+      applicability: 'HIGH',
+      populationMatch: 'EXACT',
+      contextMatch: 'EXACT',
+      freshness: 'FRESH',
+      independence: 'INDEPENDENT',
+      precision: 'EXACT',
+      limitations: 'None',
+      uncertainty: 'None',
+      assessedAt: new Date(),
+    });
+
+    // Fail-Closed Attack 5: workspace-private EpistemicState derivation with caller workspace omitted
+    let errEpiWs: any;
+    try {
+      await epiService.appendEpistemicState({
+        epistemicStateId: uid('epi-ws-attack'),
+        propositionId: ws1PropId, // workspace-alpha proposition
+        assessmentIds: [wsAssId], // workspace-alpha assessment
+        tenantId: tenantA,
+        workspaceId: undefined, // Caller omits workspace context!
+        derivationMethod: 'RULE_BASED',
+        derivationEntityType: 'EvaluatorConfig',
+        derivationStableId: evalStable,
+        derivationRevisionId: evalRevId,
+        validFrom: new Date(),
+        knownFrom: new Date(),
+      });
+    } catch (e) {
+      errEpiWs = e;
+    }
+    expect(errEpiWs).toBeDefined();
+    expect(errEpiWs.code).toBe('WORKSPACE_ISOLATION_VIOLATION');
   });
 
   it('Vector 32: support assessed before Link identity & cross-tenant link rejected', async () => {
@@ -2235,11 +2506,120 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
       VALUES ('EvaluatorConfig', ${evalStable}, ${otherRevId}, ${tenantA})
     `;
 
-    // Attempting to append EpistemicState with unpinned revision is rejected
-    let err: any;
+    // Attack 1: runConfig does not exist
+    let errNoRc: any;
     try {
       await epiService.appendEpistemicState({
-        epistemicStateId: uid('epi-56'),
+        epistemicStateId: uid('epi-56-norc'),
+        propositionId: propId,
+        runConfigId: uid('non-existent-rc'),
+        derivationMethod: 'RULE_BASED',
+        derivationEntityType: 'EvaluatorConfig',
+        derivationStableId: evalStable,
+        derivationRevisionId: evalRevId,
+        validFrom: new Date(),
+        knownFrom: new Date(),
+        tenantId: tenantA,
+      });
+    } catch (e) {
+      errNoRc = e;
+    }
+    expect(errNoRc).toBeDefined();
+    expect(errNoRc.code).toBe('RUN_CONFIG_NOT_FOUND');
+
+    // Attack 2: runtime parameters contain no applicable derivation pin
+    const emptyRcId = uid('rc-empty-56');
+    await sql`
+      INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id)
+      VALUES ('RunConfig', ${emptyRcId}, ${tenantA})
+    `;
+    await sql`
+      INSERT INTO run_configs (run_config_id, runtime_parameters, tenant_id)
+      VALUES (${emptyRcId}, '{}', ${tenantA})
+    `;
+
+    let errNoPin: any;
+    try {
+      await epiService.appendEpistemicState({
+        epistemicStateId: uid('epi-56-nopin'),
+        propositionId: propId,
+        runConfigId: emptyRcId,
+        derivationMethod: 'RULE_BASED',
+        derivationEntityType: 'EvaluatorConfig',
+        derivationStableId: evalStable,
+        derivationRevisionId: evalRevId,
+        validFrom: new Date(),
+        knownFrom: new Date(),
+        tenantId: tenantA,
+      });
+    } catch (e) {
+      errNoPin = e;
+    }
+    expect(errNoPin).toBeDefined();
+    expect(errNoPin.code).toBe('DERIVATION_REVISION_NOT_PINNED');
+
+    // Attack 3: caller omits RunConfig on a run-created derivation
+    const runId56 = uid('run-56');
+    const dcId56 = uid('dc-56');
+    await sql`
+      INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id)
+      VALUES ('Run', ${runId56}, ${tenantA})
+    `;
+    await sql`
+      INSERT INTO runs (
+        run_id, tenant_id, run_correlation_key, task_revision_id, initialization_cutoff,
+        initial_run_config_id, initial_baseline_snapshot_id, status
+      ) VALUES (
+        ${runId56}, ${tenantA}, ${uid('corr-56')}, ${taskRevId}, now(), ${runConfigId}, ${bksId}, 'ACTIVE'
+      )
+    `;
+    await sql`
+      INSERT INTO decision_cycles (decision_cycle_id, tenant_id, run_id, cycle_number, status, reason, opened_at)
+      VALUES (${dcId56}, ${tenantA}, ${runId56}, 1, 'IN_PROGRESS', 'Active cycle', now())
+    `;
+
+    const seId56 = uid('se-56');
+    await sql`
+      INSERT INTO stage_executions (
+        stage_execution_id, tenant_id, idempotency_key, run_id, decision_cycle_id,
+        stage_name, status, fencing_token, lease_owner, lease_expires_at, canonical_input_hash
+      ) VALUES (
+        ${seId56}, ${tenantA}, ${uid('idemp-56')}, ${runId56}, ${dcId56},
+        'RESEARCH', 'RUNNING', 1, 'worker-1', now() + interval '1 hour', 'input-hash-56'
+      )
+    `;
+
+    let errOmittedRc: any;
+    try {
+      await epiService.appendEpistemicState({
+        epistemicStateId: uid('epi-56-omitted'),
+        propositionId: propId,
+        // runConfigId omitted!
+        writeMode: 'DECISION_CYCLE',
+        fencingContext: {
+          decisionCycleId: dcId56,
+          stageExecutionId: seId56,
+          fencingToken: 1,
+        },
+        derivationMethod: 'RULE_BASED',
+        derivationEntityType: 'EvaluatorConfig',
+        derivationStableId: evalStable,
+        derivationRevisionId: evalRevId,
+        validFrom: new Date(),
+        knownFrom: new Date(),
+        tenantId: tenantA,
+      });
+    } catch (e) {
+      errOmittedRc = e;
+    }
+    expect(errOmittedRc).toBeDefined();
+    expect(errOmittedRc.code).toBe('RUN_CONFIG_REQUIRED');
+
+    // Attack 4: caller supplies an arbitrary registered revision not pinned by RunConfig
+    let errUnpinned: any;
+    try {
+      await epiService.appendEpistemicState({
+        epistemicStateId: uid('epi-56-unpinned'),
         propositionId: propId,
         runConfigId: rcId,
         derivationMethod: 'RULE_BASED',
@@ -2251,10 +2631,10 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
         tenantId: tenantA,
       });
     } catch (e) {
-      err = e;
+      errUnpinned = e;
     }
-    expect(err).toBeDefined();
-    expect(err.code).toBe('DERIVATION_REVISION_NOT_PINNED');
+    expect(errUnpinned).toBeDefined();
+    expect(errUnpinned.code).toBe('DERIVATION_REVISION_NOT_PINNED');
   });
 
   it('Vector 57: evidence valid-time outside target silently used', async () => {
@@ -2739,6 +3119,7 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
       snapshotReference: objId,
       rightsPolicyId: rightsPolicyId,
       dataScope: 'GLOBAL_PUBLIC',
+      rawText: 'Prohibited payload statement 65',
     });
     const evId = uid('ev-65');
     await evService.extractEvidenceItem({
@@ -2798,7 +3179,17 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
       tenantId: tenantA,
     });
 
-    // M1 Retention/Deletion boundary: Prohibited payload object is marked DELETED
+    // 1. When payload is AVAILABLE -> replayability is FULL
+    const replayAvailable = await epiService.getEpistemicStateReplay(epiId);
+    expect(replayAvailable.replayability).toBe('FULL');
+    expect(replayAvailable.epistemicState.epistemic_state_id).toBe(epiId);
+
+    // 2. When payload is GC_CLAIMED -> replayability degrades to UNAVAILABLE_DUE_TO_RETENTION
+    await sql`UPDATE object_registry SET state = 'GC_CLAIMED' WHERE object_id = ${objId}`;
+    const replayGc = await epiService.getEpistemicStateReplay(epiId);
+    expect(replayGc.replayability).toBe('UNAVAILABLE_DUE_TO_RETENTION');
+
+    // 3. M1 Retention/Deletion boundary: Prohibited payload object is marked DELETED
     await sql`UPDATE object_registry SET state = 'DELETED' WHERE object_id = ${objId}`;
 
     // Verify: historical EpistemicState row is completely intact and immutable
@@ -2807,9 +3198,35 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
     expect(epiRow.support_status).toBe('SUPPORTED');
 
     // Verify: historical replay explicitly reports degraded replayability
-    const replay = await epiService.getEpistemicStateReplay(epiId);
-    expect(replay.replayability).toBe('UNAVAILABLE_DUE_TO_RETENTION');
-    expect(replay.epistemicState.epistemic_state_id).toBe(epiId);
+    const replayDeleted = await epiService.getEpistemicStateReplay(epiId);
+    expect(replayDeleted.replayability).toBe('UNAVAILABLE_DUE_TO_RETENTION');
+
+    // 4. When ObjectRegistry row is missing after lawful deletion closure -> UNAVAILABLE_DUE_TO_RETENTION
+    await sql.begin(async (sqlTx) => {
+      await sqlTx`SET LOCAL session_replication_role = 'replica'`;
+      await sqlTx`DELETE FROM object_registry WHERE object_id = ${objId}`;
+    });
+    const replayMissing = await epiService.getEpistemicStateReplay(epiId);
+    expect(replayMissing.replayability).toBe('UNAVAILABLE_DUE_TO_RETENTION');
+
+    // 5. When payload in immutable_entity_registry is REDACTED -> PARTIAL_REDACTED
+    await sql.begin(async (sqlTx) => {
+      await sqlTx`SET LOCAL session_replication_role = 'replica'`;
+      await sqlTx`UPDATE immutable_entity_registry SET payload_state = 'REDACTED' WHERE entity_type = 'SourceArtifact' AND entity_id = ${srcId}`;
+    });
+    const replayRedacted = await epiService.getEpistemicStateReplay(epiId);
+    expect(replayRedacted.replayability).toBe('PARTIAL_REDACTED');
+
+    // 6. When tombstone specifies USER_REQUESTED_DELETION -> INVALIDATED_BY_DELETION
+    await sql`
+      INSERT INTO deleted_target_tombstones (
+        entity_type, entity_id, tenant_id, deletion_reason_code, deleted_at
+      ) VALUES (
+        'SourceArtifact', ${srcId}, ${tenantA}, 'USER_REQUESTED_DELETION', now()
+      )
+    `;
+    const replayInvalidated = await epiService.getEpistemicStateReplay(epiId);
+    expect(replayInvalidated.replayability).toBe('INVALIDATED_BY_DELETION');
   });
 
   it('Vector 66: deletion silently preserves old evidence in future derivation', async () => {
@@ -2836,6 +3253,7 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
       snapshotReference: objId,
       rightsPolicyId: rightsPolicyId,
       dataScope: 'GLOBAL_PUBLIC',
+      rawText: 'Prohibited payload statement 66',
     });
     const evId = uid('ev-66');
     await evService.extractEvidenceItem({
@@ -2882,14 +3300,12 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
       evaluatorRevisionId: evalRevId,
     });
 
-    // Mark payload as DELETED under retention policy
+    // 1. Mark payload as DELETED under retention policy -> future derivation fails closed
     await sql`UPDATE object_registry SET state = 'DELETED' WHERE object_id = ${objId}`;
-
-    // A future derivation attempt referencing the deleted evidence payload fails closed
-    let err: any;
+    let errDeleted: any;
     try {
       await epiService.appendEpistemicState({
-        epistemicStateId: uid('epi-66'),
+        epistemicStateId: uid('epi-66-del'),
         propositionId: propId,
         assessmentIds: [assId],
         derivationMethod: 'RULE_BASED',
@@ -2901,10 +3317,57 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
         tenantId: tenantA,
       });
     } catch (e) {
-      err = e;
+      errDeleted = e;
     }
-    expect(err).toBeDefined();
-    expect(err.code).toBe('UNAVAILABLE_EVIDENCE_IN_DERIVATION');
+    expect(errDeleted).toBeDefined();
+    expect(errDeleted.code).toBe('UNAVAILABLE_EVIDENCE_IN_DERIVATION');
+
+    // 2. Mark payload as GC_CLAIMED -> future derivation fails closed
+    await sql`UPDATE object_registry SET state = 'GC_CLAIMED' WHERE object_id = ${objId}`;
+    let errGc: any;
+    try {
+      await epiService.appendEpistemicState({
+        epistemicStateId: uid('epi-66-gc'),
+        propositionId: propId,
+        assessmentIds: [assId],
+        derivationMethod: 'RULE_BASED',
+        derivationEntityType: 'EvaluatorConfig',
+        derivationStableId: evalStable,
+        derivationRevisionId: evalRevId,
+        validFrom: new Date('2026-02-01T00:00:00Z'),
+        knownFrom: new Date('2026-02-01T00:00:00Z'),
+        tenantId: tenantA,
+      });
+    } catch (e) {
+      errGc = e;
+    }
+    expect(errGc).toBeDefined();
+    expect(errGc.code).toBe('UNAVAILABLE_EVIDENCE_IN_DERIVATION');
+
+    // 3. Delete ObjectRegistry row completely -> future derivation fails closed
+    await sql.begin(async (sqlTx) => {
+      await sqlTx`SET LOCAL session_replication_role = 'replica'`;
+      await sqlTx`DELETE FROM object_registry WHERE object_id = ${objId}`;
+    });
+    let errMissing: any;
+    try {
+      await epiService.appendEpistemicState({
+        epistemicStateId: uid('epi-66-miss'),
+        propositionId: propId,
+        assessmentIds: [assId],
+        derivationMethod: 'RULE_BASED',
+        derivationEntityType: 'EvaluatorConfig',
+        derivationStableId: evalStable,
+        derivationRevisionId: evalRevId,
+        validFrom: new Date('2026-02-01T00:00:00Z'),
+        knownFrom: new Date('2026-02-01T00:00:00Z'),
+        tenantId: tenantA,
+      });
+    } catch (e) {
+      errMissing = e;
+    }
+    expect(errMissing).toBeDefined();
+    expect(errMissing.code).toBe('UNAVAILABLE_EVIDENCE_IN_DERIVATION');
   });
 
   it('Vector 67: deletion causes fabricated replacement evidence', async () => {
@@ -3035,7 +3498,7 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
     expect(err.code).toBe('UNKNOWN_PRESERVATION_GATE_BLOCKED');
   });
 
-  it('Vector 70: Strategy required Proposition missing decision-time EpistemicState', async () => {
+  it('Vector 70: Strategy required Proposition missing decision-time EpistemicState (canonical loading & fail-closed workspace)', async () => {
     const propId = uid('prop-70');
     await propService.resolveOrCreateProposition({
       propositionId: propId,
@@ -3047,12 +3510,71 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
       object: 'O',
     });
 
-    // 1. Attack: Required proposition has no EpistemicState at all
+    const taskRev70 = uid('task-rev-70');
+    const taskSt70 = uid('task-st-70');
+    await sql`
+      INSERT INTO revision_registry (entity_type, stable_id, revision_id, tenant_id)
+      VALUES ('TaskContractRevision', ${taskSt70}, ${taskRev70}, ${tenantA})
+    `;
+    await sql`
+      INSERT INTO task_contract_revisions (
+        task_id, task_revision_id, tenant_id, standalone_task, objective, channel,
+        format, language, market, jurisdiction, brand_id, product_id, audience_context,
+        success_metric_revision_id, constraints, risk_context, compute_budget
+      ) VALUES (
+        ${taskSt70}, ${taskRev70}, ${tenantA}, true, 'Objective 70', 'TWITTER_X',
+        'TEXT', 'en', 'US', 'US', 'brand-1', 'prod-1', 'Audience',
+        'metric-rev-1', 'None', 'Low', 'Budget'
+      )
+    `;
+
+    const audId70 = uid('aud-70');
+    await sql`
+      INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id)
+      VALUES ('AudienceState', ${audId70}, ${tenantA})
+    `;
+    await sql`
+      INSERT INTO audience_states (
+        audience_state_id, tenant_id, task_revision_id, state_stage, context,
+        knowledge_state, problem_state, solution_state, product_state, brand_state,
+        intent_state, desired_outcome, objections, decision_criteria, prior_exposure,
+        origin, uncertainty
+      ) VALUES (
+        ${audId70}, ${tenantA}, ${taskRev70}, 'PROVISIONAL', 'Context',
+        'Knowledge', 'Problem', 'Solution', 'Product', 'Brand',
+        'Intent', 'Outcome', 'Objections', 'Criteria', 'None',
+        'Origin', 'None'
+      )
+    `;
+
+    // 1. Seed canonical StrategyHypothesis and strategy_required_propositions relation
+    const stratId = uid('st-70');
+    await sql`
+      INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id)
+      VALUES ('StrategyHypothesis', ${stratId}, ${tenantA})
+    `;
+    await sql`
+      INSERT INTO strategy_hypotheses (
+        strategy_id, tenant_id, task_revision_id, audience_state_id,
+        core_message, behavioral_objective, persuasion_mechanism, proof_strategy,
+        assumptions, unknowns, failure_modes, risk_hypotheses
+      ) VALUES (
+        ${stratId}, ${tenantA}, ${taskRev70}, ${audId70},
+        'Core Message 70', 'Objective 70', 'Mechanism 70', 'Proof 70',
+        'None', 'None', 'None', 'None'
+      )
+    `;
+    await sql`
+      INSERT INTO strategy_required_propositions (strategy_id, proposition_id)
+      VALUES (${stratId}, ${propId})
+    `;
+
+    // Attack 1: canonical Strategy requires Proposition propId, but caller supplies empty list -> enforced canonically and blocks
     let err1: any;
     try {
       await strategyGateService.evaluateKnowledgeGate({
-        strategyId: uid('st-70-1'),
-        requiredPropositionIds: [propId],
+        strategyId: stratId,
+        requiredPropositionIds: [], // Caller attempts to omit required propositions!
         tenantId: tenantA,
         knowledgeBoundaryTime: new Date('2026-03-01T00:00:00Z'),
         targetValidTime: new Date('2026-03-01T00:00:00Z'),
@@ -3077,12 +3599,11 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
       tenantId: tenantA,
     });
 
-    // 2. Attack: EpistemicState is outside pinned knowledge boundary
+    // Attack 2: EpistemicState is outside pinned knowledge boundary
     let err2: any;
     try {
       await strategyGateService.evaluateKnowledgeGate({
-        strategyId: uid('st-70-2'),
-        requiredPropositionIds: [propId],
+        strategyId: stratId,
         tenantId: tenantA,
         knowledgeBoundaryTime: new Date('2026-03-01T00:00:00Z'),
         targetValidTime: new Date('2026-03-01T00:00:00Z'),
@@ -3093,23 +3614,30 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
     expect(err2).toBeDefined();
     expect(err2.code).toBe('STRATEGY_KNOWLEDGE_GATE_BLOCKED');
 
-    // 3. Attack: Task has an unresolved blocking knowledge gap
+    // Attack 3: Canonical blocking knowledge gap exists in DB, caller passes activeKnowledgeGaps: [] -> gate still blocks
+    const gapId70 = uid('gap-70-db');
+    await sql`
+      INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id)
+      VALUES ('KnowledgeGap', ${gapId70}, ${tenantA})
+    `;
+    await sql`
+      INSERT INTO knowledge_gaps (
+        gap_id, tenant_id, task_revision_id, question, decision_relevance,
+        blocking, researchable, user_resolvable, assumption_allowed, risk_if_wrong, status
+      ) VALUES (
+        ${gapId70}, ${tenantA}, ${taskRev70}, 'Blocking gap in DB', 'High',
+        true, true, true, false, 'High', 'BLOCKING'
+      )
+    `;
+
     let err3: any;
     try {
       await strategyGateService.evaluateKnowledgeGate({
-        strategyId: uid('st-70-3'),
-        requiredPropositionIds: [propId],
+        strategyId: stratId,
+        activeKnowledgeGaps: [], // Caller tries to omit the blocking gap!
         tenantId: tenantA,
         knowledgeBoundaryTime: new Date('2026-05-01T00:00:00Z'),
         targetValidTime: new Date('2026-01-01T00:00:00Z'),
-        activeKnowledgeGaps: [
-          {
-            gapId: uid('gap-70'),
-            blocking: true,
-            assumptionAllowed: false,
-            status: 'BLOCKING',
-          },
-        ],
       });
     } catch (e) {
       err3 = e;
@@ -3117,10 +3645,99 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
     expect(err3).toBeDefined();
     expect(err3.code).toBe('UNKNOWN_PRESERVATION_GATE_BLOCKED');
 
-    // 4. Legitimate resolution returns exact epistemic_state_id
+    // Attack 4: Workspace-private StrategyHypothesis evaluated with caller workspace omitted
+    const taskRev70b = uid('task-rev-70b');
+    const taskSt70b = uid('task-st-70b');
+    await sql`
+      INSERT INTO revision_registry (entity_type, stable_id, revision_id, tenant_id)
+      VALUES ('TaskContractRevision', ${taskSt70b}, ${taskRev70b}, ${tenantA})
+    `;
+    await sql`
+      INSERT INTO task_contract_revisions (
+        task_id, task_revision_id, tenant_id, standalone_task, objective, channel,
+        format, language, market, jurisdiction, brand_id, product_id, audience_context,
+        success_metric_revision_id, constraints, risk_context, compute_budget
+      ) VALUES (
+        ${taskSt70b}, ${taskRev70b}, ${tenantA}, true, 'Objective 70b', 'TWITTER_X',
+        'TEXT', 'en', 'US', 'US', 'brand-1', 'prod-1', 'Audience',
+        'metric-rev-1', 'None', 'Low', 'Budget'
+      )
+    `;
+    const audId70b = uid('aud-70b');
+    await sql`
+      INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id)
+      VALUES ('AudienceState', ${audId70b}, ${tenantA})
+    `;
+    await sql`
+      INSERT INTO audience_states (
+        audience_state_id, tenant_id, task_revision_id, state_stage, context,
+        knowledge_state, problem_state, solution_state, product_state, brand_state,
+        intent_state, desired_outcome, objections, decision_criteria, prior_exposure,
+        origin, uncertainty
+      ) VALUES (
+        ${audId70b}, ${tenantA}, ${taskRev70b}, 'PROVISIONAL', 'Context',
+        'Knowledge', 'Problem', 'Solution', 'Product', 'Brand',
+        'Intent', 'Outcome', 'Objections', 'Criteria', 'None',
+        'Origin', 'None'
+      )
+    `;
+
+    const wsStratId = uid('strat-ws-70');
+    await sql`
+      INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id, workspace_id)
+      VALUES ('StrategyHypothesis', ${wsStratId}, ${tenantA}, 'workspace-alpha')
+    `;
+    await sql`
+      INSERT INTO strategy_hypotheses (
+        strategy_id, tenant_id, workspace_id, task_revision_id, audience_state_id,
+        core_message, behavioral_objective, persuasion_mechanism, proof_strategy,
+        assumptions, unknowns, failure_modes, risk_hypotheses
+      ) VALUES (
+        ${wsStratId}, ${tenantA}, 'workspace-alpha', ${taskRev70b}, ${audId70b},
+        'Core Message WS', 'Objective WS', 'Mechanism WS', 'Proof WS',
+        'None', 'None', 'None', 'None'
+      )
+    `;
+
+    let errWs: any;
+    try {
+      await strategyGateService.evaluateKnowledgeGate({
+        strategyId: wsStratId, // Scoped to workspace-alpha
+        workspaceId: undefined, // Caller omits workspace context!
+        tenantId: tenantA,
+        knowledgeBoundaryTime: new Date('2026-05-01T00:00:00Z'),
+        targetValidTime: new Date('2026-01-01T00:00:00Z'),
+      });
+    } catch (e) {
+      errWs = e;
+    }
+    expect(errWs).toBeDefined();
+    expect(errWs.code).toBe('WORKSPACE_ISOLATION_VIOLATION');
+
+    // 5. Legitimate resolution returns exact epistemic_state_id
+    const legitStratId = uid('strat-70-legit');
+    await sql`
+      INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id)
+      VALUES ('StrategyHypothesis', ${legitStratId}, ${tenantA})
+    `;
+    await sql`
+      INSERT INTO strategy_hypotheses (
+        strategy_id, tenant_id, task_revision_id, audience_state_id,
+        core_message, behavioral_objective, persuasion_mechanism, proof_strategy,
+        assumptions, unknowns, failure_modes, risk_hypotheses
+      ) VALUES (
+        ${legitStratId}, ${tenantA}, ${taskRev70b}, ${audId70b},
+        'Core Message Legit', 'Objective Legit', 'Mechanism Legit', 'Proof Legit',
+        'None', 'None', 'None', 'None'
+      )
+    `;
+    await sql`
+      INSERT INTO strategy_required_propositions (strategy_id, proposition_id)
+      VALUES (${legitStratId}, ${propId})
+    `;
+
     const resolved = await strategyGateService.evaluateKnowledgeGate({
-      strategyId: uid('st-70-4'),
-      requiredPropositionIds: [propId],
+      strategyId: legitStratId,
       tenantId: tenantA,
       knowledgeBoundaryTime: new Date('2026-05-01T00:00:00Z'),
       targetValidTime: new Date('2026-01-01T00:00:00Z'),
@@ -3205,6 +3822,11 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
         knownFrom: new Date(),
         tenantId: tenantA,
         cycleId, // Target cycle is in FREEZING status!
+        fencingContext: {
+          decisionCycleId: cycleId,
+          stageExecutionId: uid('se-72'),
+          fencingToken: 1,
+        },
       });
     } catch (e) {
       err = e;
@@ -3282,11 +3904,148 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
       propositionId: propId,
     });
 
-    // 1. Attack: Commit EvidenceAssessment against superseded cycle -> STALE_WORKER_COMMIT_REJECTED
-    let err1: any;
+    // 1. Attack 1: decision-cycle EvidenceItem commit with all stage context omitted -> reject
+    let errEvContext: any;
+    try {
+      await evService.extractEvidenceItemForDecisionCycle({
+        evidenceId: uid('ev-73-no-ctx'),
+        tenantId: tenantA,
+        originType: 'SOURCE_ARTIFACT',
+        originId: srcId,
+        statement: 'Stat 73 No Context',
+        statementType: 'ASSERTION',
+        assertionMethod: 'EXTRACTED',
+        evidenceDomain: 'ACADEMIC_STUDY',
+        studyDesign: 'OBSERVATIONAL',
+        causalIdentification: 'NONE',
+        mechanismSupport: 'NONE',
+        validFrom: new Date(),
+        limitations: 'None',
+        // No fencing context!
+      });
+    } catch (e) {
+      errEvContext = e;
+    }
+    expect(errEvContext).toBeDefined();
+    expect(errEvContext.code).toBe('DECISION_CYCLE_CONTEXT_REQUIRED');
+
+    // 2. Attack 2: decision-cycle Proposition commit with context omitted -> reject
+    let errPropContext: any;
+    try {
+      await propService.resolveOrCreatePropositionForDecisionCycle({
+        propositionId: uid('prop-73-no-ctx'),
+        tenantId: tenantA,
+        propositionType: 'FACTUAL',
+        canonicalMeaning: uid('Prop 73 No Context'),
+        subject: 'S',
+        predicate: 'P',
+        object: 'O',
+        // No fencing context!
+      });
+    } catch (e) {
+      errPropContext = e;
+    }
+    expect(errPropContext).toBeDefined();
+    expect(errPropContext.code).toBe('DECISION_CYCLE_CONTEXT_REQUIRED');
+
+    // 3. Attack 3: EvidenceLink / Assessment / Epistemic commit with context omitted -> reject
+    let errLinkContext: any;
+    try {
+      await evService.linkEvidenceToPropositionForDecisionCycle({
+        linkId: uid('link-73-no-ctx'),
+        evidenceId: evId,
+        propositionId: propId,
+        tenantId: tenantA,
+        // No fencing context!
+      });
+    } catch (e) {
+      errLinkContext = e;
+    }
+    expect(errLinkContext).toBeDefined();
+    expect(errLinkContext.code).toBe('DECISION_CYCLE_CONTEXT_REQUIRED');
+
+    let errAssContext: any;
+    try {
+      await evService.createEvidenceAssessmentForDecisionCycle({
+        assessmentId: uid('ass-73-no-ctx'),
+        tenantId: tenantA,
+        linkId,
+        compatibilityStatus: 'COMPATIBLE',
+        relationship: 'SUPPORTS',
+        assessorType: 'AUTOMATED_PIPELINE',
+        evaluatorStableId: evalStable,
+        evaluatorRevisionId: evalRevId,
+        // No fencing context!
+      });
+    } catch (e) {
+      errAssContext = e;
+    }
+    expect(errAssContext).toBeDefined();
+    expect(errAssContext.code).toBe('DECISION_CYCLE_CONTEXT_REQUIRED');
+
+    let errEpiContext: any;
+    try {
+      await epiService.appendEpistemicStateForDecisionCycle({
+        epistemicStateId: uid('epi-73-no-ctx'),
+        propositionId: propId,
+        derivationMethod: 'RULE_BASED',
+        derivationEntityType: 'EvaluatorConfig',
+        derivationStableId: evalStable,
+        derivationRevisionId: evalRevId,
+        validFrom: new Date(),
+        knownFrom: new Date(),
+        tenantId: tenantA,
+        // No fencing context!
+      });
+    } catch (e) {
+      errEpiContext = e;
+    }
+    expect(errEpiContext).toBeDefined();
+    expect(errEpiContext.code).toBe('DECISION_CYCLE_CONTEXT_REQUIRED');
+
+    // 4. Legitimate explicit standalone origin/knowledge path succeeds where frozen SPEC permits it
+    const standalonePropId = uid('prop-73-standalone');
+    const standRes = await propService.resolveOrCreateProposition({
+      propositionId: standalonePropId,
+      tenantId: tenantA,
+      propositionType: 'FACTUAL',
+      canonicalMeaning: uid('Prop 73 Standalone'),
+      subject: 'S',
+      predicate: 'P',
+      object: 'O',
+      writeMode: 'STANDALONE',
+    });
+    expect(standRes.outcome).toBe('CREATED_NEW');
+
+    // 5. Standalone state cannot be retroactively injected into a frozen old cycle
+    let errRetroCycle: any;
+    try {
+      await propService.resolveOrCreateProposition({
+        propositionId: uid('prop-73-retro'),
+        tenantId: tenantA,
+        propositionType: 'FACTUAL',
+        canonicalMeaning: uid('Prop 73 Retro'),
+        subject: 'S',
+        predicate: 'P',
+        object: 'O',
+        writeMode: 'STANDALONE',
+        fencingContext: {
+          decisionCycleId: cycleId, // Cannot attach cycle context to standalone write!
+          stageExecutionId: uid('se-73'),
+          fencingToken: 1,
+        },
+      });
+    } catch (e) {
+      errRetroCycle = e;
+    }
+    expect(errRetroCycle).toBeDefined();
+    expect(errRetroCycle.code).toBe('DECISION_CYCLE_CONTEXT_INVALID');
+
+    // 6. Stale worker commit on superseded cycle -> STALE_WORKER_COMMIT_REJECTED
+    let errStale: any;
     try {
       await evService.createEvidenceAssessment({
-        assessmentId: uid('ass-73'),
+        assessmentId: uid('ass-73-stale'),
         tenantId: tenantA,
         linkId,
         compatibilityStatus: 'COMPATIBLE',
@@ -3302,31 +4061,10 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
         },
       });
     } catch (e) {
-      err1 = e;
+      errStale = e;
     }
-    expect(err1).toBeDefined();
-    expect(err1.code).toBe('STALE_WORKER_COMMIT_REJECTED');
-
-    // 2. Attack: Omitting stage authorization from a decision-cycle commit fails closed
-    let err2: any;
-    try {
-      await evService.createEvidenceAssessment({
-        assessmentId: uid('ass-73-b'),
-        tenantId: tenantA,
-        linkId,
-        compatibilityStatus: 'COMPATIBLE',
-        relationship: 'SUPPORTS',
-        assessorType: 'AUTOMATED_PIPELINE',
-        evaluatorStableId: evalStable,
-        evaluatorRevisionId: evalRevId,
-        decisionCycleId: cycleId,
-        // fencingContext omitted!
-      });
-    } catch (e) {
-      err2 = e;
-    }
-    expect(err2).toBeDefined();
-    expect(err2.code).toBe('STAGE_EXECUTION_CONTEXT_REQUIRED');
+    expect(errStale).toBeDefined();
+    expect(errStale.code).toBe('STALE_WORKER_COMMIT_REJECTED');
   });
 
   it('Vector 74: stale worker creates EpistemicState after cancellation', async () => {
@@ -3376,6 +4114,11 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
         knownFrom: new Date(),
         tenantId: tenantA,
         cycleId, // Cancelled cycle!
+        fencingContext: {
+          decisionCycleId: cycleId,
+          stageExecutionId: uid('se-74'),
+          fencingToken: 1,
+        },
       });
     } catch (e) {
       err = e;

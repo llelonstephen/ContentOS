@@ -299,6 +299,7 @@ describe('M1 Adversarial Verification Suite: Live PostgreSQL Invariants', () => 
           'TWITTER_X', 'metric-rev-adv-ctr', '{}', '{}', '{}',
           ${tenantA}
         )
+        ON CONFLICT (task_revision_id) DO NOTHING
       `;
 
       let err: any;
