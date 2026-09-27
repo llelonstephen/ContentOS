@@ -1439,6 +1439,32 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
     };
     expect(PolicyConflictResolver.resolveConflict(confGen1).resolutionType).toBe('ESCALATE');
     expect(PolicyConflictResolver.resolveConflict(confGen2).resolutionType).toBe('ESCALATE');
+
+    // 3. Attack: BLOCK with overrideAllowed: true and priorityClass: "STATUTORY_MANDATE" MUST NOT become HARD_DENY_OVERRIDES solely from wording
+    const dStatBlock = {
+      policyResultId: 'res-stat-block',
+      snapshotId: 's-45',
+      policyRevisionId: 'p-stat-block',
+      triggered: true,
+      actionEffect: 'BLOCK' as const,
+      actionCode: 'STATUTORY_MANDATE_BLOCK',
+      priorityClass: 'STATUTORY_MANDATE', // wording MUST NOT infer hard deny
+      scope: 'GLOBAL',
+      overrideAllowed: true, // overridable -> cannot qualify as hard deny
+    };
+    const confStat1 = {
+      conflictKey: 'k-45-stat-1',
+      policyResultIds: ['res-stat-block', 'res-allow'],
+      descriptors: [dStatBlock, dAllow],
+    };
+    const confStat2 = {
+      conflictKey: 'k-45-stat-2',
+      policyResultIds: ['res-allow', 'res-stat-block'],
+      descriptors: [dAllow, dStatBlock],
+    };
+    expect(PolicyConflictResolver.isHardDeny(dStatBlock)).toBe(false);
+    expect(PolicyConflictResolver.resolveConflict(confStat1).resolutionType).toBe('ESCALATE');
+    expect(PolicyConflictResolver.resolveConflict(confStat2).resolutionType).toBe('ESCALATE');
   });
 
   // Vector 46: MORE_SPECIFIC_SCOPE used when scopes incomparable
@@ -1513,33 +1539,35 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
     expect(resNarrow2.resolutionType).toBe('MORE_SPECIFIC_SCOPE');
     expect(resNarrow2.winningPolicyResultId).toBe('res-narrow');
 
-    // 3. Two incompatible REQUIREMENT results are detected as a conflict
-    const dReqA = {
-      policyResultId: 'res-req-a',
+    // 3. Different compatible REQUIREMENT action codes do NOT conflict (coexist simultaneously)
+    const dReqDiff1 = {
+      policyResultId: 'res-req-diff1',
       snapshotId: 's-46',
-      policyRevisionId: 'p-req-a',
+      policyRevisionId: 'p-req-diff1',
       triggered: true,
       actionEffect: 'REQUIREMENT' as const,
-      actionCode: 'REQUIRE_DISCLAIMER_A',
+      actionCode: 'REQUIRE_DISCLOSURE',
+      actionParameters: { section: 'footer' },
       priorityClass: 'STANDARD',
       scope: 'GLOBAL',
       overrideAllowed: true,
     };
-    const dReqB = {
-      policyResultId: 'res-req-b',
+    const dReqDiff2 = {
+      policyResultId: 'res-req-diff2',
       snapshotId: 's-46',
-      policyRevisionId: 'p-req-b',
+      policyRevisionId: 'p-req-diff2',
       triggered: true,
       actionEffect: 'REQUIREMENT' as const,
-      actionCode: 'REQUIRE_DISCLAIMER_B',
+      actionCode: 'REQUIRE_SOURCE_CITATION',
+      actionParameters: { style: 'inline' },
       priorityClass: 'STANDARD',
       scope: 'GLOBAL',
       overrideAllowed: true,
     };
-    const detectedIncompatible = PolicyConflictResolver.detectConflicts([dReqA, dReqB]);
-    expect(detectedIncompatible.length).toBe(1);
+    const detectedCompatibleCodes = PolicyConflictResolver.detectConflicts([dReqDiff1, dReqDiff2]);
+    expect(detectedCompatibleCodes.length).toBe(0);
 
-    // 4. Two compatible REQUIREMENT results are not falsely conflicted
+    // 4. Same requirement code with compatible parameters does NOT conflict
     const dReqComp1 = {
       policyResultId: 'res-comp-1',
       snapshotId: 's-46',
@@ -1566,11 +1594,39 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
     };
     const detectedCompatible = PolicyConflictResolver.detectConflicts([dReqComp1, dReqComp2]);
     expect(detectedCompatible.length).toBe(0);
+
+    // 5. Contradictory structured requirement parameters DO conflict
+    const dReqContra1 = {
+      policyResultId: 'res-req-contra1',
+      snapshotId: 's-46',
+      policyRevisionId: 'p-req-contra1',
+      triggered: true,
+      actionEffect: 'REQUIREMENT' as const,
+      actionCode: 'REQUIRE_DISCLAIMER_A',
+      actionParameters: { format: 'HTML' },
+      priorityClass: 'STANDARD',
+      scope: 'GLOBAL',
+      overrideAllowed: true,
+    };
+    const dReqContra2 = {
+      policyResultId: 'res-req-contra2',
+      snapshotId: 's-46',
+      policyRevisionId: 'p-req-contra2',
+      triggered: true,
+      actionEffect: 'REQUIREMENT' as const,
+      actionCode: 'REQUIRE_DISCLAIMER_B',
+      actionParameters: { format: 'PLAIN_TEXT' }, // contradictory demand on same key!
+      priorityClass: 'STANDARD',
+      scope: 'GLOBAL',
+      overrideAllowed: true,
+    };
+    const detectedContradictory = PolicyConflictResolver.detectConflicts([dReqContra1, dReqContra2]);
+    expect(detectedContradictory.length).toBe(1);
   });
 
   // Vector 47: EXPLICIT_PRIORITY used when priorities equal/incomparable
   it('Vector 47: EXPLICIT_PRIORITY used when priorities equal/incomparable (falls through / fails closed)', () => {
-    // 1. Equal/incomparable priority does not choose insertion order -> ESCALATES
+    // 1. Equal/incomparable string priorities do not choose insertion order -> ESCALATES
     const dEq1 = {
       policyResultId: 'res-1',
       snapshotId: 's-47',
@@ -1606,45 +1662,81 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
     expect(PolicyConflictResolver.resolveConflict(confEq1).resolutionType).toBe('ESCALATE');
     expect(PolicyConflictResolver.resolveConflict(confEq2).resolutionType).toBe('ESCALATE');
 
-    // 2. Strict explicit priority resolves deterministically via EXPLICIT_PRIORITY
-    const dHigh = {
-      policyResultId: 'res-high',
+    // 2. String naming conventions like P1 vs P2 do NOT resolve by a hard-coded global table -> ESCALATES
+    const dP1 = {
+      policyResultId: 'res-p1',
       snapshotId: 's-47',
-      policyRevisionId: 'p-high',
+      policyRevisionId: 'p-p1',
+      triggered: true,
+      actionEffect: 'REQUIRE_REVIEW' as const,
+      actionCode: 'REV_P1',
+      priorityClass: 'P1', // arbitrary string convention
+      scope: 'GLOBAL',
+      overrideAllowed: true,
+    };
+    const dP2 = {
+      policyResultId: 'res-p2',
+      snapshotId: 's-47',
+      policyRevisionId: 'p-p2',
+      triggered: true,
+      actionEffect: 'WARNING' as const,
+      actionCode: 'WARN_P2',
+      priorityClass: 'P2', // arbitrary string convention
+      scope: 'GLOBAL',
+      overrideAllowed: true,
+    };
+    const confP1P2_1 = {
+      conflictKey: 'k-47-p1p2-1',
+      policyResultIds: ['res-p1', 'res-p2'],
+      descriptors: [dP1, dP2],
+    };
+    const confP1P2_2 = {
+      conflictKey: 'k-47-p1p2-2',
+      policyResultIds: ['res-p2', 'res-p1'],
+      descriptors: [dP2, dP1],
+    };
+    expect(PolicyConflictResolver.resolveConflict(confP1P2_1).resolutionType).toBe('ESCALATE');
+    expect(PolicyConflictResolver.resolveConflict(confP1P2_2).resolutionType).toBe('ESCALATE');
+
+    // 3. Strict explicit numeric priority supplies deterministic ordering -> EXPLICIT_PRIORITY
+    const dNumHigh = {
+      policyResultId: 'res-num-high',
+      snapshotId: 's-47',
+      policyRevisionId: 'p-num-high',
       triggered: true,
       actionEffect: 'REQUIRE_REVIEW' as const,
       actionCode: 'REV_HIGH',
-      priorityClass: 'P1',
+      priorityClass: 100,
       scope: 'GLOBAL',
       overrideAllowed: true,
     };
-    const dLow = {
-      policyResultId: 'res-low',
+    const dNumLow = {
+      policyResultId: 'res-num-low',
       snapshotId: 's-47',
-      policyRevisionId: 'p-low',
+      policyRevisionId: 'p-num-low',
       triggered: true,
       actionEffect: 'WARNING' as const,
       actionCode: 'WARN_LOW',
-      priorityClass: 'P2',
+      priorityClass: 50,
       scope: 'GLOBAL',
       overrideAllowed: true,
     };
-    const confPrio1 = {
-      conflictKey: 'k-47-prio-1',
-      policyResultIds: ['res-high', 'res-low'],
-      descriptors: [dHigh, dLow],
+    const confNum1 = {
+      conflictKey: 'k-47-num-1',
+      policyResultIds: ['res-num-high', 'res-num-low'],
+      descriptors: [dNumHigh, dNumLow],
     };
-    const confPrio2 = {
-      conflictKey: 'k-47-prio-2',
-      policyResultIds: ['res-low', 'res-high'],
-      descriptors: [dLow, dHigh],
+    const confNum2 = {
+      conflictKey: 'k-47-num-2',
+      policyResultIds: ['res-num-low', 'res-num-high'],
+      descriptors: [dNumLow, dNumHigh],
     };
-    const resPrio1 = PolicyConflictResolver.resolveConflict(confPrio1);
-    const resPrio2 = PolicyConflictResolver.resolveConflict(confPrio2);
-    expect(resPrio1.resolutionType).toBe('EXPLICIT_PRIORITY');
-    expect(resPrio1.winningPolicyResultId).toBe('res-high');
-    expect(resPrio2.resolutionType).toBe('EXPLICIT_PRIORITY');
-    expect(resPrio2.winningPolicyResultId).toBe('res-high');
+    const resNum1 = PolicyConflictResolver.resolveConflict(confNum1);
+    const resNum2 = PolicyConflictResolver.resolveConflict(confNum2);
+    expect(resNum1.resolutionType).toBe('EXPLICIT_PRIORITY');
+    expect(resNum1.winningPolicyResultId).toBe('res-num-high');
+    expect(resNum2.resolutionType).toBe('EXPLICIT_PRIORITY');
+    expect(resNum2.winningPolicyResultId).toBe('res-num-high');
   });
 
   // Vector 48: ESCALATE interpreted as release authorization

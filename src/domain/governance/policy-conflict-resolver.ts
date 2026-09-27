@@ -178,21 +178,22 @@ export function areResultsInConflict(a: PolicyResultDescriptor, b: PolicyResultD
 
   // Conflict Case 2: Incompatible REQUIREMENTS (SPEC04 §57: "REQUIREMENT A vs incompatible REQUIREMENT B")
   if (a.actionEffect === 'REQUIREMENT' && b.actionEffect === 'REQUIREMENT') {
-    // If requirement codes differ, they assert distinct/competing mandatory obligations
-    if (a.actionCode !== b.actionCode) {
-      return true;
-    }
-    // If parameters differ, they assert incompatible parameter demands
-    if (a.actionParameters || b.actionParameters) {
-      const paramsA = a.actionParameters ?? {};
-      const paramsB = b.actionParameters ?? {};
+    // Different requirement action codes alone (e.g. REQUIRE_DISCLOSURE vs REQUIRE_SOURCE_CITATION)
+    // are NOT a conflict; different requirements can coexist simultaneously.
+    // A conflict exists ONLY if structured immutable action semantics mechanically prove that
+    // both demands cannot be satisfied simultaneously (e.g. contradictory parameter demands on the same target).
+    if (a.actionParameters && b.actionParameters) {
+      const paramsA = a.actionParameters;
+      const paramsB = b.actionParameters;
       for (const key of Object.keys(paramsA)) {
-        if (key in paramsB && JSON.stringify(paramsA[key]) !== JSON.stringify(paramsB[key])) {
-          return true;
+        if (Object.prototype.hasOwnProperty.call(paramsB, key)) {
+          if (JSON.stringify(paramsA[key]) !== JSON.stringify(paramsB[key])) {
+            return true;
+          }
         }
       }
     }
-    // Identical requirement code and compatible parameters -> COMPATIBLE, NO CONFLICT
+    // If incompatibility cannot be mechanically proven from structured parameters: compatible (no conflict)
     return false;
   }
 
@@ -204,11 +205,20 @@ export function areResultsInConflict(a: PolicyResultDescriptor, b: PolicyResultD
     return true;
   }
 
-  // Conflict Case 4: Multiple competing BLOCK actions with incompatible remediation codes
+  // Conflict Case 4: Multiple competing BLOCK actions with contradictory parameters
   if (a.actionEffect === 'BLOCK' && b.actionEffect === 'BLOCK') {
-    if (a.actionCode !== b.actionCode) {
-      return true;
+    if (a.actionParameters && b.actionParameters) {
+      const paramsA = a.actionParameters;
+      const paramsB = b.actionParameters;
+      for (const key of Object.keys(paramsA)) {
+        if (Object.prototype.hasOwnProperty.call(paramsB, key)) {
+          if (JSON.stringify(paramsA[key]) !== JSON.stringify(paramsB[key])) {
+            return true;
+          }
+        }
+      }
     }
+    // Both mandate BLOCK without contradictory demands: both satisfied simultaneously by blocking
     return false;
   }
 
@@ -217,30 +227,31 @@ export function areResultsInConflict(a: PolicyResultDescriptor, b: PolicyResultD
 
 /**
  * Proves whether a result has legitimate hard-deny semantics (SPEC04 §62).
- * Hard deny requires:
+ *
+ * Hard deny requires exact frozen policy/rule semantics:
  * 1. Action is BLOCK
- * 2. overrideAllowed === false (non-overridable) OR explicit priority mandate (STATUTORY_MANDATE / HARD_DENY).
+ * 2. overrideAllowed === false (strictly non-overridable)
+ *
+ * Substring, name, reason text, or priority-class wording inference
+ * (such as "HARD", "MANDATE", "STATUTORY") is strictly forbidden (SPEC04 §62).
  * A generic, overridable BLOCK is NOT a hard deny.
  */
 export function isHardDeny(result: PolicyResultDescriptor): boolean {
   if (result.actionEffect !== 'BLOCK') {
     return false;
   }
-  // Explicitly non-overridable is required for hard deny
-  if (result.overrideAllowed === false) {
-    return true;
-  }
-  // Or priorityClass explicitly establishes a non-overridable statutory mandate
-  if (typeof result.priorityClass === 'string') {
-    const pc = result.priorityClass.toUpperCase();
-    if (pc.includes('HARD') || pc.includes('MANDATE') || pc.includes('STATUTORY')) {
-      return true;
-    }
-  }
-  return false;
+  // Explicitly non-overridable is the exact structured proof required for hard deny
+  return result.overrideAllowed === false;
 }
 
 export class PolicyConflictResolver {
+  /**
+   * Proves whether a result has legitimate hard-deny semantics (SPEC04 §62).
+   */
+  static isHardDeny(result: PolicyResultDescriptor): boolean {
+    return isHardDeny(result);
+  }
+
   /**
    * Computes the deterministic conflict_key (SPEC04 §59).
    * hash(snapshot_id + ':' + canonical_sorted(policy_result_ids))
@@ -411,20 +422,25 @@ export class PolicyConflictResolver {
     }
 
     // 4. EXPLICIT_PRIORITY (SPEC04 §65)
-    // Allowed only when priorityClass defines a deterministic ordering
+    // Permitted ONLY when the exact frozen policy metadata supplies a deterministic ordering (e.g. numeric priority values).
+    // The resolver must NOT manufacture priority semantics from naming conventions, arbitrary string labels,
+    // or global priority lookup tables. If the contract does not supply comparable priority semantics,
+    // or if priorities are equal/incomparable, the resolver MUST ESCALATE (SPEC04 §65, §67).
     if (resA!.priorityClass !== undefined && resB!.priorityClass !== undefined) {
-      const weightA = parsePriorityWeight(resA!.priorityClass);
-      const weightB = parsePriorityWeight(resB!.priorityClass);
-      if (weightA !== null && weightB !== null && weightA !== weightB) {
-        const higher = weightA > weightB ? resA! : resB!;
-        return {
-          conflictKey,
-          resolutionType: 'EXPLICIT_PRIORITY',
-          overrideId: null,
-          reasonCodes: 'HIGHER_PRIORITY_CLASS_DOMINATES',
-          resolvedWinningResultId: higher.policyResultId,
-          winningPolicyResultId: higher.policyResultId,
-        };
+      if (typeof resA!.priorityClass === 'number' && typeof resB!.priorityClass === 'number') {
+        const numA = resA!.priorityClass;
+        const numB = resB!.priorityClass;
+        if (!isNaN(numA) && !isNaN(numB) && numA !== numB) {
+          const higher = numA > numB ? resA! : resB!;
+          return {
+            conflictKey,
+            resolutionType: 'EXPLICIT_PRIORITY',
+            overrideId: null,
+            reasonCodes: 'HIGHER_PRIORITY_CLASS_DOMINATES',
+            resolvedWinningResultId: higher.policyResultId,
+            winningPolicyResultId: higher.policyResultId,
+          };
+        }
       }
     }
 
@@ -452,18 +468,4 @@ export class PolicyConflictResolver {
     }
     return true;
   }
-}
-
-export function parsePriorityWeight(val: string | number | undefined): number | null {
-  if (val === undefined || val === null) return null;
-  if (typeof val === 'number') return isNaN(val) ? null : val;
-  const str = String(val).trim().toUpperCase();
-  if (str === 'CRITICAL' || str === 'P0') return 1000;
-  if (str === 'HIGH' || str === 'P1') return 500;
-  if (str === 'MEDIUM' || str === 'P2') return 300;
-  if (str === 'LOW' || str === 'P3') return 100;
-  if (str === 'STANDARD' || str === 'DEFAULT') return 50;
-  const num = Number(str);
-  if (!isNaN(num)) return num;
-  return null;
 }

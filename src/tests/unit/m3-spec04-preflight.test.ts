@@ -328,8 +328,19 @@ describe('SPEC04 §146 Static Contract Preflight (34 Checks)', () => {
     // Structural enforcement checks:
     expect(conflictFile).toContain('isHardDeny');
     expect(conflictFile).toContain('compareStructuredScopes');
-    expect(conflictFile).toContain('parsePriorityWeight');
     expect(conflictFile).toContain('overrideAllowed === false');
+
+    // Prohibit substring-based hard-deny inference (SPEC04 §62)
+    expect(conflictFile).not.toMatch(/includes\(['"](HARD|MANDATE|STATUTORY)['"]\)/i);
+
+    // Prohibit hard-coded P0/P1/HIGH/MEDIUM priority table (SPEC04 §65)
+    expect(conflictFile).not.toContain('parsePriorityWeight');
+    expect(conflictFile).not.toContain('CRITICAL');
+    expect(conflictFile).not.toContain('P0');
+    expect(conflictFile).not.toContain('P1');
+
+    // Prohibit automatic REQUIREMENT conflict based on actionCode alone (SPEC04 §57)
+    expect(conflictFile).not.toContain('a.actionCode !== b.actionCode');
   });
 
   // 23 AUTHORIZED_OVERRIDE requires valid PolicyOverride
