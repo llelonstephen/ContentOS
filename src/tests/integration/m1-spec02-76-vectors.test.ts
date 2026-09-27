@@ -75,6 +75,7 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
   let decService: DecisionPersistenceService;
   let retService: RetentionDeletionService;
   let standaloneAdapter: any;
+  let standaloneSql: ReturnType<typeof postgres>;
 
   const progStable = uid('prog-76');
   const progRev1 = uid('prog-rev-76-1');
@@ -109,6 +110,9 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
         IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'contentos_runtime_role') THEN
           CREATE ROLE contentos_runtime_role NOLOGIN;
         END IF;
+        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'contentos_standalone_role') THEN
+          CREATE ROLE contentos_standalone_role NOLOGIN;
+        END IF;
         IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'test_cp_user') THEN
           CREATE ROLE test_cp_user WITH LOGIN PASSWORD 'test_cp_secret';
         END IF;
@@ -124,15 +128,27 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
         IF pg_has_role('test_rt_user', 'contentos_control_plane_role', 'MEMBER') THEN
           REVOKE contentos_control_plane_role FROM test_rt_user;
         END IF;
+        IF pg_has_role('test_rt_user', 'contentos_standalone_role', 'MEMBER') THEN
+          REVOKE contentos_standalone_role FROM test_rt_user;
+        END IF;
+        IF pg_has_role('contentos_runtime_role', 'contentos_standalone_role', 'MEMBER') THEN
+          REVOKE contentos_standalone_role FROM contentos_runtime_role;
+        END IF;
       END $$;
     `;
-    await sql`GRANT USAGE ON SCHEMA public TO contentos_runtime_role, contentos_control_plane_role`;
+    await sql`GRANT USAGE ON SCHEMA public TO contentos_runtime_role, contentos_control_plane_role, contentos_standalone_role`;
     await sql`GRANT ALL ON ALL TABLES IN SCHEMA public TO contentos_control_plane_role`;
     await sql`GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO contentos_control_plane_role`;
+    await sql`GRANT ALL ON ALL TABLES IN SCHEMA public TO contentos_standalone_role`;
+    await sql`GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO contentos_standalone_role`;
     await sql`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO contentos_runtime_role`;
     await sql`GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO contentos_runtime_role`;
     await sql`REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON control_plane_activations FROM contentos_runtime_role`;
     await sql`GRANT SELECT ON control_plane_activations TO contentos_runtime_role`;
+    await sql`GRANT contentos_standalone_role TO CURRENT_USER`;
+
+    const standaloneUrl = DB_URL + (DB_URL.includes('?') ? '&' : '?') + 'options=-c%20role=contentos_standalone_role';
+    standaloneSql = postgres(standaloneUrl, { max: 5 });
 
     cpService = new ControlPlanePersistenceService(sql);
     pubService = new PublicationPersistenceService(sql);
@@ -140,7 +156,7 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
     measService = new MeasurementPersistenceService(sql);
     decService = new DecisionPersistenceService(sql);
     retService = new RetentionDeletionService(sql);
-    standaloneAdapter = createStandaloneIngestionAdapter(sql);
+    standaloneAdapter = createStandaloneIngestionAdapter(standaloneSql);
 
     // Seed baseline RevisionRegistry
     await sql`
@@ -287,6 +303,7 @@ describe('SPEC02 §37 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
   });
 
   afterAll(async () => {
+    if (standaloneSql) await standaloneSql.end();
     if (sql) await sql.end();
   });
 

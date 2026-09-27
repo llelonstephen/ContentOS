@@ -322,27 +322,56 @@ describe('SPEC03 §146 Static Contract Preflight Suite (28 Checks)', () => {
     expect(coordinatorContent).toContain('STALE_WORKER_COMMIT_REJECTED');
     expect(coordinatorContent).toContain('WRITE_AUTHORITY_REQUIRED');
 
-    // 1. AST check: coordinator does NOT export standalone capability or authority secrets
-    const coordinatorSf = ts.createSourceFile(coordinatorPath, coordinatorContent, ts.ScriptTarget.Latest, true);
-    ts.forEachChild(coordinatorSf, (node) => {
-      if (ts.isVariableStatement(node) && node.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)) {
-        for (const decl of node.declarationList.declarations) {
-          const name = decl.name.getText(coordinatorSf);
-          expect(name).not.toBe('TRUSTED_STANDALONE_CAPABILITY');
-          expect(name).not.toBe('STANDALONE_AUTHORITY');
-          expect(name).not.toMatch(/CAPABILITY/i);
-          expect(name).not.toMatch(/AUTHORITY_TOKEN/i);
+    // 1. Structural check: Standalone branch calls a production DB-role verifier
+    expect(coordinatorContent).toContain('verifyStandaloneDatabaseAuthority(sqlTx)');
+    expect(coordinatorContent).toContain("CURRENT_USER AS current_role");
+    expect(coordinatorContent).toContain("row?.current_role !== 'contentos_standalone_role'");
+
+    // 1b. Structural check: No call-stack authorization exists across codebase
+    const projectSrcDir = path.resolve(import.meta.dirname, '../..');
+    const allSrcFiles: string[] = [];
+    function collectFiles(dir: string) {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          if (entry.name !== 'node_modules' && entry.name !== 'tests') {
+            collectFiles(full);
+          }
+        } else if (entry.name.endsWith('.ts')) {
+          allSrcFiles.push(full);
         }
       }
-      if (ts.isFunctionDeclaration(node) && node.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)) {
-        const name = node.name?.getText(coordinatorSf) ?? '';
-        expect(name).not.toBe('createStandaloneIngestionAdapter');
-        expect(name).not.toMatch(/create.*standalone/i);
-        expect(name).not.toMatch(/mint/i);
-      }
-    });
+    }
+    collectFiles(projectSrcDir);
 
-    // 1b. AST check: Persistence public surface does NOT export any privilege-minting standalone factory or constructor
+    for (const file of allSrcFiles) {
+      const code = fs.readFileSync(file, 'utf-8');
+      expect(code).not.toContain('assertTrustedBootstrapCaller');
+      expect(code).not.toContain('new Error().stack');
+      expect(code).not.toMatch(/caller.*stack/i);
+    }
+
+    // 1c. Structural check: No Symbol or in-process token is used as final standalone authority
+    expect(coordinatorContent).not.toContain('STANDALONE_AUTHORITY');
+    expect(coordinatorContent).not.toContain('isStandaloneAuthority');
+    expect(coordinatorContent).not.toContain('Symbol(');
+    const compRootPath = path.resolve(import.meta.dirname, '../../bootstrap/composition-root.ts');
+    const compRootContent = fs.readFileSync(compRootPath, 'utf-8');
+    expect(compRootContent).not.toContain('STANDALONE_AUTHORITY');
+    expect(compRootContent).not.toContain('Symbol(');
+    expect(compRootContent).not.toContain('assertTrustedBootstrapCaller');
+
+    // 1d. Structural check: Migration contains standalone role setup and runtime isolation
+    const migrationPath = path.resolve(
+      import.meta.dirname,
+      '../../persistence/relational/migrations/0001_fantastic_kid_colt.sql',
+    );
+    const migrationContent = fs.readFileSync(migrationPath, 'utf-8');
+    expect(migrationContent).toContain("CREATE ROLE contentos_standalone_role NOLOGIN");
+    expect(migrationContent).toContain("REVOKE contentos_standalone_role FROM contentos_runtime_role");
+    expect(migrationContent).not.toContain("GRANT contentos_standalone_role TO contentos_runtime_role");
+
+    // 1e. AST check: Persistence public surface does NOT export any privilege-minting standalone factory or constructor
     const persistenceDir = path.resolve(import.meta.dirname, '../../persistence/relational/services');
     for (const pFile of fs.readdirSync(persistenceDir)) {
       if (!pFile.endsWith('.ts')) continue;

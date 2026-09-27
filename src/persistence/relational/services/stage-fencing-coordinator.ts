@@ -9,7 +9,6 @@
  *   - Prohibits omitting stage authorization when writing within a DecisionCycle
  */
 import { RegistryValidationError } from '../../../domain/services/registry-validator.js';
-import { isStandaloneAuthority } from '../../../bootstrap/composition-root.js';
 
 export interface StageFencingContext {
   decisionCycleId?: string | null;
@@ -19,6 +18,26 @@ export interface StageFencingContext {
 }
 
 export type WriteMode = 'STANDALONE' | 'DECISION_CYCLE';
+
+/**
+ * Verifies that the active database transaction/session holds the legitimate
+ * standalone canonical write identity (contentos_standalone_role).
+ *
+ * Implements SPEC03 §103, §104:
+ * Database principal identity is the non-forgeable production authorization boundary.
+ */
+export async function verifyStandaloneDatabaseAuthority(sqlTx: any): Promise<void> {
+  const [row] = await sqlTx`
+    SELECT CURRENT_USER AS current_role
+  `;
+
+  if (row?.current_role !== 'contentos_standalone_role') {
+    throw new RegistryValidationError(
+      'WRITE_AUTHORITY_REQUIRED',
+      `Direct invocation of canonical knowledge persistence without verified database write authority is forbidden. Active database role is '${row?.current_role || 'unknown'}', expected 'contentos_standalone_role'.`,
+    );
+  }
+}
 
 export async function verifyStageFencing(
   sqlTx: any,
@@ -31,7 +50,7 @@ export async function verifyStageFencing(
     _standaloneAuthority?: unknown;
   },
 ): Promise<void> {
-  const { fencingContext, tenantId, workspaceId, requireCycleContext, writeMode, _standaloneAuthority } = params;
+  const { fencingContext, tenantId, workspaceId, requireCycleContext, writeMode } = params;
 
   const hasCycleContext = !!fencingContext?.decisionCycleId;
   const isCycleMode = writeMode === 'DECISION_CYCLE' || requireCycleContext || hasCycleContext;
@@ -43,13 +62,6 @@ export async function verifyStageFencing(
     );
   }
 
-  if (!isCycleMode && !isStandaloneAuthority(_standaloneAuthority)) {
-    throw new RegistryValidationError(
-      'WRITE_AUTHORITY_REQUIRED',
-      'Direct invocation of canonical knowledge persistence without verified write authority is forbidden. Decision-cycle writes require DecisionCycle and StageExecution fencing context; standalone writes require trusted StandaloneIngestionAdapter capability.',
-    );
-  }
-
   if (isCycleMode && !hasCycleContext) {
     throw new RegistryValidationError(
       'DECISION_CYCLE_CONTEXT_REQUIRED',
@@ -57,12 +69,13 @@ export async function verifyStageFencing(
     );
   }
 
-  if (!hasCycleContext) {
-    // Verified standalone write path under trusted capability
+  if (!isCycleMode) {
+    // Non-DecisionCycle canonical write branch requires verified PostgreSQL standalone identity.
+    await verifyStandaloneDatabaseAuthority(sqlTx);
     return;
   }
 
-  const { decisionCycleId, stageExecutionId, fencingToken, leaseOwner } = fencingContext;
+  const { decisionCycleId, stageExecutionId, fencingToken, leaseOwner } = fencingContext!;
 
   // 1. Verify DecisionCycle state
   const [cycle] = await sqlTx`

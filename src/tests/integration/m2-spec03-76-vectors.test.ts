@@ -123,6 +123,7 @@ const DB_URL =
 
 describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
   let sql: ReturnType<typeof postgres>;
+  let standaloneSql: ReturnType<typeof postgres>;
   let propService: PropositionPersistenceService;
   let evService: EvidencePersistenceService;
   let gapService: KnowledgeGapPersistenceService;
@@ -159,11 +160,54 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
     assertTestDatabase(DB_URL);
     sql = postgres(DB_URL, { max: 5 });
 
+    // Provision non-login roles and separate test credentials outside migration
+    await sql`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'contentos_control_plane_role') THEN
+          CREATE ROLE contentos_control_plane_role NOLOGIN;
+        END IF;
+        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'contentos_runtime_role') THEN
+          CREATE ROLE contentos_runtime_role NOLOGIN;
+        END IF;
+        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'contentos_standalone_role') THEN
+          CREATE ROLE contentos_standalone_role NOLOGIN;
+        END IF;
+        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'test_standalone_user') THEN
+          CREATE ROLE test_standalone_user WITH LOGIN PASSWORD 'test_standalone_secret';
+        END IF;
+        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'test_rt_user') THEN
+          CREATE ROLE test_rt_user WITH LOGIN PASSWORD 'test_rt_secret';
+        END IF;
+        IF NOT pg_has_role('test_standalone_user', 'contentos_standalone_role', 'MEMBER') THEN
+          GRANT contentos_standalone_role TO test_standalone_user;
+        END IF;
+        IF NOT pg_has_role('test_rt_user', 'contentos_runtime_role', 'MEMBER') THEN
+          GRANT contentos_runtime_role TO test_rt_user;
+        END IF;
+        IF pg_has_role('test_rt_user', 'contentos_standalone_role', 'MEMBER') THEN
+          REVOKE contentos_standalone_role FROM test_rt_user;
+        END IF;
+        IF pg_has_role('contentos_runtime_role', 'contentos_standalone_role', 'MEMBER') THEN
+          REVOKE contentos_standalone_role FROM contentos_runtime_role;
+        END IF;
+      END $$;
+    `;
+    await sql`GRANT USAGE ON SCHEMA public TO contentos_runtime_role, contentos_standalone_role`;
+    await sql`GRANT ALL ON ALL TABLES IN SCHEMA public TO contentos_standalone_role`;
+    await sql`GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO contentos_standalone_role`;
+    await sql`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO contentos_runtime_role`;
+    await sql`GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO contentos_runtime_role`;
+    await sql`GRANT contentos_standalone_role TO CURRENT_USER`;
+
+    const standaloneUrl = DB_URL + (DB_URL.includes('?') ? '&' : '?') + 'options=-c%20role=contentos_standalone_role';
+    standaloneSql = postgres(standaloneUrl, { max: 5 });
+
     basePropService = new PropositionPersistenceService(sql);
     baseEvService = new EvidencePersistenceService(sql);
     baseGapService = new KnowledgeGapPersistenceService(sql);
     baseEpiService = new EpistemicPersistenceService(sql);
-    standaloneAdapter = createStandaloneIngestionAdapter(sql);
+    standaloneAdapter = createStandaloneIngestionAdapter(standaloneSql);
     cpService = new ControlPlanePersistenceService(sql);
     strategyGateService = new StrategyKnowledgeGateService(sql);
 
@@ -331,6 +375,7 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
   });
 
   afterAll(async () => {
+    if (standaloneSql) await standaloneSql.end();
     await sql.end();
   });
 
@@ -1414,8 +1459,8 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
     // operational fingerprint/lock bucket using the safe test seam, and prove deep semantic
     // equivalence validation prevents false identity reuse.
     const forcedFingerprint = `collision-fp-${Date.now()}`;
-    const collisionPropService = new PropositionPersistenceService(sql, () => forcedFingerprint);
-    const collisionAdapter = createStandaloneIngestionAdapter(sql, { propService: collisionPropService });
+    const collisionPropService = new PropositionPersistenceService(standaloneSql, () => forcedFingerprint);
+    const collisionAdapter = createStandaloneIngestionAdapter(standaloneSql, { propService: collisionPropService });
 
     const propId1 = uid('prop-29-base');
     const meaning1 = uid('Completely distinct candidate 1 meaning: efficacy under clinical trial');
@@ -3044,15 +3089,16 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
     // 3b. Workspace-isolated ResearchTrace fail-closed tests (SPEC03 §103):
     // ResearchTrace tenant A / workspace A
     const propWsId = uid('prop-56-ws');
-    await propService.resolveOrCreateProposition({
+    const resPropWs = await propService.resolveOrCreateProposition({
       propositionId: propWsId,
       tenantId: tenantA,
       propositionType: 'FACTUAL',
-      canonicalMeaning: 'Proposition 56 for Workspace Isolation Tests',
+      canonicalMeaning: uid('Proposition 56 for Workspace Isolation Tests'),
       subject: 'Subject 56 Ws',
       predicate: 'hasProperty',
       object: 'Value 56 Ws',
     });
+    const targetProp56 = resPropWs.propositionId;
 
     const wsTraceId = uid('rt-56-ws-a');
     await sql`
@@ -3077,7 +3123,7 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
     try {
       await epiService.appendEpistemicState({
         epistemicStateId: uid('epi-56-ws-omitted'),
-        propositionId: propWsId,
+        propositionId: targetProp56,
         runConfigId: rcId,
         derivationMethod: 'EXPERIMENTAL',
         derivationEntityType: 'EvaluatorConfig',
@@ -3100,7 +3146,7 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
     try {
       await epiService.appendEpistemicState({
         epistemicStateId: uid('epi-56-ws-mismatch'),
-        propositionId: propWsId,
+        propositionId: targetProp56,
         runConfigId: rcId,
         derivationMethod: 'EXPERIMENTAL',
         derivationEntityType: 'EvaluatorConfig',
@@ -3122,7 +3168,7 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
     const wsOkEpiId = uid('epi-56-ws-ok');
     await epiService.appendEpistemicState({
       epistemicStateId: wsOkEpiId,
-      propositionId: propWsId,
+      propositionId: targetProp56,
       runConfigId: rcId,
       derivationMethod: 'EXPERIMENTAL',
       derivationEntityType: 'EvaluatorConfig',
@@ -4896,14 +4942,13 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
     expect(errBaseEpi).toBeDefined();
     expect(errBaseEpi.code).toBe('WRITE_AUTHORITY_REQUIRED');
 
-    // 8. Blocker #1 Standalone Authority Protection Attacks:
-    // Subcase 1: ordinary runtime/persistence import surface does NOT expose any callable standalone-authority issuer
+    // 8. Standalone Authority Production Attacks (SPEC03 §103, §104):
+    // Defense-in-depth: persistence modules export ZERO standalone authority issuers or symbols
     const coordinatorMod = await import('../../persistence/relational/services/stage-fencing-coordinator.js');
     expect((coordinatorMod as any).createStandaloneIngestionAdapter).toBeUndefined();
     expect((coordinatorMod as any).TRUSTED_STANDALONE_CAPABILITY).toBeUndefined();
     expect((coordinatorMod as any).STANDALONE_AUTHORITY).toBeUndefined();
 
-    // Verify all persistence modules export zero standalone authority issuers or symbols
     const persistenceMods = [
       await import('../../persistence/relational/services/stage-fencing-coordinator.js'),
       await import('../../persistence/relational/services/evidence-persistence-service.js'),
@@ -4921,92 +4966,129 @@ describe('SPEC03 §145 Adversarial 76-Vector Suite (Live PostgreSQL)', () => {
       expect((mod as any).TRUSTED_STANDALONE_CAPABILITY).toBeUndefined();
     }
 
-    // Subcase 2: base persistence method called directly with no authority -> rejects with WRITE_AUTHORITY_REQUIRED
-    let errNoAuth: any;
+    const dbUrlObj = new URL(DB_URL);
+    const hostPort = dbUrlObj.host;
+    const dbName = dbUrlObj.pathname;
+    const rtSql = postgres(`postgresql://test_rt_user:test_rt_secret@${hostPort}${dbName}`);
+    const saSql = postgres(`postgresql://test_standalone_user:test_standalone_secret@${hostPort}${dbName}`);
+
     try {
-      await basePropService.resolveOrCreateProposition({
-        propositionId: uid('prop-73-noauth'),
+      // Subcase 1: runtime connection imports/constructs StandaloneIngestionAdapter
+      // -> standalone canonical write rejected with WRITE_AUTHORITY_REQUIRED
+      const rtConstructedAdapter = new StandaloneIngestionAdapter(rtSql);
+      let errRtConstruct: any;
+      try {
+        await rtConstructedAdapter.resolveOrCreateProposition({
+          propositionId: uid('prop-73-rt-construct'),
+          tenantId: tenantA,
+          propositionType: 'FACTUAL',
+          canonicalMeaning: uid('Prop 73 RT Construct'),
+          subject: 'S',
+          predicate: 'P',
+          object: 'O',
+        });
+      } catch (e) {
+        errRtConstruct = e;
+      }
+      expect(errRtConstruct).toBeDefined();
+      expect(errRtConstruct.code).toBe('WRITE_AUTHORITY_REQUIRED');
+
+      // Subcase 2: runtime connection calls any public bootstrap factory
+      // -> standalone canonical write rejected with WRITE_AUTHORITY_REQUIRED
+      const rtBootstrapAdapter = createStandaloneIngestionAdapter(rtSql);
+      let errRtBootstrap: any;
+      try {
+        await rtBootstrapAdapter.resolveOrCreateProposition({
+          propositionId: uid('prop-73-rt-bootstrap'),
+          tenantId: tenantA,
+          propositionType: 'FACTUAL',
+          canonicalMeaning: uid('Prop 73 RT Bootstrap'),
+          subject: 'S',
+          predicate: 'P',
+          object: 'O',
+        });
+      } catch (e) {
+        errRtBootstrap = e;
+      }
+      expect(errRtBootstrap).toBeDefined();
+      expect(errRtBootstrap.code).toBe('WRITE_AUTHORITY_REQUIRED');
+
+      // Subcase 3: runtime connection attempts: SET ROLE contentos_standalone_role
+      // -> PostgreSQL rejects
+      let errRtSetRole: any;
+      try {
+        await rtSql`SET ROLE contentos_standalone_role`;
+      } catch (e) {
+        errRtSetRole = e;
+      }
+      expect(errRtSetRole).toBeDefined();
+      expect(errRtSetRole.code).toBe('42501'); // PostgreSQL permission denied to set role
+
+      // Subcase 4: forged JS Symbol/object/string authority
+      // -> irrelevant / rejected with WRITE_AUTHORITY_REQUIRED
+      const rtBasePropService = new PropositionPersistenceService(rtSql);
+      let errForged: any;
+      try {
+        await (rtBasePropService as any).resolveOrCreateProposition({
+          propositionId: uid('prop-73-forged'),
+          tenantId: tenantA,
+          propositionType: 'FACTUAL',
+          canonicalMeaning: uid('Prop 73 Forged'),
+          subject: 'S',
+          predicate: 'P',
+          object: 'O',
+          writeMode: 'STANDALONE',
+          _standaloneAuthority: Symbol('STANDALONE_AUTHORITY'),
+          authorityToken: 'MAGIC_SECRET',
+          fakeCapability: { role: 'contentos_standalone_role' },
+        });
+      } catch (e) {
+        errForged = e;
+      }
+      expect(errForged).toBeDefined();
+      expect(errForged.code).toBe('WRITE_AUTHORITY_REQUIRED');
+
+      // Subcase 5: stale DecisionCycle worker omits cycle context and tries standalone path on runtime connection
+      // -> rejected with WRITE_AUTHORITY_REQUIRED
+      let errStaleWorkerStandalone: any;
+      try {
+        await (rtBasePropService as any).resolveOrCreateProposition({
+          propositionId: uid('prop-73-stale-worker'),
+          tenantId: tenantA,
+          propositionType: 'FACTUAL',
+          canonicalMeaning: uid('Prop 73 Stale Worker'),
+          subject: 'S',
+          predicate: 'P',
+          object: 'O',
+          writeMode: 'STANDALONE',
+        });
+      } catch (e) {
+        errStaleWorkerStandalone = e;
+      }
+      expect(errStaleWorkerStandalone).toBeDefined();
+      expect(errStaleWorkerStandalone.code).toBe('WRITE_AUTHORITY_REQUIRED');
+
+      // Subcase 6: authorized standalone PostgreSQL principal performs legitimate standalone write
+      // -> succeeds
+      await saSql`SET ROLE contentos_standalone_role`;
+      const authorizedAdapter = createStandaloneIngestionAdapter(saSql);
+      const authorizedPropId = uid('prop-73-authorized');
+      const authorizedRes = await authorizedAdapter.resolveOrCreateProposition({
+        propositionId: authorizedPropId,
         tenantId: tenantA,
         propositionType: 'FACTUAL',
-        canonicalMeaning: uid('Prop 73 No Auth'),
-        subject: 'S',
-        predicate: 'P',
-        object: 'O',
+        canonicalMeaning: uid('Prop 73 Authorized Standalone Success'),
+        subject: 'Authorized S',
+        predicate: 'hasP',
+        object: 'Valid O',
       });
-    } catch (e) {
-      errNoAuth = e;
+      expect(authorizedRes).toBeDefined();
+      expect(authorizedRes.outcome).toBe('CREATED_NEW');
+      expect(authorizedRes.propositionId).toBe(authorizedPropId);
+    } finally {
+      await rtSql.end();
+      await saSql.end();
     }
-    expect(errNoAuth).toBeDefined();
-    expect(errNoAuth.code).toBe('WRITE_AUTHORITY_REQUIRED');
-
-    // Subcase 3: caller cannot construct/cast a lookalike authority
-    let errLookalike: any;
-    try {
-      await basePropService.resolveOrCreateProposition({
-        propositionId: uid('prop-73-lookalike'),
-        tenantId: tenantA,
-        propositionType: 'FACTUAL',
-        canonicalMeaning: uid('Prop 73 Lookalike'),
-        subject: 'S',
-        predicate: 'P',
-        object: 'O',
-        _standaloneAuthority: Symbol('STANDALONE_AUTHORITY'), // Forged symbol
-      } as any);
-    } catch (e) {
-      errLookalike = e;
-    }
-    expect(errLookalike).toBeDefined();
-    expect(errLookalike.code).toBe('WRITE_AUTHORITY_REQUIRED');
-
-    // Subcase 4: namespace/dynamic import cannot obtain privileged capability or factory
-    const exportedValues = Object.values(coordinatorMod);
-    expect(exportedValues.some((v) => typeof v === 'symbol')).toBe(false);
-    expect(Object.keys(coordinatorMod)).not.toContain('TRUSTED_STANDALONE_CAPABILITY');
-    expect(Object.keys(coordinatorMod)).not.toContain('STANDALONE_AUTHORITY');
-    expect(Object.keys(coordinatorMod)).not.toContain('createStandaloneIngestionAdapter');
-
-    // Subcase 4b: Unauthorized runtime module cannot call bootstrap issuer
-    const { assertTrustedBootstrapCaller } = await import('../../bootstrap/composition-root.js');
-    expect(() => {
-      assertTrustedBootstrapCaller('at DecisionCycleWorker (/Users/test/src/workflow/worker.ts:42:15)');
-    }).toThrowError(/STANDALONE_ISSUANCE_FORBIDDEN/);
-
-    // Subcase 5: stale DecisionCycle worker cannot invoke standalone writes
-    let errStaleWorkerStandalone: any;
-    try {
-      await basePropService.resolveOrCreateProposition({
-        propositionId: uid('prop-73-stale-standalone'),
-        tenantId: tenantA,
-        propositionType: 'FACTUAL',
-        canonicalMeaning: uid('Prop 73 Stale Standalone'),
-        subject: 'S',
-        predicate: 'P',
-        object: 'O',
-        writeMode: 'STANDALONE',
-        fencingContext: {
-          decisionCycleId: cycleId,
-          stageExecutionId: uid('se-73'),
-          fencingToken: 1,
-        },
-      });
-    } catch (e) {
-      errStaleWorkerStandalone = e;
-    }
-    expect(errStaleWorkerStandalone).toBeDefined();
-    expect(errStaleWorkerStandalone.code).toBe('DECISION_CYCLE_CONTEXT_INVALID');
-
-    // Subcase 6: trusted standalone composition-root adapter succeeds
-    const trustedStandalone = createStandaloneIngestionAdapter(sql);
-    const trustedRes = await trustedStandalone.resolveOrCreateProposition({
-      propositionId: uid('prop-73-trusted-standalone'),
-      tenantId: tenantA,
-      propositionType: 'FACTUAL',
-      canonicalMeaning: uid('Prop 73 Trusted Standalone Success'),
-      subject: 'S',
-      predicate: 'P',
-      object: 'O',
-    });
-    expect(trustedRes.outcome).toBe('CREATED_NEW');
   });
 
   it('Vector 74: stale worker creates EpistemicState after cancellation', async () => {

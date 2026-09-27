@@ -80,7 +80,6 @@ export class PropositionPersistenceService {
       fencingContext,
       writeMode,
     } = params;
-    const _standaloneAuthority = (params as any)._standaloneAuthority;
 
     const identity: PropositionSemanticIdentity = {
       propositionType,
@@ -105,7 +104,6 @@ export class PropositionPersistenceService {
         workspaceId,
         requireCycleContext: writeMode === 'DECISION_CYCLE' || !!fencingContext?.decisionCycleId,
         writeMode,
-        _standaloneAuthority,
       });
 
       // 1. Acquire transaction-level advisory lock on derived semantic fingerprint (SPEC03 §34)

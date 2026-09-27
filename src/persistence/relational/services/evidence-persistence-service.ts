@@ -140,7 +140,6 @@ export class EvidencePersistenceService {
       fencingContext,
       writeMode,
     } = params;
-    const _standaloneAuthority = (params as any)._standaloneAuthority;
 
     if (contentHash && !SHA256_REGEX.test(contentHash)) {
       throw new RegistryValidationError(
@@ -169,7 +168,6 @@ export class EvidencePersistenceService {
         workspaceId,
         requireCycleContext: writeMode === 'DECISION_CYCLE' || !!fencingContext?.decisionCycleId,
         writeMode,
-        _standaloneAuthority,
       });
 
       // 1. Verify snapshot reference exists and is AVAILABLE in ObjectRegistry (SPEC02 §30)
@@ -322,7 +320,6 @@ export class EvidencePersistenceService {
       fencingContext,
       writeMode,
     } = params;
-    const _standaloneAuthority = (params as any)._standaloneAuthority;
 
     // Validate origin type (SPEC03 §18: exactly SOURCE_ARTIFACT or PERFORMANCE_OBSERVATION)
     if (originType !== 'SOURCE_ARTIFACT' && originType !== 'PERFORMANCE_OBSERVATION') {
@@ -340,7 +337,6 @@ export class EvidencePersistenceService {
         workspaceId,
         requireCycleContext: writeMode === 'DECISION_CYCLE' || !!fencingContext?.decisionCycleId,
         writeMode,
-        _standaloneAuthority,
       });
 
       // 1. Origin existence & discriminator verification (SPEC03 §18)
@@ -505,7 +501,6 @@ export class EvidencePersistenceService {
    */
   async linkEvidenceToProposition(params: CreateEvidenceLinkParams): Promise<{ linkId: string; created: boolean }> {
     const { linkId, evidenceId, propositionId, tenantId, workspaceId, fencingContext, writeMode } = params;
-    const _standaloneAuthority = (params as any)._standaloneAuthority;
 
     return await this.sql.begin(async (sqlTx) => {
       // 0. Stage fencing check
@@ -515,7 +510,6 @@ export class EvidencePersistenceService {
         workspaceId,
         requireCycleContext: writeMode === 'DECISION_CYCLE' || !!fencingContext?.decisionCycleId,
         writeMode,
-        _standaloneAuthority,
       });
 
       // 1. Verify EvidenceItem exists and matches tenant/workspace
@@ -666,7 +660,6 @@ export class EvidencePersistenceService {
       fencingContext,
       writeMode,
     } = params;
-    const _standaloneAuthority = (params as any)._standaloneAuthority;
 
     await this.sql.begin(async (sqlTx) => {
       // 0. Stage fencing check (SPEC03 §103, §104)
@@ -706,7 +699,6 @@ export class EvidencePersistenceService {
         workspaceId,
         requireCycleContext: isCycle,
         writeMode,
-        _standaloneAuthority,
       });
 
       // 1. Verify link exists and matches tenant/workspace

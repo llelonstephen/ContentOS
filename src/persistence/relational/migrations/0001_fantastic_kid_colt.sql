@@ -2759,9 +2759,13 @@ BEGIN
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'contentos_runtime_role') THEN
     CREATE ROLE contentos_runtime_role NOLOGIN;
   END IF;
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'contentos_standalone_role') THEN
+    CREATE ROLE contentos_standalone_role NOLOGIN;
+  END IF;
+  REVOKE contentos_standalone_role FROM contentos_runtime_role;
 END $$;
 --> statement-breakpoint
-GRANT USAGE ON SCHEMA public TO contentos_runtime_role, contentos_control_plane_role;
+GRANT USAGE ON SCHEMA public TO contentos_runtime_role, contentos_control_plane_role, contentos_standalone_role;
 --> statement-breakpoint
 GRANT ALL ON ALL TABLES IN SCHEMA public TO contentos_control_plane_role;
 --> statement-breakpoint
@@ -2774,4 +2778,13 @@ GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO contentos_runtime_role;
 REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON control_plane_activations FROM contentos_runtime_role;
 --> statement-breakpoint
 GRANT SELECT ON control_plane_activations TO contentos_runtime_role;
+--> statement-breakpoint
+GRANT SELECT, INSERT ON "propositions", "evidence_items", "evidence_proposition_links", "evidence_assessments", "epistemic_state_versions", "knowledge_gaps", "research_traces", "source_artifacts", "immutable_entity_registry" TO contentos_standalone_role;
+--> statement-breakpoint
+GRANT SELECT ON "revision_registry", "object_registry", "decision_cycles", "stage_executions" TO contentos_standalone_role;
+--> statement-breakpoint
+GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO contentos_standalone_role;
+--> statement-breakpoint
+REVOKE contentos_standalone_role FROM contentos_runtime_role;
+
 

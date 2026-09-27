@@ -103,7 +103,6 @@ export class EpistemicPersistenceService {
       fencingContext,
       writeMode,
     } = params;
-    const _standaloneAuthority = (params as any)._standaloneAuthority;
 
     if (supersedesEpistemicStateId && supersedesEpistemicStateId === epistemicStateId) {
       throw new RegistryValidationError(
@@ -163,7 +162,6 @@ export class EpistemicPersistenceService {
         workspaceId,
         requireCycleContext: isCycle,
         writeMode,
-        _standaloneAuthority,
       });
 
       // 1. Verify target proposition exists and belongs to tenant

@@ -39,6 +39,7 @@ const DB_URL =
 
 describe('M1 Adversarial Verification Suite: Live PostgreSQL Invariants', () => {
   let sql: ReturnType<typeof postgres>;
+  let standaloneSql: ReturnType<typeof postgres>;
   const tenantA = 'tenant-adversarial-a';
   const tenantB = 'tenant-adversarial-b';
 
@@ -51,6 +52,10 @@ describe('M1 Adversarial Verification Suite: Live PostgreSQL Invariants', () => 
   beforeAll(async () => {
     assertTestDatabase(DB_URL);
     sql = postgres(DB_URL, { max: 5 });
+
+    await sql`GRANT contentos_standalone_role TO CURRENT_USER`;
+    const standaloneUrl = DB_URL + (DB_URL.includes('?') ? '&' : '?') + 'options=-c%20role=contentos_standalone_role';
+    standaloneSql = postgres(standaloneUrl, { max: 5 });
 
     cpService = new ControlPlanePersistenceService(sql);
     pubService = new PublicationPersistenceService(sql);
@@ -156,6 +161,7 @@ describe('M1 Adversarial Verification Suite: Live PostgreSQL Invariants', () => 
   });
 
   afterAll(async () => {
+    if (standaloneSql) await standaloneSql.end();
     if (sql) await sql.end();
   });
 
@@ -753,7 +759,7 @@ describe('M1 Adversarial Verification Suite: Live PostgreSQL Invariants', () => 
         ON CONFLICT DO NOTHING
       `;
 
-      const standaloneAdapter = createStandaloneIngestionAdapter(sql);
+      const standaloneAdapter = createStandaloneIngestionAdapter(standaloneSql);
 
       // Seed root epistemic state for prop1
       await standaloneAdapter.appendStandaloneEpistemicState({
@@ -774,7 +780,7 @@ describe('M1 Adversarial Verification Suite: Live PostgreSQL Invariants', () => 
 
     it('adversarial attack: reject second root epistemic state for same proposition', async () => {
       const evalRevId = `rev-adv-${timestamp}`;
-      const standaloneAdapter = createStandaloneIngestionAdapter(sql);
+      const standaloneAdapter = createStandaloneIngestionAdapter(standaloneSql);
       let err: any;
       try {
         await standaloneAdapter.appendStandaloneEpistemicState({
@@ -801,7 +807,7 @@ describe('M1 Adversarial Verification Suite: Live PostgreSQL Invariants', () => 
 
     it('adversarial attack: reject epistemic successor pointing to different proposition', async () => {
       const evalRevId = `rev-adv-${timestamp}`;
-      const standaloneAdapter = createStandaloneIngestionAdapter(sql);
+      const standaloneAdapter = createStandaloneIngestionAdapter(standaloneSql);
       let err: any;
       try {
         await standaloneAdapter.appendStandaloneEpistemicState({
@@ -829,7 +835,7 @@ describe('M1 Adversarial Verification Suite: Live PostgreSQL Invariants', () => 
 
     it('adversarial attack: reject epistemic successor with non-monotonic known_from', async () => {
       const evalRevId = `rev-adv-${timestamp}`;
-      const standaloneAdapter = createStandaloneIngestionAdapter(sql);
+      const standaloneAdapter = createStandaloneIngestionAdapter(standaloneSql);
       let err: any;
       try {
         await standaloneAdapter.appendStandaloneEpistemicState({

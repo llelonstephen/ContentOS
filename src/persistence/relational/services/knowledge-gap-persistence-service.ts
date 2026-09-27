@@ -86,7 +86,6 @@ export class KnowledgeGapPersistenceService {
       fencingContext,
       writeMode,
     } = params;
-    const _standaloneAuthority = (params as any)._standaloneAuthority;
 
     // Validate EXPLICIT_ASSUMPTION (SPEC03 §9)
     if (status === 'EXPLICIT_ASSUMPTION' && !assumptionAllowed) {
@@ -104,7 +103,6 @@ export class KnowledgeGapPersistenceService {
         workspaceId,
         requireCycleContext: writeMode === 'DECISION_CYCLE' || !!fencingContext?.decisionCycleId,
         writeMode,
-        _standaloneAuthority,
       });
 
       // 1. Verify task revision exists
@@ -206,7 +204,6 @@ export class KnowledgeGapPersistenceService {
       fencingContext,
       writeMode,
     } = params;
-    const _standaloneAuthority = (params as any)._standaloneAuthority;
 
     await this.sql.begin(async (sqlTx) => {
       // 0. Stage fencing check if in cycle context
@@ -216,7 +213,6 @@ export class KnowledgeGapPersistenceService {
         workspaceId,
         requireCycleContext: writeMode === 'DECISION_CYCLE' || !!fencingContext?.decisionCycleId,
         writeMode,
-        _standaloneAuthority,
       });
 
       // 1. Verify gap exists and matches tenant
