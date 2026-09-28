@@ -29,7 +29,7 @@ export class PostgresAudienceStateCommitPort implements AudienceStateAtomicCommi
   async commitAudienceState(request: AudienceStateCommitRequest): Promise<AudienceStateView> {
     const { authority, state } = request;
     const result = await executeContentRuntimeCommit(this.sql, {
-      tenantId: authority.tenant_id, workspaceId: authority.workspace_id,
+      tenantId: authority.tenant_id, workspaceId: authority.workspace_id, runConfigId: authority.run_config_id,
       fencingContext: toStageFencingContext(authority),
       registryEntries: [{ entityType: 'AudienceState', entityId: state.audience_state_id,
         tenantId: authority.tenant_id, workspaceId: authority.workspace_id }],

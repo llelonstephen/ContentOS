@@ -11,9 +11,11 @@ const url = process.env.DATABASE_URL_TEST ?? process.env.DATABASE_URL ??
 const databaseName = new URL(url).pathname.slice(1);
 if (!databaseName.includes('test')) throw new Error('M4 live suite refuses non-test database');
 const sql = postgres(url, { max: 4 });
-const migration = readFileSync(path.resolve(
-  process.cwd(), 'src/persistence/relational/migrations/0006_m4_content_intelligence_invariants.sql',
-), 'utf8').split('--> statement-breakpoint').map((statement) => statement.trim()).filter(Boolean);
+const migration = ['0006_m4_content_intelligence_invariants.sql', '0007_m4_audit_authority_remediation.sql']
+  .flatMap((file) => readFileSync(path.resolve(
+    process.cwd(), `src/persistence/relational/migrations/${file}`,
+  ), 'utf8').split('--> statement-breakpoint'))
+  .map((statement) => statement.trim()).filter(Boolean);
 
 async function applyM4Migration(): Promise<void> {
   for (const statement of migration) await sql.unsafe(statement);
@@ -66,6 +68,18 @@ describe('M4 live PostgreSQL runtime invariants', () => {
     expect(row).toEqual({
       can_update: false, can_delete: false, can_insert: true, can_mutate_outbox: false,
     });
+  });
+
+  it.each([
+    'fencing_token = 999', 'lease_owner = \'attacker\'',
+    'canonical_input_hash = \'forged\'', 'idempotency_key = \'forged\'',
+    'stage_name = \'CANDIDATE_GENERATE\'', 'run_id = \'forged-run\'',
+    'decision_cycle_id = \'forged-cycle\'', 'status = \'COMPLETED\'',
+  ])('runtime role cannot directly forge StageExecution %s', async (mutation) => {
+    await expect(sql.begin(async (tx) => {
+      await tx`SET LOCAL ROLE contentos_runtime_role`;
+      await tx.unsafe(`UPDATE public.stage_executions SET ${mutation} WHERE false`);
+    })).rejects.toThrow(/permission denied/i);
   });
 
   it('rejects cross-tenant references even when ordinary foreign keys resolve', async () => {
@@ -142,6 +156,12 @@ describe('M4 live PostgreSQL runtime invariants', () => {
         tenantId: dependency.tenant_id, workspaceId: dependency.workspace_id,
         writeMode: 'DECISION_CYCLE', authorityScope: 'M4_CONTENT_RUNTIME' }))
         .resolves.toMatchObject({ stageStatus: 'RUNNING' });
+      await tx`SET LOCAL ROLE contentos_runtime_role`;
+      const [completed] = await tx`SELECT public.complete_m4_stage_execution(
+        ${stageId}, 2, ${identity.idempotencyKey}, ${identity.canonicalInputHash}
+      ) AS completed`;
+      expect(completed.completed).toBe(true);
+      await tx`RESET ROLE`;
       await tx`UPDATE decision_cycles SET status = 'FREEZING' WHERE decision_cycle_id = ${cycleId}`;
       await expect(verifyStageFencing(tx, { fencingContext: context,
         tenantId: dependency.tenant_id, workspaceId: dependency.workspace_id,

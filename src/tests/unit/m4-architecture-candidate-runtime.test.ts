@@ -6,6 +6,7 @@ import {
   type ContentArchitectureView,
   type ContentCandidateView,
   type ContentUnitView,
+  type AudienceStateView,
   type GenerationContextAdmission,
   type StrategyHypothesisView,
 } from '../../domain/content/index.js';
@@ -25,6 +26,12 @@ const strategy: StrategyHypothesisView = {
   persuasion_mechanism: 'Proof', proof_strategy: 'Use proposition',
   required_proposition_ids: ['prop-1'], assumptions: [], unknowns: [],
   failure_modes: [], risk_hypotheses: [], created_at: '2026-09-29T00:00:00Z',
+};
+const audience: AudienceStateView = {
+  audience_state_id: 'aud-1', task_revision_id: 'task-1', state_stage: 'FINAL_FOR_DECISION',
+  context: {}, knowledge_state: {}, problem_state: {}, solution_state: {}, product_state: {},
+  brand_state: {}, intent_state: {}, desired_outcome: {}, objections: [], decision_criteria: [],
+  prior_exposure: {}, origin: [], uncertainty: [], created_at: '2026-09-29T00:00:00Z',
 };
 const unit: ContentUnitView = {
   unit_id: 'unit-1', position: 1, purpose: 'Open', audience_state_before: {},
@@ -146,6 +153,7 @@ describe('M4 architecture and candidate boundaries', () => {
     const commitPort = { commitContentArchitecture: vi.fn() };
     const generator = new GenerateContentArchitecture(
       { resolveAuthorizedInputs: vi.fn().mockResolvedValue({
+        audience,
         strategy,
         gate_result: {
           strategy_id: 'strategy-1', audience_state_id: 'aud-1', outcome: 'PROCEED',
@@ -153,15 +161,7 @@ describe('M4 architecture and candidate boundaries', () => {
         },
         channel: { format: 'article', supported_formats: ['article'], permits_nonlinear_units: false },
         context: { admission: context(), values: [{}] },
-        supplemental_propositions: [{
-          proposition_id: 'prop-2', used_as_factual_proof: true,
-          epistemic_state_id: 'epi-2', support_status: 'CONTRADICTED',
-          compatible_with_task: true, compatible_with_audience: true,
-          compatible_with_governance: true, compatible_with_strategy: true,
-          changes_core_message: false, changes_proof_strategy: false,
-          changes_behavioral_logic: false, changes_risk: false,
-          changes_governance_dependency: false,
-        }],
+        decision_boundary: new Date('2026-09-29T00:00:00Z'),
       }) },
       { generateArchitectureProposal: vi.fn().mockResolvedValue({
         units: [{ ...unit, proposition_ids: ['prop-1', 'prop-2'] }],
@@ -170,6 +170,15 @@ describe('M4 architecture and candidate boundaries', () => {
       new ContentArchitecturePersistenceService(commitPort),
       { nextArchitectureId: () => 'arch-new', nextUnitId: () => 'unit-new',
         now: () => new Date('2026-09-29T00:00:00Z') },
+      { resolve: vi.fn().mockResolvedValue([{
+        proposition_id: 'prop-2', used_as_factual_proof: true,
+        epistemic_state_id: 'epi-2', support_status: 'CONTRADICTED',
+        compatible_with_task: true, compatible_with_audience: true,
+        compatible_with_governance: true, compatible_with_strategy: true,
+        changes_core_message: false, changes_proof_strategy: false,
+        changes_behavioral_logic: false, changes_risk: false,
+        changes_governance_dependency: false,
+      }]) } as any,
     );
     await expect(generator.execute({
       authority: {

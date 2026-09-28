@@ -103,6 +103,12 @@ export class GenerateContentCandidate {
       architecture: resolved.architecture,
       ...(resolved.parent_candidate ? { parent_candidate: resolved.parent_candidate } : {}),
       payload_is_valid: ({ content_payload }) => resolved.payload_is_valid(content_payload),
+      generation_config: {
+        prompt_revision_id: resolved.provider_request.prompt_revision_id,
+        model_revision_id: resolved.provider_request.model_revision_id,
+        tool_revision_ids: resolved.provider_request.tool_revision_ids,
+        schema_revision_id: resolved.provider_request.schema_revision_id,
+      },
     });
   }
 }

@@ -66,17 +66,13 @@ export async function completeContentStageExecution(
       `;
     }
   }
-  const updated = await sqlTx`
-    UPDATE stage_executions
-    SET status = 'COMPLETED', completed_at = now(), error_code = NULL
-    WHERE stage_execution_id = ${context.stageExecutionId}
-      AND status = 'RUNNING'
-      AND fencing_token = ${context.fencingToken}
-      AND idempotency_key = ${context.idempotencyKey}
-      AND canonical_input_hash = ${context.canonicalInputHash}
-    RETURNING stage_execution_id
+  const [result] = await sqlTx`
+    SELECT public.complete_m4_stage_execution(
+      ${context.stageExecutionId}, ${context.fencingToken},
+      ${context.idempotencyKey}, ${context.canonicalInputHash}
+    ) AS completed
   `;
-  if (updated.length !== 1) {
+  if (result?.completed !== true) {
     throw new RegistryValidationError(
       'STALE_WORKER_COMMIT_REJECTED',
       'StageExecution changed before completion; the transaction must roll back.',

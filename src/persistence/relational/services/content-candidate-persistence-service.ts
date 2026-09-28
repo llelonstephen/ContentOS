@@ -8,6 +8,7 @@ import {
   assertContentRuntimeCommitAuthority,
   type ContentRuntimeCommitAuthority,
 } from './content-runtime-authority.js';
+import type { PinnedGenerationConfig } from '../../../application/content-intelligence/content-generation-context-builder.js';
 
 export interface CandidateCommitAuthority extends ContentRuntimeCommitAuthority {}
 
@@ -20,6 +21,7 @@ export interface ContentCandidateCommitRequest {
   readonly architecture: ContentArchitectureView;
   readonly parent_candidate?: ContentCandidateView;
   readonly payload_is_valid: (candidate: ContentCandidateView) => boolean;
+  readonly generation_config?: PinnedGenerationConfig;
 }
 
 export interface ContentCandidateAtomicCommitPort {

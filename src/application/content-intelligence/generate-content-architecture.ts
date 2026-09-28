@@ -2,16 +2,17 @@ import {
   validateArchitectureClosure,
   validateGenerationContext,
   type ChannelArchitectureCapability,
+  type AudienceStateView,
   type ContentArchitectureView,
   type ContentUnitView,
   type GenerationContextAdmission,
   type JsonValue,
   type StrategyGateResult,
   type StrategyHypothesisView,
-  type SupplementalPropositionUse,
 } from '../../domain/content/index.js';
 import { isolateProviderJsonContext } from './content-generation-context-builder.js';
 import type { MinimizedArchitectureContext } from '../../persistence/relational/services/architecture-context-reference-resolver.js';
+import type { CanonicalSupplementalPropositionResolver } from '../../persistence/relational/services/canonical-supplemental-proposition-resolver.js';
 import type {
   ArchitectureCommitAuthority,
   ContentArchitecturePersistenceService,
@@ -26,12 +27,12 @@ export interface ArchitectureGenerationRequest {
 }
 
 export interface ArchitectureGenerationInput {
+  readonly audience: AudienceStateView;
   readonly strategy: StrategyHypothesisView;
   readonly gate_result: StrategyGateResult;
   readonly channel: ChannelArchitectureCapability;
   readonly context: MinimizedArchitectureContext;
-  /** Canonical, decision-time proof/classification data; never supplied by the provider. */
-  readonly supplemental_propositions: readonly SupplementalPropositionUse[];
+  readonly decision_boundary: Date;
 }
 
 export interface ArchitectureInputResolver {
@@ -66,6 +67,7 @@ export class GenerateContentArchitecture {
     private readonly provider: ArchitectureProposalProvider,
     private readonly persistence: ContentArchitecturePersistenceService,
     private readonly identity: ArchitectureIdentityFactory,
+    private readonly supplementalProofs: CanonicalSupplementalPropositionResolver,
   ) {}
 
   async execute(request: ArchitectureGenerationRequest): Promise<ContentArchitectureView> {
@@ -94,18 +96,14 @@ export class GenerateContentArchitecture {
     const strategyPropositions = new Set(resolved.strategy.required_proposition_ids);
     const supplementalIds = [...new Set(units.flatMap(({ proposition_ids }) => proposition_ids)
       .filter((id) => !strategyPropositions.has(id)))];
-    const canonicalSupplemental = new Map(
-      resolved.supplemental_propositions.map((use) => [use.proposition_id, use]),
-    );
-    if (canonicalSupplemental.size !== resolved.supplemental_propositions.length) {
-      throw new Error('Canonical supplemental proposition input contains duplicate identities');
-    }
-    const admittedSupplemental = supplementalIds.map((id) => {
-      const use = canonicalSupplemental.get(id);
-      if (!use) {
-        throw new Error(`Architecture proposed unadmitted supplemental Proposition '${id}'`);
-      }
-      return use;
+    const admittedSupplemental = await this.supplementalProofs.resolve({
+      tenant_id: request.authority.tenant_id,
+      workspace_id: request.authority.workspace_id,
+      task_revision_id: request.task_revision_id,
+      decision_boundary: resolved.decision_boundary,
+      audience: resolved.audience,
+      strategy: resolved.strategy,
+      proposition_ids: supplementalIds,
     });
     const architecture: ContentArchitectureView = {
       architecture_id: this.identity.nextArchitectureId(),

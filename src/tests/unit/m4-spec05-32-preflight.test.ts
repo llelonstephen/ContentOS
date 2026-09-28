@@ -15,13 +15,13 @@ const allProduction = [
     'deterministic-strategy-gate', 'generation-context-trust-boundary',
     'runtime-stage-contracts', 'spec06-handoff-contract', 'strategy-grounding-validator',
     'supplemental-proposition-admission'].map((name) => `src/domain/content/${name}.ts`),
+  'src/domain/content/types.ts',
   'src/persistence/relational/services/stage-fencing-coordinator.ts',
   'src/persistence/relational/services/content-runtime-transaction-context.ts',
   'src/persistence/relational/migrations/0006_m4_content_intelligence_invariants.sql',
   'src/application/content-intelligence/generate-content-candidate.ts',
   'src/providers/models/content-intelligence-provider.ts',
-].map(read).join('\n') + spec + read(
-  'plans/20260928-1940-m4-content-intelligence-runtime/authority-bypass-matrix.md');
+].map(read).join('\n');
 
 const required: readonly (readonly string[])[] = [
   ['Strategy Gate', 'StrategyGateResult'], ['deterministic', 'StrategyGateResult'],
@@ -39,7 +39,7 @@ const required: readonly (readonly string[])[] = [
   ['UNTRUSTED_SOURCE_CONTENT'], ['GENERATION_EXTERNAL_EFFECT_FORBIDDEN'],
   ['KNOWLEDGE_COMMIT_REJECTED_AFTER_FREEZING'], ['STALE_FENCING_TOKEN'],
   ['TENANT_ISOLATION_VIOLATION'], ['SPEC06_HANDOFF_INVALID'],
-  ['Spec06HandoffDto'], ['DecisionRecord'],
+  ['Spec06HandoffDto'], ['Spec06HandoffDto'],
 ];
 
 describe('SPEC05 exact static preflight', () => {

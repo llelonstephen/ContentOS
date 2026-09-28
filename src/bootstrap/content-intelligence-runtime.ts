@@ -9,6 +9,7 @@ import { PostgresContentCandidateCommitPort } from '../persistence/relational/se
 import { PostgresStrategyGateCommitPort } from '../persistence/relational/services/postgres-strategy-gate-commit-port.js';
 import { PostgresStrategyHypothesisCommitPort } from '../persistence/relational/services/postgres-strategy-hypothesis-commit-port.js';
 import { StrategyHypothesisPersistenceService } from '../persistence/relational/services/strategy-hypothesis-persistence-service.js';
+import { CanonicalSupplementalPropositionResolver } from '../persistence/relational/services/canonical-supplemental-proposition-resolver.js';
 
 /** Persistence-only M4 bundle. Provider execution remains an explicit caller-owned boundary. */
 export interface ContentIntelligencePersistence {
@@ -17,6 +18,7 @@ export interface ContentIntelligencePersistence {
   readonly gate: ContentStrategyGatePersistenceService;
   readonly architecture: ContentArchitecturePersistenceService;
   readonly candidate: ContentCandidatePersistenceService;
+  readonly supplementalProofs: CanonicalSupplementalPropositionResolver;
 }
 
 export function createContentIntelligencePersistence(
@@ -34,5 +36,6 @@ export function createContentIntelligencePersistence(
     candidate: new ContentCandidatePersistenceService(
       new PostgresContentCandidateCommitPort(sql),
     ),
+    supplementalProofs: new CanonicalSupplementalPropositionResolver(sql),
   };
 }

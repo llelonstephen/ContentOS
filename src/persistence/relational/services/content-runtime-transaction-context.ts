@@ -23,10 +23,17 @@ import {
   writeContentRuntimeOutboxEvents,
   type ContentRuntimeOutboxEvent,
 } from './content-runtime-outbox-writer.js';
+import {
+  assertPinnedGenerationConfig,
+  resolveCanonicalM4RunConfig,
+  type CanonicalM4RunConfig,
+} from './content-runtime-run-config-resolver.js';
 
 export interface ContentRuntimeCommitRequest {
   tenantId: string;
   workspaceId?: string | null;
+  runConfigId: string;
+  generationConfig?: Omit<CanonicalM4RunConfig, 'run_config_id'>;
   fencingContext: StageFencingContext;
   registryEntries: readonly ContentRuntimeRegistryEntry[];
   auditEvent: ContentRuntimeAuditEvent;
@@ -86,6 +93,14 @@ export async function executeContentRuntimeCommit<T>(
       requireCycleContext: true,
       allowCompletedReplay: true,
     });
+    const canonicalConfig = await resolveCanonicalM4RunConfig(sqlTx, {
+      tenant_id: request.tenantId,
+      workspace_id: request.workspaceId ?? '',
+      run_id: request.fencingContext.runId!,
+      decision_cycle_id: request.fencingContext.decisionCycleId!,
+      run_config_id: request.runConfigId,
+    });
+    if (request.generationConfig) assertPinnedGenerationConfig(request.generationConfig, canonicalConfig);
 
     if (verified.stageStatus === 'COMPLETED') {
       const outputRefs = await loadStageExecutionOutputRefs(

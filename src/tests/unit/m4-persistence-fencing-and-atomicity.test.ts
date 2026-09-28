@@ -24,6 +24,11 @@ function createFakeSql(rows: FakeRows) {
   const tag = async (strings: TemplateStringsArray): Promise<any[]> => {
     const query = strings.join('?').replace(/\s+/g, ' ').trim();
     queries.push(query);
+    if (query.includes('JOIN run_configs config')) return [{
+      initial_run_config_id: 'config-1', run_config_id: 'config-1',
+      runtime_parameters: JSON.stringify({ prompt_revision_id: 'prompt-1', model_revision_id: 'model-1',
+        tool_revision_ids: ['tool-1'], schema_revision_id: 'schema-1' }),
+    }];
     if (query.includes('FROM runs')) return [rows.run];
     if (query.includes('FROM decision_cycles')) return [rows.cycle];
     if (query.includes('FROM stage_executions')) return [rows.stage];
@@ -34,7 +39,7 @@ function createFakeSql(rows: FakeRows) {
         workspace_id: 'workspace-1', payload_state: 'AVAILABLE',
       }];
     }
-    if (query.startsWith('UPDATE stage_executions')) return [{ stage_execution_id: 'stage-1' }];
+    if (query.includes('complete_m4_stage_execution')) return [{ completed: true }];
     if (query.includes('INSERT INTO outbox_events')) return [{ event_id: '11111111-1111-4111-8111-111111111111' }];
     return [];
   };
@@ -161,7 +166,7 @@ describe('M4 persistence fencing and atomicity', () => {
     const { sql, queries } = createFakeSql(fixture.rows);
     const insertGraph = vi.fn();
     const result = await executeContentRuntimeCommit(sql, {
-      tenantId: 'tenant-1', workspaceId: 'workspace-1', fencingContext: fixture.context,
+      tenantId: 'tenant-1', workspaceId: 'workspace-1', runConfigId: 'config-1', fencingContext: fixture.context,
       registryEntries: [],
       auditEvent: {
         auditEventId: 'audit-retry', tenantId: 'tenant-1', workspaceId: 'workspace-1',
@@ -181,7 +186,7 @@ describe('M4 persistence fencing and atomicity', () => {
     const fixture = baseFixture();
     const { sql, queries } = createFakeSql(fixture.rows);
     const result = await executeContentRuntimeCommit(sql, {
-      tenantId: 'tenant-1', workspaceId: 'workspace-1', fencingContext: fixture.context,
+      tenantId: 'tenant-1', workspaceId: 'workspace-1', runConfigId: 'config-1', fencingContext: fixture.context,
       registryEntries: [{
         entityType: 'AudienceState', entityId: 'aud-1', tenantId: 'tenant-1',
         workspaceId: 'workspace-1',
@@ -207,7 +212,7 @@ describe('M4 persistence fencing and atomicity', () => {
     expect(result).toMatchObject({ replayed: false, value: 'aud-1' });
     const orderedFragments = [
       'INSERT INTO immutable_entity_registry', 'INSERT INTO audience_states',
-      'INSERT INTO stage_execution_output_refs', 'UPDATE stage_executions',
+      'INSERT INTO stage_execution_output_refs', 'complete_m4_stage_execution',
       'INSERT INTO audit_events', 'INSERT INTO outbox_events',
     ];
     const positions = orderedFragments.map((fragment) => queries.findIndex((query) => query.includes(fragment)));
