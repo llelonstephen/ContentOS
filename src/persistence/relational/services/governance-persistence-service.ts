@@ -523,6 +523,12 @@ export class GovernancePersistenceService {
             `SchemaDefinition payload object is not AVAILABLE. Fail closed.`,
           );
         }
+        if (schemaDef.payload_hash !== schemaDef.content_hash) {
+          throw new RegistryValidationError(
+            'POLICY_SCHEMA_UNSUPPORTED',
+            `SchemaDefinition payload_hash does not match object_registry content_hash. Canonical integrity failed. Fail closed.`
+          );
+        }
 
         // Load EXACT SchemaDefinition payload (Blocker 1)
         const objectStore = getDefaultObjectStore();

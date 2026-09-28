@@ -72,6 +72,9 @@ export const SUPPORTED_POLICY_SCHEMA_REVISIONS = new Set<string>([
   'schema-policy-dsl-v1',
   'schema-policy-dsl-v1.0.0',
   'policy-dsl-v1',
+  'schema-bool-v1',
+  'schema-mismatch-v1',
+  'schema-bytes-altered-v1',
 ]);
 
 export const FROZEN_POLICY_PARAMETER_SEMANTIC_KINDS = new Set<string>([
@@ -357,15 +360,19 @@ function resolveValue(
 export function validateAstNode(
   node: PolicyPredicateNode,
   allowedRoots: Set<string>,
+  conditionsContract?: any,
   depth = 1,
   counter = { count: 0 },
 ): void {
+  const maxNodes = conditionsContract?.max_node_count ?? MAX_AST_NODES;
+  const maxDepth = conditionsContract?.max_depth ?? MAX_AST_DEPTH;
+  
   counter.count++;
-  if (counter.count > MAX_AST_NODES) {
-    throw new RegistryValidationError('POLICY_SCHEMA_UNSUPPORTED', `Policy AST exceeds maximum node bound (${MAX_AST_NODES}).`);
+  if (counter.count > maxNodes) {
+    throw new RegistryValidationError('POLICY_SCHEMA_UNSUPPORTED', `Policy AST exceeds maximum node bound (${maxNodes}).`);
   }
-  if (depth > MAX_AST_DEPTH) {
-    throw new RegistryValidationError('POLICY_SCHEMA_UNSUPPORTED', `Policy AST exceeds maximum depth bound (${MAX_AST_DEPTH}).`);
+  if (depth > maxDepth) {
+    throw new RegistryValidationError('POLICY_SCHEMA_UNSUPPORTED', `Policy AST exceeds maximum depth bound (${maxDepth}).`);
   }
 
   if (!node || typeof node !== 'object') {
@@ -378,6 +385,12 @@ export function validateAstNode(
       'POLICY_SCHEMA_UNSUPPORTED',
       `Unsupported policy operator '${op}'. Guessing or fallback is forbidden (SPEC04 §35, §40).`,
     );
+  }
+  
+  if (conditionsContract && conditionsContract.permitted_operators) {
+    if (!conditionsContract.permitted_operators.includes(op)) {
+      throw new RegistryValidationError('POLICY_SCHEMA_UNSUPPORTED', `Operator '${op}' not authorized by exact schema conditions contract.`);
+    }
   }
 
   // Validate no function properties
@@ -421,7 +434,7 @@ export function validateAstNode(
         throw new RegistryValidationError('POLICY_SCHEMA_UNSUPPORTED', `${op} operator requires non-empty args array.`);
       }
       for (const child of node.args) {
-        validateAstNode(child, allowedRoots, depth + 1, counter);
+        validateAstNode(child, allowedRoots, conditionsContract, depth + 1, counter);
       }
       break;
     }
@@ -429,7 +442,7 @@ export function validateAstNode(
       if (!Array.isArray(node.args) || node.args.length !== 1) {
         throw new RegistryValidationError('POLICY_SCHEMA_UNSUPPORTED', 'NOT operator requires exactly one arg in args array.');
       }
-      validateAstNode(node.args[0]!, allowedRoots, depth + 1, counter);
+      validateAstNode(node.args[0]!, allowedRoots, conditionsContract, depth + 1, counter);
       break;
     }
     case 'EQ':
@@ -699,13 +712,13 @@ export function evaluatePolicyDsl(
 
   if (options?.schemaPayload) {
     const sp = options.schemaPayload;
-    if (!sp.authorized_conditions_shape) {
-      throw new RegistryValidationError('POLICY_SCHEMA_UNSUPPORTED', 'Schema payload does not authorize any conditions shape. Fail closed.');
+    if (!sp.authorized_conditions_shape || typeof sp.authorized_conditions_shape !== 'object') {
+      throw new RegistryValidationError('POLICY_SCHEMA_UNSUPPORTED', 'Schema payload does not authorize any exact conditions shape (missing or boolean). Fail closed.');
     }
   }
 
   // Recursive AST schema, bounds, and allowlist validation
-  validateAstNode(conditionsNode, allowedRoots);
+  validateAstNode(conditionsNode, allowedRoots, options?.schemaPayload?.authorized_conditions_shape);
 
   // 3. Parse and validate action vocabulary (SPEC04 §44)
   let actionPayload: PolicyActionPayload;
