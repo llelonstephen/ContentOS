@@ -467,16 +467,57 @@ export class GovernancePersistenceService {
           );
         }
 
-        // Verify that the resolved schema revision exists in revision_registry as SchemaDefinition
+        // Verify exact immutable SchemaDefinition payload binding (Blocker 1)
         const [schemaDef] = await sqlTx`
-          SELECT revision_id
-          FROM revision_registry
-          WHERE entity_type = 'SchemaDefinition' AND revision_id = ${policySchemaRev}
+          SELECT 
+            r.revision_id, 
+            r.tenant_id as rev_tenant, 
+            r.workspace_id as rev_workspace,
+            p.payload_hash,
+            p.object_id,
+            o.state as obj_state,
+            o.tenant_id as obj_tenant
+          FROM revision_registry r
+          LEFT JOIN registered_control_plane_revision_payloads p 
+            ON r.entity_type = p.entity_type AND r.stable_id = p.stable_id AND r.revision_id = p.revision_id
+          LEFT JOIN object_registry o
+            ON p.object_id = o.object_id
+          WHERE r.entity_type = 'SchemaDefinition' AND r.revision_id = ${policySchemaRev}
         `;
         if (!schemaDef) {
           throw new RegistryValidationError(
             'POLICY_SCHEMA_UNSUPPORTED',
-            `SchemaDefinition revision '${policySchemaRev}' pinned by policy '${policyRow.policy_revision_id}' does not exist in RevisionRegistry (SPEC04 §41, §110).`,
+            `SchemaDefinition revision '${policySchemaRev}' does not exist (SPEC04 §41).`,
+          );
+        }
+        if (schemaDef.rev_tenant !== tenantId) {
+          throw new RegistryValidationError(
+            'POLICY_SCHEMA_UNSUPPORTED',
+            `SchemaDefinition revision '${policySchemaRev}' belongs to wrong tenant (Cross-tenant schema lookup forbidden).`,
+          );
+        }
+        if (workspaceId && schemaDef.rev_workspace && schemaDef.rev_workspace !== workspaceId) {
+          throw new RegistryValidationError(
+            'POLICY_SCHEMA_UNSUPPORTED',
+            `SchemaDefinition revision '${policySchemaRev}' belongs to wrong workspace.`,
+          );
+        }
+        if (!schemaDef.payload_hash || !schemaDef.object_id) {
+          throw new RegistryValidationError(
+            'POLICY_SCHEMA_UNSUPPORTED',
+            `SchemaDefinition revision '${policySchemaRev}' has missing payload binding. Fail closed.`,
+          );
+        }
+        if (schemaDef.obj_tenant !== tenantId) {
+          throw new RegistryValidationError(
+            'POLICY_SCHEMA_UNSUPPORTED',
+            `SchemaDefinition payload object belongs to wrong tenant. Fail closed.`,
+          );
+        }
+        if (schemaDef.obj_state !== 'AVAILABLE') {
+          throw new RegistryValidationError(
+            'POLICY_SCHEMA_UNSUPPORTED',
+            `SchemaDefinition payload object is not AVAILABLE. Fail closed.`,
           );
         }
 
@@ -676,8 +717,8 @@ export class GovernancePersistenceService {
       });
 
       // 3. Detect conflicts
-      const detectedConflicts = PolicyConflictResolver.detectConflicts(descriptors);
-      const recordedResolutions: any[] = [];
+    const detectedConflicts = PolicyConflictResolver.detectConflicts(descriptors);
+      const resolutions: any[] = [];
 
       for (const conflict of detectedConflicts) {
         // Deterministic resolution
@@ -692,7 +733,17 @@ export class GovernancePersistenceService {
         `;
 
         if (existing) {
-          recordedResolutions.push(existing);
+          resolutions.push(existing);
+          continue;
+        }
+
+        if (outcome.resolutionType === 'ESCALATE') {
+          resolutions.push({
+            resolution_id: null,
+            conflict_key: conflict.conflictKey,
+            resolution_type: outcome.resolutionType,
+            override_id: null,
+          });
           continue;
         }
 
@@ -725,7 +776,7 @@ export class GovernancePersistenceService {
           `;
         }
 
-        recordedResolutions.push({
+        resolutions.push({
           resolution_id: resolutionId,
           conflict_key: conflict.conflictKey,
           resolution_type: outcome.resolutionType,
@@ -733,7 +784,7 @@ export class GovernancePersistenceService {
         });
       }
 
-      return recordedResolutions;
+      return resolutions;
     });
   }
 
@@ -880,6 +931,13 @@ export class GovernancePersistenceService {
       throw new RegistryValidationError(
         'OVERRIDE_ID_FORBIDDEN_FOR_NON_OVERRIDE',
         'Non-override resolution must not carry an override_id (SPEC04 §66).',
+      );
+    }
+
+    if (resolutionType === 'ESCALATE') {
+      throw new RegistryValidationError(
+        'ESCALATE_CANNOT_BE_PERSISTED',
+        'ESCALATE is an operational state requiring human intervention and cannot be persisted as a final PolicyConflictResolution row.',
       );
     }
 

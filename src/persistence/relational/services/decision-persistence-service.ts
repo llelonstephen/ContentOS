@@ -11,6 +11,7 @@
  */
 import postgres from 'postgres';
 import { RegistryValidationError } from '../../../domain/services/registry-validator.js';
+import { PolicyConflictResolver, PolicyResultDescriptor } from '../../../domain/governance/policy-conflict-resolver.js';
 
 export interface CreateDecisionCycleParams {
   decisionCycleId: string;
@@ -408,6 +409,62 @@ export class DecisionPersistenceService {
         }
       }
 
+      // 7.5 Validate all underlying conflicts have resolutions (including ESCALATE)
+      const allResultsRows = await sqlTx`
+        SELECT pr.policy_result_id, pr.snapshot_id, pr.policy_revision_id, pr.triggered,
+               pr.action, pr.reason_code, p.priority_class, p.scope, p.override_allowed
+        FROM policy_results pr
+        JOIN decision_policy_revisions p ON p.policy_revision_id = pr.policy_revision_id
+        WHERE pr.snapshot_id = ${snapshotId}
+      `;
+
+      const descriptors: PolicyResultDescriptor[] = allResultsRows.map((r: any) => {
+        let effect: any = 'NO_RELEASE_EFFECT';
+        let actCode: string = r.reason_code;
+        let actParams: Record<string, unknown> | undefined;
+        let actSchema: Record<string, any> | undefined;
+        try {
+          const actObj = JSON.parse(r.action);
+          effect = actObj.effect ?? (r.triggered ? 'BLOCK' : 'NO_RELEASE_EFFECT');
+          if (actObj.code) actCode = actObj.code;
+          if (actObj.parameters) actParams = actObj.parameters;
+          if (actObj.parameter_schemas) actSchema = actObj.parameter_schemas;
+          else if (actObj.action_schema) actSchema = actObj.action_schema;
+          else if (actObj.schema) actSchema = actObj.schema;
+        } catch {
+          effect = r.triggered ? 'BLOCK' : 'NO_RELEASE_EFFECT';
+        }
+        return {
+          policyResultId: r.policy_result_id,
+          snapshotId: r.snapshot_id,
+          policyRevisionId: r.policy_revision_id,
+          triggered: r.triggered,
+          actionEffect: effect,
+          actionCode: actCode,
+          actionParameters: actParams,
+          actionSchema: actSchema,
+          priorityClass: r.priority_class,
+          scope: r.scope,
+          overrideAllowed: r.override_allowed,
+        };
+      });
+
+      const detectedConflicts = PolicyConflictResolver.detectConflicts(descriptors);
+      const providedResolutionsKeys = new Set(
+        (conflictResolutionIds && conflictResolutionIds.length > 0)
+          ? (await sqlTx`SELECT conflict_key FROM policy_conflict_resolutions WHERE resolution_id = ANY(${conflictResolutionIds})`).map((r: any) => r.conflict_key)
+          : []
+      );
+
+      for (const conflict of detectedConflicts) {
+        if (!providedResolutionsKeys.has(conflict.conflictKey)) {
+          throw new RegistryValidationError(
+            'UNRESOLVED_CONFLICT_OMITTED',
+            `Snapshot '${snapshotId}' has an unresolved conflict (conflict_key '${conflict.conflictKey}') that requires manual intervention or is omitted from the decision (SPEC04 §87).`,
+          );
+        }
+      }
+
       // 8. Human Review Record closure (SPEC04 §83, §85, §129, §130, Acceptance Criteria 20, 22, Vector 61)
       if (humanReviewId) {
         const [review] = await sqlTx`
@@ -640,7 +697,7 @@ export class DecisionPersistenceService {
     return await this.sql.begin(async (sqlTx) => {
       // 1. Verify HumanReviewRecord exists and is NEW_INFORMATION_INTRODUCED
       const [review] = await sqlTx`
-        SELECT review_id, snapshot_id, review_mode, tenant_id
+        SELECT review_id, snapshot_id, review_mode, tenant_id, workspace_id
         FROM human_review_records
         WHERE review_id = ${reviewId}
       `;
@@ -650,6 +707,9 @@ export class DecisionPersistenceService {
       if (review.tenant_id !== tenantId) {
         throw new RegistryValidationError('CROSS_TENANT_REVIEW', `HumanReviewRecord '${reviewId}' belongs to another tenant.`);
       }
+      if (workspaceId && review.workspace_id && review.workspace_id !== workspaceId) {
+        throw new RegistryValidationError('CROSS_WORKSPACE_REVIEW', `HumanReviewRecord '${reviewId}' belongs to another workspace.`);
+      }
       if (review.review_mode !== 'NEW_INFORMATION_INTRODUCED') {
         throw new RegistryValidationError(
           'INVALID_REVIEW_MODE_FOR_SUCCESSOR_CYCLE',
@@ -657,49 +717,62 @@ export class DecisionPersistenceService {
         );
       }
 
-      // 2. Find the active run for tenant
-      let run: any;
-      if (suppliedRunId) {
-        const [foundRun] = await sqlTx`
-          SELECT run_id, current_decision_cycle_id, tenant_id
-          FROM runs
-          WHERE run_id = ${suppliedRunId} AND tenant_id = ${tenantId}
-        `;
-        run = foundRun;
-      } else {
-        const [foundRun] = await sqlTx`
-          SELECT run_id, current_decision_cycle_id, tenant_id
-          FROM runs
-          WHERE tenant_id = ${tenantId}
-          ORDER BY started_at DESC
-          LIMIT 1
-        `;
-        run = foundRun;
-      }
-      if (!run) {
-        throw new RegistryValidationError('RUN_NOT_FOUND', `No Run found for tenant '${tenantId}'.`);
-      }
-
-      // 3. Load active/parent decision cycle
-      const [currentCycle] = await sqlTx`
-        SELECT decision_cycle_id, cycle_number, status, fencing_epoch
-        FROM decision_cycles
-        WHERE decision_cycle_id = ${run.current_decision_cycle_id}
-        FOR UPDATE
+      // 2. Derive lineage: review snapshot -> decision cycle binding -> parent cycle -> run
+      const [lineage] = await sqlTx`
+        SELECT b.decision_cycle_id, c.run_id, c.cycle_number, c.status, c.fencing_epoch
+        FROM decision_cycle_bindings b
+        JOIN decision_cycles c ON b.decision_cycle_id = c.decision_cycle_id
+        WHERE b.decision_snapshot_id = ${review.snapshot_id}
+        FOR UPDATE OF c
       `;
-      if (!currentCycle) {
-        throw new RegistryValidationError('CYCLE_NOT_FOUND', `Current DecisionCycle '${run.current_decision_cycle_id}' not found.`);
+      if (!lineage) {
+        throw new RegistryValidationError(
+          'LINEAGE_NOT_FOUND',
+          `Cannot map HumanReviewRecord '${reviewId}' (snapshot '${review.snapshot_id}') to a valid parent DecisionCycle.`,
+        );
+      }
+      if (lineage.status === 'SUPERSEDED' || lineage.status === 'CANCELLED') {
+        throw new RegistryValidationError(
+          'CYCLE_ALREADY_SUPERSEDED',
+          `Parent cycle '${lineage.decision_cycle_id}' is already superseded or cancelled.`,
+        );
       }
 
-      // 4. Invalidate/close old cycle to prevent old cycle from absorbing new facts
+      const derivedRunId = lineage.run_id;
+
+      if (suppliedRunId && suppliedRunId !== derivedRunId) {
+        throw new RegistryValidationError(
+          'RUN_ID_MISMATCH',
+          `Caller supplied Run ID '${suppliedRunId}' but review lineage strictly belongs to Run '${derivedRunId}'.`,
+        );
+      }
+
+      // 3. Find the Run to ensure active cycle matches
+      const [run] = await sqlTx`
+        SELECT run_id, current_decision_cycle_id
+        FROM runs
+        WHERE run_id = ${derivedRunId}
+      `;
+      if (!run) {
+        throw new RegistryValidationError('RUN_NOT_FOUND', `Run '${derivedRunId}' not found for lineage.`);
+      }
+
+      if (run.current_decision_cycle_id !== lineage.decision_cycle_id) {
+        throw new RegistryValidationError(
+          'INVALID_LINEAGE_STATE',
+          `Derived parent cycle '${lineage.decision_cycle_id}' is not the current active cycle for Run '${derivedRunId}'.`,
+        );
+      }
+
+      // 4. Invalidate/close old cycle
       await sqlTx`
         UPDATE decision_cycles
         SET status = 'SUPERSEDED',
             fencing_epoch = fencing_epoch + 1
-        WHERE decision_cycle_id = ${currentCycle.decision_cycle_id}
+        WHERE decision_cycle_id = ${lineage.decision_cycle_id}
       `;
 
-      const newCycleNumber = currentCycle.cycle_number + 1;
+      const newCycleNumber = lineage.cycle_number + 1;
 
       // 5. Create successor cycle
       await sqlTx`
@@ -707,8 +780,8 @@ export class DecisionPersistenceService {
           decision_cycle_id, tenant_id, workspace_id, run_id, cycle_number,
           parent_cycle_id, reason, status, fencing_epoch, opened_at
         ) VALUES (
-          ${successorCycleId}, ${tenantId}, ${workspaceId ?? null}, ${run.run_id}, ${newCycleNumber},
-          ${currentCycle.decision_cycle_id}, ${reason ?? 'NEW_INFORMATION_INTRODUCED'}, 'OPEN', 0, now()
+          ${successorCycleId}, ${tenantId}, ${workspaceId ?? null}, ${derivedRunId}, ${newCycleNumber},
+          ${lineage.decision_cycle_id}, ${reason ?? 'NEW_INFORMATION_INTRODUCED'}, 'OPEN', 0, now()
         )
       `;
 
@@ -717,14 +790,14 @@ export class DecisionPersistenceService {
         UPDATE runs
         SET current_decision_cycle_id = ${successorCycleId},
             version = version + 1
-        WHERE run_id = ${run.run_id}
+        WHERE run_id = ${derivedRunId}
       `;
 
       return {
         successorCycleId,
-        parentCycleId: currentCycle.decision_cycle_id,
+        parentCycleId: lineage.decision_cycle_id,
         cycleNumber: newCycleNumber,
-        runId: run.run_id,
+        runId: derivedRunId,
       };
     });
   }

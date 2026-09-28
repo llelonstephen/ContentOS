@@ -712,17 +712,10 @@ export function evaluatePolicyDsl(
   // Validate action parameter semantic kinds against pinned schema vocabulary (SPEC04 §41, §110)
   const schemasObj = actionPayload.parameter_schemas ?? actionPayload.action_schema;
   if (schemasObj && typeof schemasObj === 'object') {
-    for (const [paramKey, semDecl] of Object.entries(schemasObj)) {
-      const semKind = typeof semDecl === 'string'
-        ? semDecl
-        : (semDecl && typeof semDecl === 'object' && 'type' in semDecl ? (semDecl as any).type : undefined);
-      if (!semKind || !FROZEN_POLICY_PARAMETER_SEMANTIC_KINDS.has(semKind)) {
-        throw new RegistryValidationError(
-          'POLICY_SCHEMA_UNSUPPORTED',
-          `Action parameter '${paramKey}' specifies unauthorized semantic kind '${semKind}' under pinned schema contract (SPEC04 §41, §110).`,
-        );
-      }
-    }
+    throw new RegistryValidationError(
+      'POLICY_SCHEMA_UNSUPPORTED',
+      `Policy action cannot self-authorize parameter semantics. The exact SchemaDefinition payload format cannot express these semantics. Fail closed (SPEC04 §41, §110).`,
+    );
   }
 
   // Validate interpreter compatibility if schema revision is specified (SPEC04 §110, §111)

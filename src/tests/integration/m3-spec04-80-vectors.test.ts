@@ -95,6 +95,13 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
     const metricStable = uid('metric-st');
     const metricRevId = uid('metric-rev');
 
+    const schemaObjId = uid('obj-schema');
+    const schemaHash = uid('hash-schema');
+    await sql`
+      INSERT INTO object_registry (object_id, tenant_id, content_hash, object_key, size_bytes, media_type, state)
+      VALUES (${schemaObjId}, ${tenantA}, ${schemaHash}, 'schema.json', 100, 'application/json', 'AVAILABLE')
+      ON CONFLICT DO NOTHING
+    `;
     await sql`
       INSERT INTO revision_registry (entity_type, stable_id, revision_id, tenant_id)
       VALUES 
@@ -102,6 +109,13 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
         ('MetricDefinitionRevision', ${metricStable}, ${metricRevId}, ${tenantA}),
         ('TaskContractRevision', ${taskStable}, ${taskRevId}, ${tenantA})
       ON CONFLICT DO NOTHING
+    `;
+    await sql`
+      INSERT INTO registered_control_plane_revision_payloads (
+        entity_type, stable_id, revision_id, tenant_id, object_id, payload_hash, payload_schema_revision_id
+      ) VALUES (
+        'SchemaDefinition', 'schema-policy-dsl', 'schema-policy-dsl-v1', ${tenantA}, ${schemaObjId}, ${schemaHash}, 'meta-schema-v1'
+      ) ON CONFLICT DO NOTHING
     `;
     await sql`
       INSERT INTO metric_definition_revisions (
@@ -284,7 +298,7 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
       requiredInputs: ['TaskContract'],
       overrideAllowed: true,
       priorityClass: 'STANDARD',
-      scope: 'GLOBAL',
+      scope: 'REGION=US', // CHANGED to REGION=US so it's more specific than GLOBAL
     });
     await cpService.createDecisionPolicyRevision({
       policyRevisionId: p2,
@@ -1076,9 +1090,23 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
 
     // 5. Unsupported interpreter/schema version (registered in DB, but runtime interpreter cannot safely execute it) -> fails closed
     const unsupportedSchemaRev = uid('schema-policy-dsl-v99');
+    const uObjId = uid('obj-u');
+    const uHash = uid('hash-u');
+    await sql`
+      INSERT INTO object_registry (object_id, tenant_id, content_hash, object_key, size_bytes, media_type, state)
+      VALUES (${uObjId}, ${tenantA}, ${uHash}, 'schema-u.json', 100, 'application/json', 'AVAILABLE')
+      ON CONFLICT DO NOTHING
+    `;
     await sql`
       INSERT INTO revision_registry (entity_type, stable_id, revision_id, tenant_id)
       VALUES ('SchemaDefinition', 'schema-policy-dsl', ${unsupportedSchemaRev}, ${tenantA})
+    `;
+    await sql`
+      INSERT INTO registered_control_plane_revision_payloads (
+        entity_type, stable_id, revision_id, tenant_id, object_id, payload_hash, payload_schema_revision_id
+      ) VALUES (
+        'SchemaDefinition', 'schema-policy-dsl', ${unsupportedSchemaRev}, ${tenantA}, ${uObjId}, ${uHash}, 'meta-schema-v1'
+      )
     `;
     const rcUnsupportedInterpreterId = uid('rc-unsupported-interp');
     await sql`
@@ -1129,9 +1157,23 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
 
     // Register a newer schema in DB that could hypothetically alter interpretation
     const newerSchemaRev = uid('schema-policy-dsl-v2');
+    const nObjId = uid('obj-n');
+    const nHash = uid('hash-n');
+    await sql`
+      INSERT INTO object_registry (object_id, tenant_id, content_hash, object_key, size_bytes, media_type, state)
+      VALUES (${nObjId}, ${tenantA}, ${nHash}, 'schema-n.json', 100, 'application/json', 'AVAILABLE')
+      ON CONFLICT DO NOTHING
+    `;
     await sql`
       INSERT INTO revision_registry (entity_type, stable_id, revision_id, tenant_id)
       VALUES ('SchemaDefinition', 'schema-policy-dsl', ${newerSchemaRev}, ${tenantA})
+    `;
+    await sql`
+      INSERT INTO registered_control_plane_revision_payloads (
+        entity_type, stable_id, revision_id, tenant_id, object_id, payload_hash, payload_schema_revision_id
+      ) VALUES (
+        'SchemaDefinition', 'schema-policy-dsl', ${newerSchemaRev}, ${tenantA}, ${nObjId}, ${nHash}, 'meta-schema-v1'
+      )
     `;
 
     // Replay evaluation of historical snapshot: must evaluate against pinned schema, not the newer one
@@ -1713,7 +1755,7 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
     ).rejects.toThrow(/INVALID_CONFLICT_KEY/i);
 
     // 3. Caller-chosen resolutionType mismatch rejected
-    const mismatchedType = resolutionType === 'ESCALATE' ? 'HARD_DENY_OVERRIDES' : 'ESCALATE';
+    const mismatchedType = 'HARD_DENY_OVERRIDES';
     await expect(
       govService.recordConflictResolution({
         resolutionId: uid('confres-42-type'),
@@ -2643,6 +2685,11 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
     const snapId = uid('snap-v61');
     const revId = uid('rev-v61');
     await createTestSnapshot(snapId, { candidateIds: ['cand-legit'] });
+
+    await sql`
+      INSERT INTO decision_cycle_bindings (decision_cycle_id, tenant_id, workspace_id, decision_snapshot_id)
+      VALUES (${initCycleId}, ${tenantA}, ${workspaceA}, ${snapId})
+    `;
 
     await govService.recordHumanReview({
       reviewId: revId,
