@@ -91,11 +91,11 @@ Domain MUST NOT import from infrastructure, API, events, providers, or workflow.
 
 | Milestone | Status |
 |---|---|
-| M0 — Repository / Toolchain / Infrastructure | IN PROGRESS |
-| M1 — System Architecture + Persistence | PENDING |
-| M2 — Evidence / Proposition / Epistemic State | PENDING |
-| M3 — Governance / Policy Engine | PENDING |
-| M4 — Content Intelligence Runtime | PENDING |
+| M0 — Repository / Toolchain / Infrastructure | EXTERNALLY CLOSED |
+| M1 — System Architecture + Persistence | EXTERNALLY CLOSED |
+| M2 — Evidence / Proposition / Epistemic State | EXTERNALLY CLOSED |
+| M3 — Governance / Policy Engine | EXTERNALLY CLOSED (`m3-v9-verified`) |
+| M4 — Content Intelligence Runtime | INTERNALLY VERIFIED; EXTERNAL AUDIT PENDING |
 | M5 — Evaluation Framework | PENDING |
 | M6 — Security / Privacy / Rights | PENDING |
 | M7 — V1A Decision Core | PENDING |

@@ -14,6 +14,10 @@
  */
 import type postgres from 'postgres';
 import { StandaloneIngestionAdapter } from '../persistence/relational/services/standalone-ingestion-adapter.js';
+export {
+  createContentIntelligencePersistence,
+  type ContentIntelligencePersistence,
+} from './content-intelligence-runtime.js';
 
 /**
  * Bootstrap factory to construct StandaloneIngestionAdapter.

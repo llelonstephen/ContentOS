@@ -26,6 +26,7 @@ import {
   integer,
   index,
   check,
+  type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 import {
@@ -159,7 +160,9 @@ export const contentArchitectures = pgTable(
     architecture_id: text('architecture_id').primaryKey(),
     tenant_id: text('tenant_id').notNull(),
     workspace_id: text('workspace_id'),
-    supersedes_architecture_id: text('supersedes_architecture_id'),
+    supersedes_architecture_id: text('supersedes_architecture_id').references(
+      (): AnyPgColumn => contentArchitectures.architecture_id,
+    ),
     task_revision_id: text('task_revision_id')
       .notNull()
       .references(() => taskContractRevisions.task_revision_id),
@@ -172,6 +175,7 @@ export const contentArchitectures = pgTable(
     index('idx_content_arch_tenant').on(table.tenant_id),
     index('idx_content_arch_task').on(table.task_revision_id),
     index('idx_content_arch_strategy').on(table.strategy_id),
+    index('idx_content_arch_supersedes').on(table.supersedes_architecture_id),
   ],
 );
 
@@ -224,13 +228,16 @@ export const contentCandidates = pgTable(
     run_config_id: text('run_config_id')
       .notNull()
       .references(() => runConfigs.run_config_id),
-    parent_candidate_id: text('parent_candidate_id'),
+    parent_candidate_id: text('parent_candidate_id').references(
+      (): AnyPgColumn => contentCandidates.candidate_id,
+    ),
     created_at: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
     index('idx_content_candidate_tenant').on(table.tenant_id),
     index('idx_content_candidate_task').on(table.task_revision_id),
     index('idx_content_candidate_run_cfg').on(table.run_config_id),
+    index('idx_content_candidate_parent').on(table.parent_candidate_id),
   ],
 );
 
