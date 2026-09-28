@@ -16,6 +16,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import postgres from 'postgres';
 import crypto from 'node:crypto';
 import { GovernancePersistenceService } from '../../persistence/relational/services/governance-persistence-service.js';
+import { getDefaultObjectStore } from '../../persistence/objects/default-object-store.js';
 import { DecisionPersistenceService } from '../../persistence/relational/services/decision-persistence-service.js';
 import { ControlPlanePersistenceService } from '../../persistence/relational/services/control-plane-persistence-service.js';
 import { TemporalGovernanceResolver } from '../../domain/governance/temporal-governance-resolver.js';
@@ -96,10 +97,22 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
     const metricRevId = uid('metric-rev');
 
     const schemaObjId = uid('obj-schema');
-    const schemaHash = uid('hash-schema');
+    const schemaPayloadStr = JSON.stringify({
+      authorized_conditions_shape: true,
+      authorized_required_inputs: ['AudienceState', 'RunConfig', 'RunKnowledgeDelta', 'KnowledgeManifest', 'BaselineKnowledgeSnapshot', 'Candidate', 'UncertaintyAssessment', 'TaskContract', 'TaskContractRevision', 'DecisionSnapshot', 'UnrelatedEntity'],
+      authorized_action_shape: {
+        effect_allowed: ['BLOCK', 'FLAG', 'NO_RELEASE_EFFECT', 'REQUIRE_REVIEW'],
+        parameter_schemas: { format: 'EXCLUSIVE_ENUM' }
+      }
+    });
+    const schemaPayloadBuf = Buffer.from(schemaPayloadStr, 'utf-8');
+    const schemaMeta = await getDefaultObjectStore().put(schemaPayloadBuf, 'application/json');
+    const schemaHash = schemaMeta.content_hash;
+    const schemaKey = schemaMeta.object_reference;
+
     await sql`
       INSERT INTO object_registry (object_id, tenant_id, content_hash, object_key, size_bytes, media_type, state)
-      VALUES (${schemaObjId}, ${tenantA}, ${schemaHash}, 'schema.json', 100, 'application/json', 'AVAILABLE')
+      VALUES (${schemaObjId}, ${tenantA}, ${schemaHash}, ${schemaKey}, ${schemaPayloadBuf.length}, 'application/json', 'AVAILABLE')
       ON CONFLICT DO NOTHING
     `;
     await sql`
@@ -1091,10 +1104,15 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
     // 5. Unsupported interpreter/schema version (registered in DB, but runtime interpreter cannot safely execute it) -> fails closed
     const unsupportedSchemaRev = uid('schema-policy-dsl-v99');
     const uObjId = uid('obj-u');
-    const uHash = uid('hash-u');
+    const uPayloadStr = JSON.stringify({ unsupported_garbage: true });
+    const uPayloadBuf = Buffer.from(uPayloadStr, 'utf-8');
+    const uMeta = await getDefaultObjectStore().put(uPayloadBuf, 'application/json');
+    const uHash = uMeta.content_hash;
+    const uKey = uMeta.object_reference;
+    
     await sql`
       INSERT INTO object_registry (object_id, tenant_id, content_hash, object_key, size_bytes, media_type, state)
-      VALUES (${uObjId}, ${tenantA}, ${uHash}, 'schema-u.json', 100, 'application/json', 'AVAILABLE')
+      VALUES (${uObjId}, ${tenantA}, ${uHash}, ${uKey}, ${uPayloadBuf.length}, 'application/json', 'AVAILABLE')
       ON CONFLICT DO NOTHING
     `;
     await sql`
@@ -1158,10 +1176,22 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
     // Register a newer schema in DB that could hypothetically alter interpretation
     const newerSchemaRev = uid('schema-policy-dsl-v2');
     const nObjId = uid('obj-n');
-    const nHash = uid('hash-n');
+    const nPayloadStr = JSON.stringify({
+      authorized_conditions_shape: true,
+      authorized_required_inputs: ['AudienceState', 'RunConfig', 'RunKnowledgeDelta', 'KnowledgeManifest', 'BaselineKnowledgeSnapshot', 'Candidate', 'UncertaintyAssessment', 'TaskContract', 'TaskContractRevision', 'DecisionSnapshot', 'UnrelatedEntity'],
+      authorized_action_shape: {
+        effect_allowed: ['BLOCK', 'FLAG', 'NO_RELEASE_EFFECT', 'REQUIRE_REVIEW'],
+        parameter_schemas: { format: 'EXCLUSIVE_ENUM', this_is_v2: true }
+      }
+    });
+    const nPayloadBuf = Buffer.from(nPayloadStr, 'utf-8');
+    const nMeta = await getDefaultObjectStore().put(nPayloadBuf, 'application/json');
+    const nHash = nMeta.content_hash;
+    const nKey = nMeta.object_reference;
+
     await sql`
       INSERT INTO object_registry (object_id, tenant_id, content_hash, object_key, size_bytes, media_type, state)
-      VALUES (${nObjId}, ${tenantA}, ${nHash}, 'schema-n.json', 100, 'application/json', 'AVAILABLE')
+      VALUES (${nObjId}, ${tenantA}, ${nHash}, ${nKey}, ${nPayloadBuf.length}, 'application/json', 'AVAILABLE')
       ON CONFLICT DO NOTHING
     `;
     await sql`

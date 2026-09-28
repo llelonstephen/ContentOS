@@ -27,6 +27,7 @@ import {
   PolicyConflictResolver,
   type PolicyResultDescriptor,
 } from '../../../domain/governance/policy-conflict-resolver.js';
+import { getDefaultObjectStore } from '../../objects/default-object-store.js';
 
 export interface ResolveGovernanceSnapshotParams {
   governanceSnapshotId: string;
@@ -475,6 +476,8 @@ export class GovernancePersistenceService {
             r.workspace_id as rev_workspace,
             p.payload_hash,
             p.object_id,
+            o.object_key,
+            o.content_hash,
             o.state as obj_state,
             o.tenant_id as obj_tenant
           FROM revision_registry r
@@ -521,6 +524,24 @@ export class GovernancePersistenceService {
           );
         }
 
+        // Load EXACT SchemaDefinition payload (Blocker 1)
+        const objectStore = getDefaultObjectStore();
+        let payloadBuf;
+        try {
+          const isValid = await objectStore.verify(schemaDef.object_key, schemaDef.content_hash);
+          if (!isValid) throw new Error();
+          payloadBuf = await objectStore.get(schemaDef.object_key);
+        } catch (e) {
+          throw new RegistryValidationError('POLICY_SCHEMA_UNSUPPORTED', `SchemaDefinition payload missing or hash mismatch. Fail closed.`);
+        }
+
+        let schemaPayloadObj;
+        try {
+          schemaPayloadObj = JSON.parse(payloadBuf.toString('utf-8'));
+        } catch {
+          throw new RegistryValidationError('POLICY_SCHEMA_UNSUPPORTED', `SchemaDefinition payload is malformed.`);
+        }
+
         // Verify interpreter compatibility (SPEC04 §111)
         if (!SUPPORTED_POLICY_SCHEMA_REVISIONS.has(policySchemaRev)) {
           throw new RegistryValidationError(
@@ -539,7 +560,7 @@ export class GovernancePersistenceService {
             schemaRevisionId: policySchemaRev,
           },
           contextData,
-          { schemaRevisionId: policySchemaRev },
+          { schemaRevisionId: policySchemaRev, schemaPayload: schemaPayloadObj },
         );
 
         // Verify policy revision belongs to GovernanceSnapshot (SPEC04 §49, §56, Vector 36, Preflight 14)

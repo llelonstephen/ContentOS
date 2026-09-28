@@ -638,6 +638,7 @@ export function evaluatePolicyDsl(
   contextData: Record<string, unknown>,
   options?: {
     schemaRevisionId?: string;
+    schemaPayload?: any;
   },
 ): PolicyEvaluationResult {
   const collectedRefs = new Set<string>();
@@ -652,6 +653,19 @@ export function evaluatePolicyDsl(
   }
 
   const allowedRoots = new Set<string>(rawRequired);
+
+  if (options?.schemaPayload) {
+    const sp = options.schemaPayload;
+    if (sp.authorized_required_inputs && Array.isArray(sp.authorized_required_inputs)) {
+      for (const req of rawRequired) {
+        if (!sp.authorized_required_inputs.includes(req)) {
+           throw new RegistryValidationError('POLICY_SCHEMA_UNSUPPORTED', `Required input '${req}' is not authorized by the exact schema payload (SPEC04 §37).`);
+        }
+      }
+    } else {
+       throw new RegistryValidationError('POLICY_SCHEMA_UNSUPPORTED', 'Schema payload missing authorized_required_inputs. Fail closed.');
+    }
+  }
 
   for (const reqInput of rawRequired) {
     if (!contextData || !Object.prototype.hasOwnProperty.call(contextData, reqInput)) {
@@ -683,6 +697,13 @@ export function evaluatePolicyDsl(
     conditionsNode = policyJson.conditions;
   }
 
+  if (options?.schemaPayload) {
+    const sp = options.schemaPayload;
+    if (!sp.authorized_conditions_shape) {
+      throw new RegistryValidationError('POLICY_SCHEMA_UNSUPPORTED', 'Schema payload does not authorize any conditions shape. Fail closed.');
+    }
+  }
+
   // Recursive AST schema, bounds, and allowlist validation
   validateAstNode(conditionsNode, allowedRoots);
 
@@ -709,14 +730,35 @@ export function evaluatePolicyDsl(
     );
   }
 
-  // Validate action parameter semantic kinds against pinned schema vocabulary (SPEC04 §41, §110)
-  const schemasObj = actionPayload.parameter_schemas ?? actionPayload.action_schema;
-  if (schemasObj && typeof schemasObj === 'object') {
+  if (options?.schemaPayload) {
+    const sp = options.schemaPayload;
+    if (!sp.authorized_action_shape) {
+      throw new RegistryValidationError('POLICY_SCHEMA_UNSUPPORTED', 'Schema payload missing authorized_action_shape. Fail closed.');
+    }
+    if (sp.authorized_action_shape.effect_allowed && !sp.authorized_action_shape.effect_allowed.includes(actionPayload.effect)) {
+      throw new RegistryValidationError('POLICY_SCHEMA_UNSUPPORTED', `Action effect '${actionPayload.effect}' is not authorized by the exact schema payload.`);
+    }
+    
+    const schemasObj = actionPayload.parameter_schemas ?? actionPayload.action_schema;
+    if (schemasObj && typeof schemasObj === 'object') {
+      const allowedSchemas = sp.authorized_action_shape.parameter_schemas;
+      if (!allowedSchemas || JSON.stringify(schemasObj) !== JSON.stringify(allowedSchemas)) {
+        throw new RegistryValidationError(
+          'POLICY_SCHEMA_UNSUPPORTED',
+          `Policy action parameter semantics do not strictly conform to the exact SchemaDefinition payload. Fail closed (SPEC04 §41, §110).`,
+        );
+      }
+    }
+  } else {
+    // Validate action parameter semantic kinds against pinned schema vocabulary (SPEC04 §41, §110)
+    const schemasObj = actionPayload.parameter_schemas ?? actionPayload.action_schema;
+    if (schemasObj && typeof schemasObj === 'object') {
     throw new RegistryValidationError(
       'POLICY_SCHEMA_UNSUPPORTED',
       `Policy action cannot self-authorize parameter semantics. The exact SchemaDefinition payload format cannot express these semantics. Fail closed (SPEC04 §41, §110).`,
     );
   }
+  } // end of else block
 
   // Validate interpreter compatibility if schema revision is specified (SPEC04 §110, §111)
   const schemaRev = options?.schemaRevisionId ?? policyJson.schemaRevisionId ?? policyJson.schema_revision_id ?? actionPayload.schema_revision_id;
