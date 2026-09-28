@@ -167,31 +167,19 @@ export type ParameterSemanticType =
   | 'EXCLUSIVE_ENUM'        // e.g. format, mode, placement, style: single-choice discrete values; different values are mutually exclusive
   | 'BOOLEAN_FLAG';         // boolean flags: true vs false is mutually exclusive
 
+export const SUPPORTED_PARAMETER_SEMANTIC_KINDS = new Set<string>([
+  'MONOTONIC_LOWER_BOUND',
+  'MONOTONIC_UPPER_BOUND',
+  'ADDITIVE_COLLECTION',
+  'EXCLUSIVE_ENUM',
+  'BOOLEAN_FLAG',
+]);
+
 /**
- * Immutable parameter semantic contracts for structured action parameters (SPEC04 §57).
- * Prohibits property-name wording heuristics, action-code wording, JSON inequality alone, string similarity, or LLM interpretation.
+ * Parameter semantic contracts MUST be mechanically bound to the evaluated DecisionPolicyRevision schema.
+ * Prohibits property-name wording heuristics, global mapping tables, action-code wording, JSON inequality alone, string similarity, or LLM interpretation.
  */
-export const FROZEN_ACTION_PARAM_SCHEMAS: Record<string, ParameterSemanticType> = {
-  minLength: 'MONOTONIC_LOWER_BOUND',
-  minScore: 'MONOTONIC_LOWER_BOUND',
-  minCount: 'MONOTONIC_LOWER_BOUND',
-  maxLength: 'MONOTONIC_UPPER_BOUND',
-  maxScore: 'MONOTONIC_UPPER_BOUND',
-  maxCount: 'MONOTONIC_UPPER_BOUND',
-  requiredTags: 'ADDITIVE_COLLECTION',
-  disclosures: 'ADDITIVE_COLLECTION',
-  requiredHeaders: 'ADDITIVE_COLLECTION',
-  tags: 'ADDITIVE_COLLECTION',
-  format: 'EXCLUSIVE_ENUM',
-  mode: 'EXCLUSIVE_ENUM',
-  placement: 'EXCLUSIVE_ENUM',
-  disclaimerPosition: 'EXCLUSIVE_ENUM',
-  style: 'EXCLUSIVE_ENUM',
-  section: 'EXCLUSIVE_ENUM',
-  disclaimerId: 'EXCLUSIVE_ENUM',
-  enabled: 'BOOLEAN_FLAG',
-  allowSkip: 'BOOLEAN_FLAG',
-};
+export const FROZEN_ACTION_PARAM_SCHEMAS: Record<string, ParameterSemanticType> = Object.freeze({});
 
 /**
  * Evaluates whether two structured parameter sets are mutually exclusive (SPEC04 §57).
@@ -220,24 +208,26 @@ export function areParametersIncompatible(
       continue;
     }
 
-    // Resolve semantic contract from descriptor schema or frozen action param contract
+    // Resolve semantic contract strictly from the immutable schema bound to DecisionPolicyRevision
     let semType: ParameterSemanticType | undefined;
     const sA = schemaA?.[key];
     const sB = schemaB?.[key];
-    if (typeof sA === 'string') semType = sA;
-    else if (sA && typeof sA === 'object' && 'type' in sA) semType = sA.type;
-    else if (typeof sB === 'string') semType = sB;
-    else if (sB && typeof sB === 'object' && 'type' in sB) semType = sB.type;
-    else if (Object.prototype.hasOwnProperty.call(FROZEN_ACTION_PARAM_SCHEMAS, key)) {
-      semType = FROZEN_ACTION_PARAM_SCHEMAS[key];
+    if (typeof sA === 'string' && SUPPORTED_PARAMETER_SEMANTIC_KINDS.has(sA)) {
+      semType = sA as ParameterSemanticType;
+    } else if (sA && typeof sA === 'object' && 'type' in sA && SUPPORTED_PARAMETER_SEMANTIC_KINDS.has(sA.type)) {
+      semType = sA.type as ParameterSemanticType;
+    } else if (typeof sB === 'string' && SUPPORTED_PARAMETER_SEMANTIC_KINDS.has(sB)) {
+      semType = sB as ParameterSemanticType;
+    } else if (sB && typeof sB === 'object' && 'type' in sB && SUPPORTED_PARAMETER_SEMANTIC_KINDS.has(sB.type)) {
+      semType = sB.type as ParameterSemanticType;
     }
 
     if (!semType) {
-      // Do not guess from JSON inequality alone! (SPEC04 §57)
-      // Fail closed when system is required to make a determination on unsupported/unknown parameter semantics.
+      // Do not guess from property names, global conventions, or JSON inequality alone! (SPEC04 §57)
+      // Fail closed when system is required to make a determination on unsupported/unbound parameter semantics.
       throw new RegistryValidationError(
         'CONFLICT_SEMANTICS_UNDETERMINED',
-        `Cannot determine requirement conflict semantics for parameter '${key}': no typed semantic contract exists to prove compatibility or mutual exclusivity (SPEC04 §57).`,
+        `Cannot determine requirement conflict semantics for parameter '${key}': parameter has no immutable schema-bound semantic contract attached to DecisionPolicyRevision (SPEC04 §57).`,
       );
     }
 

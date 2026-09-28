@@ -579,11 +579,15 @@ export class GovernancePersistenceService {
         let effect: any = 'NO_RELEASE_EFFECT';
         let actCode: string = r.reason_code;
         let actParams: Record<string, unknown> | undefined;
+        let actSchema: Record<string, any> | undefined;
         try {
           const actObj = JSON.parse(r.action);
           effect = actObj.effect ?? (r.triggered ? 'BLOCK' : 'NO_RELEASE_EFFECT');
           if (actObj.code) actCode = actObj.code;
           if (actObj.parameters) actParams = actObj.parameters;
+          if (actObj.parameter_schemas) actSchema = actObj.parameter_schemas;
+          else if (actObj.action_schema) actSchema = actObj.action_schema;
+          else if (actObj.schema) actSchema = actObj.schema;
         } catch {
           effect = r.triggered ? 'BLOCK' : 'NO_RELEASE_EFFECT';
         }
@@ -595,6 +599,7 @@ export class GovernancePersistenceService {
           actionEffect: effect,
           actionCode: actCode,
           actionParameters: actParams,
+          actionSchema: actSchema,
           priorityClass: r.priority_class,
           scope: r.scope,
           overrideAllowed: r.override_allowed,

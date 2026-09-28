@@ -1739,7 +1739,7 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
     const detectedCompatibleCodes = PolicyConflictResolver.detectConflicts([dReqDiff1, dReqDiff2]);
     expect(detectedCompatibleCodes.length).toBe(0);
 
-    // 4. Same key with different but jointly satisfiable values does NOT produce false conflict (e.g. minLength 10 vs 20)
+    // 4. Same key with different but jointly satisfiable values does NOT produce false conflict when schema-bound
     const dReqBound1 = {
       policyResultId: 'res-bound-1',
       snapshotId: 's-46',
@@ -1748,6 +1748,7 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
       actionEffect: 'REQUIREMENT' as const,
       actionCode: 'REQUIRE_LENGTH_10',
       actionParameters: { minLength: 10 },
+      actionSchema: { minLength: 'MONOTONIC_LOWER_BOUND' as const },
       priorityClass: 'STANDARD',
       scope: 'GLOBAL',
       overrideAllowed: true,
@@ -1760,6 +1761,7 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
       actionEffect: 'REQUIREMENT' as const,
       actionCode: 'REQUIRE_LENGTH_20',
       actionParameters: { minLength: 20 },
+      actionSchema: { minLength: 'MONOTONIC_LOWER_BOUND' as const },
       priorityClass: 'STANDARD',
       scope: 'GLOBAL',
       overrideAllowed: true,
@@ -1767,7 +1769,7 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
     const detectedBound = PolicyConflictResolver.detectConflicts([dReqBound1, dReqBound2]);
     expect(detectedBound.length).toBe(0);
 
-    // 5. Additive collection requirements do NOT produce false conflict (e.g. requiredTags ["A"] vs ["B"])
+    // 5. Additive collection requirements do NOT produce false conflict when schema-bound
     const dReqTags1 = {
       policyResultId: 'res-tags-1',
       snapshotId: 's-46',
@@ -1776,6 +1778,7 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
       actionEffect: 'REQUIREMENT' as const,
       actionCode: 'REQUIRE_TAG_A',
       actionParameters: { requiredTags: ['A'] },
+      actionSchema: { requiredTags: 'ADDITIVE_COLLECTION' as const },
       priorityClass: 'STANDARD',
       scope: 'GLOBAL',
       overrideAllowed: true,
@@ -1788,6 +1791,7 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
       actionEffect: 'REQUIREMENT' as const,
       actionCode: 'REQUIRE_TAG_B',
       actionParameters: { requiredTags: ['B'] },
+      actionSchema: { requiredTags: 'ADDITIVE_COLLECTION' as const },
       priorityClass: 'STANDARD',
       scope: 'GLOBAL',
       overrideAllowed: true,
@@ -1804,6 +1808,7 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
       actionEffect: 'REQUIREMENT' as const,
       actionCode: 'REQUIRE_DISCLAIMER_A',
       actionParameters: { format: 'HTML' },
+      actionSchema: { format: 'EXCLUSIVE_ENUM' as const },
       priorityClass: 'STANDARD',
       scope: 'GLOBAL',
       overrideAllowed: true,
@@ -1816,6 +1821,7 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
       actionEffect: 'REQUIREMENT' as const,
       actionCode: 'REQUIRE_DISCLAIMER_B',
       actionParameters: { format: 'PLAIN_TEXT' }, // contradictory demand on same single-choice key!
+      actionSchema: { format: 'EXCLUSIVE_ENUM' as const },
       priorityClass: 'STANDARD',
       scope: 'GLOBAL',
       overrideAllowed: true,
@@ -1823,7 +1829,7 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
     const detectedContradictory = PolicyConflictResolver.detectConflicts([dReqContra1, dReqContra2]);
     expect(detectedContradictory.length).toBe(1);
 
-    // 7. Unsupported/unknown parameter semantics are not guessed (fails closed with CONFLICT_SEMANTICS_UNDETERMINED)
+    // 7. Unsupported/unknown parameter semantics are not guessed (no actionSchema -> fails closed with CONFLICT_SEMANTICS_UNDETERMINED)
     const dReqUnknown1 = {
       policyResultId: 'res-req-unk1',
       snapshotId: 's-46',
@@ -1850,6 +1856,35 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
     };
     expect(() =>
       PolicyConflictResolver.detectConflicts([dReqUnknown1, dReqUnknown2]),
+    ).toThrow(/CONFLICT_SEMANTICS_UNDETERMINED/i);
+
+    // 8. Property names alone (e.g. minLength) without an attached schema contract MUST NOT be guessed globally
+    const dReqUnguessed1 = {
+      policyResultId: 'res-req-ung1',
+      snapshotId: 's-46',
+      policyRevisionId: 'p-req-ung1',
+      triggered: true,
+      actionEffect: 'REQUIREMENT' as const,
+      actionCode: 'REQ_UNBOUND_1',
+      actionParameters: { minLength: 10 }, // no actionSchema attached
+      priorityClass: 'STANDARD',
+      scope: 'GLOBAL',
+      overrideAllowed: true,
+    };
+    const dReqUnguessed2 = {
+      policyResultId: 'res-req-ung2',
+      snapshotId: 's-46',
+      policyRevisionId: 'p-req-ung2',
+      triggered: true,
+      actionEffect: 'REQUIREMENT' as const,
+      actionCode: 'REQ_UNBOUND_2',
+      actionParameters: { minLength: 20 }, // no actionSchema attached
+      priorityClass: 'STANDARD',
+      scope: 'GLOBAL',
+      overrideAllowed: true,
+    };
+    expect(() =>
+      PolicyConflictResolver.detectConflicts([dReqUnguessed1, dReqUnguessed2]),
     ).toThrow(/CONFLICT_SEMANTICS_UNDETERMINED/i);
   });
 
