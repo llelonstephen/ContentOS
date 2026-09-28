@@ -18,7 +18,10 @@ import {
   verifyStageFencing,
   type StageFencingContext,
 } from './stage-fencing-coordinator.js';
-import { evaluatePolicyDsl } from '../../../domain/governance/policy-dsl.js';
+import {
+  evaluatePolicyDsl,
+  assertPolicyResultEquivalence,
+} from '../../../domain/governance/policy-dsl.js';
 import {
   PolicyConflictResolver,
   type PolicyResultDescriptor,
@@ -474,13 +477,8 @@ export class GovernancePersistenceService {
         `;
 
         if (existing) {
-          // Verify semantic equivalence (SPEC04 §50, §53, Vector 29)
-          if (existing.triggered !== evalOutcome.triggered || existing.action !== evalOutcome.action) {
-            throw new RegistryValidationError(
-              'POLICY_NONDETERMINISTIC',
-              `Determinism violation: Policy evaluation retry produced different result for policy '${policyRow.policy_revision_id}'.`,
-            );
-          }
+          // Verify semantic equivalence across all canonical fields (SPEC04 §50, §53, Vector 29)
+          assertPolicyResultEquivalence(existing as any, evalOutcome);
           results.push({
             policyResultId: existing.policy_result_id,
             snapshotId,

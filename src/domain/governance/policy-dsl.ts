@@ -691,11 +691,13 @@ export function evaluatePolicyDsl(
   const triggered = evaluatePredicate(conditionsNode, contextData, collectedRefs, allowedRoots);
 
   // 5. Determine action effect: non-triggered results produce NO_RELEASE_EFFECT (SPEC04 §50, Preflight 17)
+  const sortedRefs = Array.from(collectedRefs).sort();
   const effect = triggered ? actionPayload.effect : 'NO_RELEASE_EFFECT';
   const reasonCode = actionPayload.code || (triggered ? 'POLICY_TRIGGERED' : 'POLICY_NOT_TRIGGERED');
   const actionStr = JSON.stringify({
     ...actionPayload,
     effect,
+    input_refs: sortedRefs,
   });
 
   // 6. Determine uncertainty: if uncertainty assessment or input indicates UNCERTAIN, preserve it
@@ -712,6 +714,126 @@ export function evaluatePolicyDsl(
     action: actionStr,
     reasonCode,
     inputUncertainty,
-    inputRefs: Array.from(collectedRefs).sort(),
+    inputRefs: sortedRefs,
   };
+}
+
+/**
+ * Validates semantic equivalence between an existing PolicyResult and a retry evaluation (SPEC04 §50, §53, Vector 29).
+ * Checks triggered, action payload (effect, code, parameters), reason_code, input_uncertainty, and exact input_refs.
+ * If any material field differs, throws deterministic POLICY_NONDETERMINISTIC error.
+ */
+export function assertPolicyResultEquivalence(
+  existing: {
+    policy_result_id?: string;
+    triggered: boolean;
+    action: string;
+    reason_code: string;
+    input_uncertainty: string;
+  },
+  current: {
+    triggered: boolean;
+    action: string;
+    reasonCode: string;
+    inputUncertainty: string;
+    inputRefs: string[];
+  },
+): void {
+  // 1. triggered
+  if (existing.triggered !== current.triggered) {
+    throw new RegistryValidationError(
+      'POLICY_NONDETERMINISTIC',
+      `Determinism violation: Policy evaluation retry produced different triggered status (${existing.triggered} vs ${current.triggered}) (SPEC04 §50, §53).`,
+    );
+  }
+
+  // Parse actions
+  let existingActionObj: any = {};
+  let currentActionObj: any = {};
+  try {
+    existingActionObj = typeof existing.action === 'string' ? JSON.parse(existing.action) : existing.action;
+  } catch {
+    existingActionObj = { raw: existing.action };
+  }
+  try {
+    currentActionObj = typeof current.action === 'string' ? JSON.parse(current.action) : current.action;
+  } catch {
+    currentActionObj = { raw: current.action };
+  }
+
+  // 2. action: effect, code, parameters
+  const existingEffect = existingActionObj.effect;
+  const currentEffect = currentActionObj.effect;
+  if (existingEffect !== undefined && currentEffect !== undefined && existingEffect !== currentEffect) {
+    throw new RegistryValidationError(
+      'POLICY_NONDETERMINISTIC',
+      `Determinism violation: Policy evaluation retry produced different action effect ('${existingEffect}' vs '${currentEffect}') (SPEC04 §50, §53).`,
+    );
+  }
+
+  const existingCode = existingActionObj.code;
+  const currentCode = currentActionObj.code;
+  if (existingCode !== undefined && currentCode !== undefined && existingCode !== currentCode) {
+    throw new RegistryValidationError(
+      'POLICY_NONDETERMINISTIC',
+      `Determinism violation: Policy evaluation retry produced different action code ('${existingCode}' vs '${currentCode}') (SPEC04 §50, §53).`,
+    );
+  }
+
+  if (existingActionObj.parameters !== undefined || currentActionObj.parameters !== undefined) {
+    if (JSON.stringify(existingActionObj.parameters ?? {}) !== JSON.stringify(currentActionObj.parameters ?? {})) {
+      throw new RegistryValidationError(
+        'POLICY_NONDETERMINISTIC',
+        `Determinism violation: Policy evaluation retry produced different action parameters (SPEC04 §50, §53).`,
+      );
+    }
+  }
+
+  const cleanExisting = { ...existingActionObj };
+  const cleanCurrent = { ...currentActionObj };
+  delete cleanExisting.input_refs;
+  delete cleanCurrent.input_refs;
+  if (JSON.stringify(cleanExisting) !== JSON.stringify(cleanCurrent)) {
+    throw new RegistryValidationError(
+      'POLICY_NONDETERMINISTIC',
+      `Determinism violation: Policy evaluation retry produced different action payload (SPEC04 §50, §53).`,
+    );
+  }
+
+  // 3. reason_code
+  if (existing.reason_code !== current.reasonCode) {
+    throw new RegistryValidationError(
+      'POLICY_NONDETERMINISTIC',
+      `Determinism violation: Policy evaluation retry produced different reason_code ('${existing.reason_code}' vs '${current.reasonCode}') (SPEC04 §50, §53).`,
+    );
+  }
+
+  // 4. input_uncertainty
+  if (existing.input_uncertainty !== current.inputUncertainty) {
+    throw new RegistryValidationError(
+      'POLICY_NONDETERMINISTIC',
+      `Determinism violation: Policy evaluation retry produced different input_uncertainty ('${existing.input_uncertainty}' vs '${current.inputUncertainty}') (SPEC04 §50, §53).`,
+    );
+  }
+
+  // 5. exact input_refs / normalized input-reference membership
+  const existingRefs: string[] = Array.isArray(existingActionObj.input_refs)
+    ? existingActionObj.input_refs
+    : [];
+  const currentRefs: string[] = Array.isArray(current.inputRefs)
+    ? current.inputRefs
+    : (Array.isArray(currentActionObj.input_refs) ? currentActionObj.input_refs : []);
+
+  const normExisting = Array.from(new Set(existingRefs.map(String))).sort();
+  const normCurrent = Array.from(new Set(currentRefs.map(String))).sort();
+
+  if (
+    normExisting.length !== normCurrent.length ||
+    normExisting.some((ref, idx) => ref !== normCurrent[idx])
+  ) {
+    throw new RegistryValidationError(
+      'POLICY_NONDETERMINISTIC',
+      `Determinism violation: Policy evaluation retry produced different input_refs ([${normExisting.join(', ')}] vs [${normCurrent.join(', ')}]) (SPEC04 §50, §53).`,
+    );
+  }
 }

@@ -32,6 +32,7 @@ export interface PolicyResultDescriptor {
   actionEffect: 'NO_RELEASE_EFFECT' | 'WARNING' | 'REQUIREMENT' | 'REQUIRE_REVIEW' | 'BLOCK';
   actionCode: string;
   actionParameters?: Record<string, unknown>;
+  actionSchema?: Record<string, ParameterSemanticType | { type: ParameterSemanticType }>;
   priorityClass?: string | number;
   scope?: string;
   overrideAllowed?: boolean;
@@ -159,6 +160,143 @@ export function compareStructuredScopes(aInput?: string, bInput?: string): Scope
   return 'INCOMPARABLE';
 }
 
+export type ParameterSemanticType =
+  | 'MONOTONIC_LOWER_BOUND' // e.g. minLength, minScore, minCount: jointly satisfiable by max(a, b)
+  | 'MONOTONIC_UPPER_BOUND' // e.g. maxLength, maxScore, maxCount: jointly satisfiable by min(a, b)
+  | 'ADDITIVE_COLLECTION'   // e.g. requiredTags, requiredHeaders, disclosures: jointly satisfiable by union
+  | 'EXCLUSIVE_ENUM'        // e.g. format, mode, placement, style: single-choice discrete values; different values are mutually exclusive
+  | 'BOOLEAN_FLAG';         // boolean flags: true vs false is mutually exclusive
+
+/**
+ * Immutable parameter semantic contracts for structured action parameters (SPEC04 §57).
+ * Prohibits property-name wording heuristics, action-code wording, JSON inequality alone, string similarity, or LLM interpretation.
+ */
+export const FROZEN_ACTION_PARAM_SCHEMAS: Record<string, ParameterSemanticType> = {
+  minLength: 'MONOTONIC_LOWER_BOUND',
+  minScore: 'MONOTONIC_LOWER_BOUND',
+  minCount: 'MONOTONIC_LOWER_BOUND',
+  maxLength: 'MONOTONIC_UPPER_BOUND',
+  maxScore: 'MONOTONIC_UPPER_BOUND',
+  maxCount: 'MONOTONIC_UPPER_BOUND',
+  requiredTags: 'ADDITIVE_COLLECTION',
+  disclosures: 'ADDITIVE_COLLECTION',
+  requiredHeaders: 'ADDITIVE_COLLECTION',
+  tags: 'ADDITIVE_COLLECTION',
+  format: 'EXCLUSIVE_ENUM',
+  mode: 'EXCLUSIVE_ENUM',
+  placement: 'EXCLUSIVE_ENUM',
+  disclaimerPosition: 'EXCLUSIVE_ENUM',
+  style: 'EXCLUSIVE_ENUM',
+  section: 'EXCLUSIVE_ENUM',
+  disclaimerId: 'EXCLUSIVE_ENUM',
+  enabled: 'BOOLEAN_FLAG',
+  allowSkip: 'BOOLEAN_FLAG',
+};
+
+/**
+ * Evaluates whether two structured parameter sets are mutually exclusive (SPEC04 §57).
+ * Declares REQUIREMENT incompatibility ONLY when the immutable structured action contract
+ * mechanically proves mutual exclusivity. If parameter semantics are unknown/unsupported,
+ * fails closed with CONFLICT_SEMANTICS_UNDETERMINED error instead of guessing.
+ */
+export function areParametersIncompatible(
+  paramsA?: Record<string, unknown>,
+  paramsB?: Record<string, unknown>,
+  schemaA?: Record<string, ParameterSemanticType | { type: ParameterSemanticType }>,
+  schemaB?: Record<string, ParameterSemanticType | { type: ParameterSemanticType }>,
+): boolean {
+  if (!paramsA || !paramsB) return false;
+
+  for (const key of Object.keys(paramsA)) {
+    if (!Object.prototype.hasOwnProperty.call(paramsB, key)) {
+      continue;
+    }
+
+    const valA = paramsA[key];
+    const valB = paramsB[key];
+
+    // If identical structured values, both are satisfied simultaneously
+    if (JSON.stringify(valA) === JSON.stringify(valB)) {
+      continue;
+    }
+
+    // Resolve semantic contract from descriptor schema or frozen action param contract
+    let semType: ParameterSemanticType | undefined;
+    const sA = schemaA?.[key];
+    const sB = schemaB?.[key];
+    if (typeof sA === 'string') semType = sA;
+    else if (sA && typeof sA === 'object' && 'type' in sA) semType = sA.type;
+    else if (typeof sB === 'string') semType = sB;
+    else if (sB && typeof sB === 'object' && 'type' in sB) semType = sB.type;
+    else if (Object.prototype.hasOwnProperty.call(FROZEN_ACTION_PARAM_SCHEMAS, key)) {
+      semType = FROZEN_ACTION_PARAM_SCHEMAS[key];
+    }
+
+    if (!semType) {
+      // Do not guess from JSON inequality alone! (SPEC04 §57)
+      // Fail closed when system is required to make a determination on unsupported/unknown parameter semantics.
+      throw new RegistryValidationError(
+        'CONFLICT_SEMANTICS_UNDETERMINED',
+        `Cannot determine requirement conflict semantics for parameter '${key}': no typed semantic contract exists to prove compatibility or mutual exclusivity (SPEC04 §57).`,
+      );
+    }
+
+    switch (semType) {
+      case 'MONOTONIC_LOWER_BOUND': {
+        // e.g. minLength: 10 vs 20 -> both satisfied simultaneously by any value >= 20. Compatible (no conflict).
+        if (typeof valA === 'number' && typeof valB === 'number') {
+          continue;
+        }
+        throw new RegistryValidationError(
+          'CONFLICT_SEMANTICS_UNDETERMINED',
+          `Parameter '${key}' with MONOTONIC_LOWER_BOUND requires numeric values.`,
+        );
+      }
+      case 'MONOTONIC_UPPER_BOUND': {
+        // e.g. maxLength: 50 vs 100 -> both satisfied simultaneously by any value <= 50. Compatible (no conflict).
+        if (typeof valA === 'number' && typeof valB === 'number') {
+          continue;
+        }
+        throw new RegistryValidationError(
+          'CONFLICT_SEMANTICS_UNDETERMINED',
+          `Parameter '${key}' with MONOTONIC_UPPER_BOUND requires numeric values.`,
+        );
+      }
+      case 'ADDITIVE_COLLECTION': {
+        // e.g. requiredTags: ["A"] vs ["B"] -> both satisfied simultaneously by union ["A", "B"]. Compatible (no conflict).
+        if (Array.isArray(valA) && Array.isArray(valB)) {
+          continue;
+        }
+        throw new RegistryValidationError(
+          'CONFLICT_SEMANTICS_UNDETERMINED',
+          `Parameter '${key}' with ADDITIVE_COLLECTION requires array values.`,
+        );
+      }
+      case 'EXCLUSIVE_ENUM': {
+        // Single-choice discrete options: two different options are mechanically mutually exclusive
+        if (valA !== valB) {
+          return true; // Conflict!
+        }
+        continue;
+      }
+      case 'BOOLEAN_FLAG': {
+        if (valA !== valB) {
+          return true; // Conflict!
+        }
+        continue;
+      }
+      default: {
+        throw new RegistryValidationError(
+          'CONFLICT_SEMANTICS_UNDETERMINED',
+          `Unsupported parameter semantic type '${semType}' for key '${key}'.`,
+        );
+      }
+    }
+  }
+
+  return false;
+}
+
 /**
  * Determines whether two triggered terminal PolicyResults are incompatible (SPEC04 §57).
  */
@@ -181,20 +319,13 @@ export function areResultsInConflict(a: PolicyResultDescriptor, b: PolicyResultD
     // Different requirement action codes alone (e.g. REQUIRE_DISCLOSURE vs REQUIRE_SOURCE_CITATION)
     // are NOT a conflict; different requirements can coexist simultaneously.
     // A conflict exists ONLY if structured immutable action semantics mechanically prove that
-    // both demands cannot be satisfied simultaneously (e.g. contradictory parameter demands on the same target).
-    if (a.actionParameters && b.actionParameters) {
-      const paramsA = a.actionParameters;
-      const paramsB = b.actionParameters;
-      for (const key of Object.keys(paramsA)) {
-        if (Object.prototype.hasOwnProperty.call(paramsB, key)) {
-          if (JSON.stringify(paramsA[key]) !== JSON.stringify(paramsB[key])) {
-            return true;
-          }
-        }
-      }
-    }
-    // If incompatibility cannot be mechanically proven from structured parameters: compatible (no conflict)
-    return false;
+    // both demands cannot be satisfied simultaneously.
+    return areParametersIncompatible(
+      a.actionParameters,
+      b.actionParameters,
+      a.actionSchema,
+      b.actionSchema,
+    );
   }
 
   // Conflict Case 3: REQUIRE_REVIEW vs NO_RELEASE_EFFECT (Automated Release vs Mandatory Review)
@@ -207,19 +338,12 @@ export function areResultsInConflict(a: PolicyResultDescriptor, b: PolicyResultD
 
   // Conflict Case 4: Multiple competing BLOCK actions with contradictory parameters
   if (a.actionEffect === 'BLOCK' && b.actionEffect === 'BLOCK') {
-    if (a.actionParameters && b.actionParameters) {
-      const paramsA = a.actionParameters;
-      const paramsB = b.actionParameters;
-      for (const key of Object.keys(paramsA)) {
-        if (Object.prototype.hasOwnProperty.call(paramsB, key)) {
-          if (JSON.stringify(paramsA[key]) !== JSON.stringify(paramsB[key])) {
-            return true;
-          }
-        }
-      }
-    }
-    // Both mandate BLOCK without contradictory demands: both satisfied simultaneously by blocking
-    return false;
+    return areParametersIncompatible(
+      a.actionParameters,
+      b.actionParameters,
+      a.actionSchema,
+      b.actionSchema,
+    );
   }
 
   return false;

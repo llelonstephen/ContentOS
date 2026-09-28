@@ -952,10 +952,182 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
 
   // Vector 29: policy retry produces semantically different result
   it('Vector 29: policy retry produces semantically different result (fails closed)', async () => {
-    // Identical inputs produce identical result; non-deterministic retry is detected
-    const hashA = PolicyConflictResolver.computeConflictKey('snap-1', ['res-1', 'res-2']);
-    const hashB = PolicyConflictResolver.computeConflictKey('snap-1', ['res-1', 'res-2']);
-    expect(hashA).toBe(hashB);
+    // Attack 1: Exact equivalent retry converges to existing PolicyResult without creating duplicate rows
+    const snapId1 = uid('snap-v29-1');
+    const polRevId1 = uid('pol-v29-1');
+    await cpService.createDecisionPolicyRevision({
+      policyRevisionId: polRevId1,
+      policyId: 'pol-29-1',
+      tenantId: tenantA,
+      conditions: { op: 'IS_TRUE', left: 'TaskContract.standalone_task' },
+      action: { effect: 'BLOCK', code: 'POL_29_TRIGGERED', parameters: { mode: 'STRICT' } },
+      requiredInputs: ['TaskContract', 'DecisionSnapshot'],
+    });
+    await createTestSnapshot(snapId1, { policyRevisionIds: [polRevId1] });
+
+    const firstEval = await govService.evaluatePolicySet({
+      snapshotId: snapId1,
+      tenantId: tenantA,
+    });
+    expect(firstEval.length).toBe(1);
+    const existingResultId = firstEval[0]!.policyResultId;
+
+    const retryEval = await govService.evaluatePolicySet({
+      snapshotId: snapId1,
+      tenantId: tenantA,
+    });
+    expect(retryEval.length).toBe(1);
+    expect(retryEval[0]!.policyResultId).toBe(existingResultId);
+
+    // Verify row count in DB is exactly 1 (converged, not duplicated)
+    const rows1 = await sql`
+      SELECT policy_result_id FROM policy_results WHERE snapshot_id = ${snapId1} AND policy_revision_id = ${polRevId1}
+    `;
+    expect(rows1.length).toBe(1);
+
+    // Attack 2: Same snapshot/policy but different triggered -> rejected with POLICY_NONDETERMINISTIC
+    const snapId2 = uid('snap-v29-2');
+    const polRevId2 = uid('pol-v29-2');
+    await cpService.createDecisionPolicyRevision({
+      policyRevisionId: polRevId2,
+      policyId: 'pol-29-2',
+      tenantId: tenantA,
+      conditions: { op: 'IS_TRUE', left: 'TaskContract.standalone_task' },
+      action: { effect: 'BLOCK', code: 'POL_29_TRIGGERED' },
+      requiredInputs: ['TaskContract', 'DecisionSnapshot'],
+    });
+    await createTestSnapshot(snapId2, { policyRevisionIds: [polRevId2] });
+    // Pre-insert conflicting triggered=false while evaluation produces triggered=true
+    await insertPolicyResult({
+      resultId: uid('pr-v29-2'),
+      snapshotId: snapId2,
+      policyRevisionId: polRevId2,
+      triggered: false,
+      action: { effect: 'BLOCK', code: 'POL_29_TRIGGERED', input_refs: [snapId2] },
+      reasonCode: 'POL_29_TRIGGERED',
+      inputUncertainty: 'NONE',
+    });
+    await expect(
+      govService.evaluatePolicySet({ snapshotId: snapId2, tenantId: tenantA })
+    ).rejects.toThrow(/POLICY_NONDETERMINISTIC/i);
+
+    // Attack 3: Same triggered but different action -> rejected with POLICY_NONDETERMINISTIC
+    const snapId3 = uid('snap-v29-3');
+    const polRevId3 = uid('pol-v29-3');
+    await cpService.createDecisionPolicyRevision({
+      policyRevisionId: polRevId3,
+      policyId: 'pol-29-3',
+      tenantId: tenantA,
+      conditions: { op: 'IS_TRUE', left: 'TaskContract.standalone_task' },
+      action: { effect: 'BLOCK', code: 'POL_29_TRIGGERED', parameters: { mode: 'STRICT' } },
+      requiredInputs: ['TaskContract', 'DecisionSnapshot'],
+    });
+    await createTestSnapshot(snapId3, { policyRevisionIds: [polRevId3] });
+    // Pre-insert conflicting action effect (REQUIRE_REVIEW instead of BLOCK)
+    await insertPolicyResult({
+      resultId: uid('pr-v29-3'),
+      snapshotId: snapId3,
+      policyRevisionId: polRevId3,
+      triggered: true,
+      action: { effect: 'REQUIRE_REVIEW', code: 'POL_29_TRIGGERED', parameters: { mode: 'STRICT' }, input_refs: [snapId3] },
+      reasonCode: 'POL_29_TRIGGERED',
+      inputUncertainty: 'NONE',
+    });
+    await expect(
+      govService.evaluatePolicySet({ snapshotId: snapId3, tenantId: tenantA })
+    ).rejects.toThrow(/POLICY_NONDETERMINISTIC/i);
+
+    // Attack 4: Same triggered/action but different reason_code -> rejected with POLICY_NONDETERMINISTIC
+    const snapId4 = uid('snap-v29-4');
+    const polRevId4 = uid('pol-v29-4');
+    await cpService.createDecisionPolicyRevision({
+      policyRevisionId: polRevId4,
+      policyId: 'pol-29-4',
+      tenantId: tenantA,
+      conditions: { op: 'IS_TRUE', left: 'TaskContract.standalone_task' },
+      action: { effect: 'BLOCK', code: 'POL_29_TRIGGERED' },
+      requiredInputs: ['TaskContract', 'DecisionSnapshot'],
+    });
+    await createTestSnapshot(snapId4, { policyRevisionIds: [polRevId4] });
+    // Pre-insert conflicting reason_code
+    await insertPolicyResult({
+      resultId: uid('pr-v29-4'),
+      snapshotId: snapId4,
+      policyRevisionId: polRevId4,
+      triggered: true,
+      action: { effect: 'BLOCK', code: 'POL_29_TRIGGERED', input_refs: [snapId4] },
+      reasonCode: 'DIFFERENT_REASON_CODE',
+      inputUncertainty: 'NONE',
+    });
+    await expect(
+      govService.evaluatePolicySet({ snapshotId: snapId4, tenantId: tenantA })
+    ).rejects.toThrow(/POLICY_NONDETERMINISTIC/i);
+
+    // Attack 5: Same triggered/action/reason but different material input_uncertainty -> rejected with POLICY_NONDETERMINISTIC
+    const snapId5 = uid('snap-v29-5');
+    const polRevId5 = uid('pol-v29-5');
+    await cpService.createDecisionPolicyRevision({
+      policyRevisionId: polRevId5,
+      policyId: 'pol-29-5',
+      tenantId: tenantA,
+      conditions: { op: 'IS_TRUE', left: 'TaskContract.standalone_task' },
+      action: { effect: 'BLOCK', code: 'POL_29_TRIGGERED' },
+      requiredInputs: ['TaskContract', 'DecisionSnapshot'],
+    });
+    await createTestSnapshot(snapId5, { policyRevisionIds: [polRevId5] });
+    // Pre-insert conflicting input_uncertainty
+    await insertPolicyResult({
+      resultId: uid('pr-v29-5'),
+      snapshotId: snapId5,
+      policyRevisionId: polRevId5,
+      triggered: true,
+      action: { effect: 'BLOCK', code: 'POL_29_TRIGGERED', input_refs: [snapId5] },
+      reasonCode: 'POL_29_TRIGGERED',
+      inputUncertainty: 'HIGH_UNCERTAINTY',
+    });
+    await expect(
+      govService.evaluatePolicySet({ snapshotId: snapId5, tenantId: tenantA })
+    ).rejects.toThrow(/POLICY_NONDETERMINISTIC/i);
+
+    // Attack 6: Different input-ref identity set -> rejected with POLICY_NONDETERMINISTIC
+    const snapId6 = uid('snap-v29-6');
+    const polRevId6 = uid('pol-v29-6');
+    await cpService.createDecisionPolicyRevision({
+      policyRevisionId: polRevId6,
+      policyId: 'pol-29-6',
+      tenantId: tenantA,
+      conditions: { op: 'IS_TRUE', left: 'TaskContract.standalone_task' },
+      action: { effect: 'BLOCK', code: 'POL_29_TRIGGERED' },
+      requiredInputs: ['TaskContract', 'DecisionSnapshot'],
+    });
+    await createTestSnapshot(snapId6, { policyRevisionIds: [polRevId6] });
+    // Pre-insert conflicting input_refs
+    await insertPolicyResult({
+      resultId: uid('pr-v29-6'),
+      snapshotId: snapId6,
+      policyRevisionId: polRevId6,
+      triggered: true,
+      action: { effect: 'BLOCK', code: 'POL_29_TRIGGERED', input_refs: ['foreign-ref-id-999'] },
+      reasonCode: 'POL_29_TRIGGERED',
+      inputUncertainty: 'NONE',
+    });
+    await expect(
+      govService.evaluatePolicySet({ snapshotId: snapId6, tenantId: tenantA })
+    ).rejects.toThrow(/POLICY_NONDETERMINISTIC/i);
+
+    // Attack 7: Retry cannot create a second (snapshot_id, policy_revision_id) row
+    await expect(
+      insertPolicyResult({
+        resultId: uid('pr-v29-dup'),
+        snapshotId: snapId1,
+        policyRevisionId: polRevId1,
+      })
+    ).rejects.toThrow(/duplicate key|violates unique constraint/i);
+
+    const finalRows = await sql`
+      SELECT policy_result_id FROM policy_results WHERE snapshot_id = ${snapId1} AND policy_revision_id = ${polRevId1}
+    `;
+    expect(finalRows.length).toBe(1);
   });
 
   // Vector 30: expected policy revision omitted from evaluation
@@ -1567,35 +1739,63 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
     const detectedCompatibleCodes = PolicyConflictResolver.detectConflicts([dReqDiff1, dReqDiff2]);
     expect(detectedCompatibleCodes.length).toBe(0);
 
-    // 4. Same requirement code with compatible parameters does NOT conflict
-    const dReqComp1 = {
-      policyResultId: 'res-comp-1',
+    // 4. Same key with different but jointly satisfiable values does NOT produce false conflict (e.g. minLength 10 vs 20)
+    const dReqBound1 = {
+      policyResultId: 'res-bound-1',
       snapshotId: 's-46',
-      policyRevisionId: 'p-comp-1',
+      policyRevisionId: 'p-bound-1',
       triggered: true,
       actionEffect: 'REQUIREMENT' as const,
-      actionCode: 'REQUIRE_DISCLAIMER_A',
-      actionParameters: { disclaimerId: 'd-1' },
+      actionCode: 'REQUIRE_LENGTH_10',
+      actionParameters: { minLength: 10 },
       priorityClass: 'STANDARD',
       scope: 'GLOBAL',
       overrideAllowed: true,
     };
-    const dReqComp2 = {
-      policyResultId: 'res-comp-2',
+    const dReqBound2 = {
+      policyResultId: 'res-bound-2',
       snapshotId: 's-46',
-      policyRevisionId: 'p-comp-2',
+      policyRevisionId: 'p-bound-2',
       triggered: true,
       actionEffect: 'REQUIREMENT' as const,
-      actionCode: 'REQUIRE_DISCLAIMER_A',
-      actionParameters: { disclaimerId: 'd-1' },
+      actionCode: 'REQUIRE_LENGTH_20',
+      actionParameters: { minLength: 20 },
       priorityClass: 'STANDARD',
       scope: 'GLOBAL',
       overrideAllowed: true,
     };
-    const detectedCompatible = PolicyConflictResolver.detectConflicts([dReqComp1, dReqComp2]);
-    expect(detectedCompatible.length).toBe(0);
+    const detectedBound = PolicyConflictResolver.detectConflicts([dReqBound1, dReqBound2]);
+    expect(detectedBound.length).toBe(0);
 
-    // 5. Contradictory structured requirement parameters DO conflict
+    // 5. Additive collection requirements do NOT produce false conflict (e.g. requiredTags ["A"] vs ["B"])
+    const dReqTags1 = {
+      policyResultId: 'res-tags-1',
+      snapshotId: 's-46',
+      policyRevisionId: 'p-tags-1',
+      triggered: true,
+      actionEffect: 'REQUIREMENT' as const,
+      actionCode: 'REQUIRE_TAG_A',
+      actionParameters: { requiredTags: ['A'] },
+      priorityClass: 'STANDARD',
+      scope: 'GLOBAL',
+      overrideAllowed: true,
+    };
+    const dReqTags2 = {
+      policyResultId: 'res-tags-2',
+      snapshotId: 's-46',
+      policyRevisionId: 'p-tags-2',
+      triggered: true,
+      actionEffect: 'REQUIREMENT' as const,
+      actionCode: 'REQUIRE_TAG_B',
+      actionParameters: { requiredTags: ['B'] },
+      priorityClass: 'STANDARD',
+      scope: 'GLOBAL',
+      overrideAllowed: true,
+    };
+    const detectedTags = PolicyConflictResolver.detectConflicts([dReqTags1, dReqTags2]);
+    expect(detectedTags.length).toBe(0);
+
+    // 6. Genuinely mutually exclusive structured requirements DO conflict (e.g. single-choice format HTML vs PLAIN_TEXT)
     const dReqContra1 = {
       policyResultId: 'res-req-contra1',
       snapshotId: 's-46',
@@ -1615,17 +1815,46 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
       triggered: true,
       actionEffect: 'REQUIREMENT' as const,
       actionCode: 'REQUIRE_DISCLAIMER_B',
-      actionParameters: { format: 'PLAIN_TEXT' }, // contradictory demand on same key!
+      actionParameters: { format: 'PLAIN_TEXT' }, // contradictory demand on same single-choice key!
       priorityClass: 'STANDARD',
       scope: 'GLOBAL',
       overrideAllowed: true,
     };
     const detectedContradictory = PolicyConflictResolver.detectConflicts([dReqContra1, dReqContra2]);
     expect(detectedContradictory.length).toBe(1);
+
+    // 7. Unsupported/unknown parameter semantics are not guessed (fails closed with CONFLICT_SEMANTICS_UNDETERMINED)
+    const dReqUnknown1 = {
+      policyResultId: 'res-req-unk1',
+      snapshotId: 's-46',
+      policyRevisionId: 'p-req-unk1',
+      triggered: true,
+      actionEffect: 'REQUIREMENT' as const,
+      actionCode: 'REQUIRE_CUSTOM_1',
+      actionParameters: { customProp: 'value_a' },
+      priorityClass: 'STANDARD',
+      scope: 'GLOBAL',
+      overrideAllowed: true,
+    };
+    const dReqUnknown2 = {
+      policyResultId: 'res-req-unk2',
+      snapshotId: 's-46',
+      policyRevisionId: 'p-req-unk2',
+      triggered: true,
+      actionEffect: 'REQUIREMENT' as const,
+      actionCode: 'REQUIRE_CUSTOM_2',
+      actionParameters: { customProp: 'value_b' }, // unknown parameter semantics: do not guess from JSON inequality!
+      priorityClass: 'STANDARD',
+      scope: 'GLOBAL',
+      overrideAllowed: true,
+    };
+    expect(() =>
+      PolicyConflictResolver.detectConflicts([dReqUnknown1, dReqUnknown2]),
+    ).toThrow(/CONFLICT_SEMANTICS_UNDETERMINED/i);
   });
 
   // Vector 47: EXPLICIT_PRIORITY used when priorities equal/incomparable
-  it('Vector 47: EXPLICIT_PRIORITY used when priorities equal/incomparable (falls through / fails closed)', () => {
+  it('Vector 47: EXPLICIT_PRIORITY used when priorities equal/incomparable (falls through / fails closed)', async () => {
     // 1. Equal/incomparable string priorities do not choose insertion order -> ESCALATES
     const dEq1 = {
       policyResultId: 'res-1',
@@ -1698,45 +1927,51 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
     expect(PolicyConflictResolver.resolveConflict(confP1P2_1).resolutionType).toBe('ESCALATE');
     expect(PolicyConflictResolver.resolveConflict(confP1P2_2).resolutionType).toBe('ESCALATE');
 
-    // 3. Strict explicit numeric priority supplies deterministic ordering -> EXPLICIT_PRIORITY
-    const dNumHigh = {
-      policyResultId: 'res-num-high',
-      snapshotId: 's-47',
-      policyRevisionId: 'p-num-high',
-      triggered: true,
-      actionEffect: 'REQUIRE_REVIEW' as const,
-      actionCode: 'REV_HIGH',
-      priorityClass: 100,
+    // 3. Canonical persisted path: priority_class is persisted as text in DecisionPolicyRevision without a schema ordering contract.
+    // Canonical persisted policy execution over string priority classes cannot reach EXPLICIT_PRIORITY and conservatively ESCALATES.
+    const snapId = uid('snap-v47');
+    const pHigh = uid('pol-v47-high');
+    const pLow = uid('pol-v47-low');
+
+    await cpService.createDecisionPolicyRevision({
+      policyRevisionId: pHigh,
+      policyId: 'p-47-high',
+      tenantId: tenantA,
+      conditions: { op: 'IS_TRUE', left: 'TaskContract.standalone_task' },
+      action: { effect: 'BLOCK', code: 'POL_BLOCK_HIGH' },
+      requiredInputs: ['TaskContract', 'DecisionSnapshot'],
+      priorityClass: '100', // Persisted as text in decision_policy_revisions
       scope: 'GLOBAL',
       overrideAllowed: true,
-    };
-    const dNumLow = {
-      policyResultId: 'res-num-low',
-      snapshotId: 's-47',
-      policyRevisionId: 'p-num-low',
-      triggered: true,
-      actionEffect: 'WARNING' as const,
-      actionCode: 'WARN_LOW',
-      priorityClass: 50,
+    });
+    await cpService.createDecisionPolicyRevision({
+      policyRevisionId: pLow,
+      policyId: 'p-47-low',
+      tenantId: tenantA,
+      conditions: { op: 'IS_TRUE', left: 'TaskContract.standalone_task' },
+      action: { effect: 'REQUIRE_REVIEW', code: 'POL_REV_LOW' },
+      requiredInputs: ['TaskContract', 'DecisionSnapshot'],
+      priorityClass: '50', // Persisted as text in decision_policy_revisions
       scope: 'GLOBAL',
       overrideAllowed: true,
-    };
-    const confNum1 = {
-      conflictKey: 'k-47-num-1',
-      policyResultIds: ['res-num-high', 'res-num-low'],
-      descriptors: [dNumHigh, dNumLow],
-    };
-    const confNum2 = {
-      conflictKey: 'k-47-num-2',
-      policyResultIds: ['res-num-low', 'res-num-high'],
-      descriptors: [dNumLow, dNumHigh],
-    };
-    const resNum1 = PolicyConflictResolver.resolveConflict(confNum1);
-    const resNum2 = PolicyConflictResolver.resolveConflict(confNum2);
-    expect(resNum1.resolutionType).toBe('EXPLICIT_PRIORITY');
-    expect(resNum1.winningPolicyResultId).toBe('res-num-high');
-    expect(resNum2.resolutionType).toBe('EXPLICIT_PRIORITY');
-    expect(resNum2.winningPolicyResultId).toBe('res-num-high');
+    });
+
+    await createTestSnapshot(snapId, { policyRevisionIds: [pHigh, pLow] });
+
+    await govService.evaluatePolicySet({
+      snapshotId: snapId,
+      tenantId: tenantA,
+    });
+
+    const conflictOutcomes = await govService.detectAndResolveConflicts({
+      snapshotId: snapId,
+      tenantId: tenantA,
+    });
+
+    expect(conflictOutcomes.length).toBe(1);
+    // Because canonical persisted priority_class is text with no schema-defined ordering contract,
+    // production resolution conservatively ESCALATES to human review
+    expect(conflictOutcomes[0]!.resolution_type).toBe('ESCALATE');
   });
 
   // Vector 48: ESCALATE interpreted as release authorization

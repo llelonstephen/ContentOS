@@ -298,6 +298,26 @@ describe('SPEC04 §146 Static Contract Preflight (34 Checks)', () => {
     expect(conflictFile).toContain('createHash');
     // Inspect order-invariance: resolveConflict sorts descriptors deterministically by policyResultId
     expect(conflictFile).toContain('.sort((a, b) => a.policyResultId.localeCompare(b.policyResultId))');
+
+    // Vector 29 must NOT be mapped to conflict-key hashing; must enforce PolicyResult retry determinism
+    const vectorsFile = fs.readFileSync(
+      path.join(rootDir, 'src/tests/integration/m3-spec04-80-vectors.test.ts'),
+      'utf-8',
+    );
+    const vector29Match = vectorsFile.match(/Vector 29:[\s\S]*?(?=Vector 30:)/)?.[0] ?? '';
+    expect(vector29Match).not.toContain('computeConflictKey');
+    expect(vector29Match).toContain('govService.evaluatePolicySet');
+    expect(vector29Match).toContain('POLICY_NONDETERMINISTIC');
+
+    // Production service must invoke assertPolicyResultEquivalence
+    const govService = fs.readFileSync(
+      path.join(
+        rootDir,
+        'src/persistence/relational/services/governance-persistence-service.ts',
+      ),
+      'utf-8',
+    );
+    expect(govService).toContain('assertPolicyResultEquivalence');
   });
 
   // 21 one final resolution per conflict_key
@@ -341,6 +361,24 @@ describe('SPEC04 §146 Static Contract Preflight (34 Checks)', () => {
 
     // Prohibit automatic REQUIREMENT conflict based on actionCode alone (SPEC04 §57)
     expect(conflictFile).not.toContain('a.actionCode !== b.actionCode');
+
+    // Prohibit generic JSON inequality being treated as proof of REQUIREMENT incompatibility (SPEC04 §57)
+    expect(conflictFile).not.toContain('JSON.stringify(paramsA[key]) !== JSON.stringify(paramsB[key])');
+    expect(conflictFile).toContain('areParametersIncompatible');
+    expect(conflictFile).toContain('FROZEN_ACTION_PARAM_SCHEMAS');
+    expect(conflictFile).toContain('CONFLICT_SEMANTICS_UNDETERMINED');
+
+    // Prohibit in-memory numeric-only EXPLICIT_PRIORITY test in Vector 47 when canonical priority_class is text
+    const vectorsFile = fs.readFileSync(
+      path.join(rootDir, 'src/tests/integration/m3-spec04-80-vectors.test.ts'),
+      'utf-8',
+    );
+    const vector47Match = vectorsFile.match(/Vector 47:[\s\S]*?(?=Vector 48:)/)?.[0] ?? '';
+    expect(vector47Match).not.toContain('priorityClass: 100');
+    expect(vector47Match).not.toContain('priorityClass: 50');
+    expect(vector47Match).toContain('cpService.createDecisionPolicyRevision');
+    expect(vector47Match).toContain('govService.evaluatePolicySet');
+    expect(vector47Match).toContain('govService.detectAndResolveConflicts');
   });
 
   // 23 AUTHORIZED_OVERRIDE requires valid PolicyOverride
