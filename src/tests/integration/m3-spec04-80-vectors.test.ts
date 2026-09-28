@@ -98,6 +98,7 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
     await sql`
       INSERT INTO revision_registry (entity_type, stable_id, revision_id, tenant_id)
       VALUES 
+        ('SchemaDefinition', 'schema-policy-dsl', 'schema-policy-dsl-v1', ${tenantA}),
         ('MetricDefinitionRevision', ${metricStable}, ${metricRevId}, ${tenantA}),
         ('TaskContractRevision', ${taskStable}, ${taskRevId}, ${tenantA})
       ON CONFLICT DO NOTHING
@@ -138,8 +139,8 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
       INSERT INTO run_configs (
         run_config_id, tenant_id, workspace_id, runtime_parameters, created_at
       ) VALUES (
-        ${runConfigId}, ${tenantA}, ${workspaceA}, '{}', now()
-      ) ON CONFLICT DO NOTHING
+        ${runConfigId}, ${tenantA}, ${workspaceA}, ${JSON.stringify({ policy_schema_revision_id: 'schema-policy-dsl-v1' })}, now()
+      ) ON CONFLICT (run_config_id) DO UPDATE SET runtime_parameters = ${JSON.stringify({ policy_schema_revision_id: 'schema-policy-dsl-v1' })}
     `;
     await sql`
       INSERT INTO audience_states (
@@ -226,10 +227,12 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
       govSnapId?: string;
       candidateIds?: string[];
       policyRevisionIds?: string[];
+      runConfigId?: string;
     },
   ) {
     const tId = options?.tenantId ?? tenantA;
     const wId = options?.workspaceId ?? workspaceA;
+    const effectiveRunConfigId = options?.runConfigId ?? runConfigId;
     let actualGovSnapId = options?.govSnapId;
     if (!actualGovSnapId) {
       actualGovSnapId = uid('gov-snap');
@@ -258,7 +261,7 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
       baselineKnowledgeSnapshotId: bksId,
       runKnowledgeDeltaId: rkdId,
       governanceSnapshotId: actualGovSnapId,
-      runConfigId: runConfigId,
+      runConfigId: effectiveRunConfigId,
       taskRevisionId: taskRevId,
       audienceStateId: audId,
       candidateIds: options?.candidateIds ?? [],
@@ -267,6 +270,53 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
       workspaceId: wId,
     });
     return { snapshotId: snapId, governanceSnapshotId: actualGovSnapId };
+  }
+
+  async function createTestConflict(snapId: string) {
+    const p1 = uid('pol-conf-1');
+    const p2 = uid('pol-conf-2');
+    await cpService.createDecisionPolicyRevision({
+      policyRevisionId: p1,
+      policyId: 'p-c-1',
+      tenantId: tenantA,
+      conditions: { op: 'IS_TRUE', left: 'TaskContract.standalone_task' },
+      action: { effect: 'BLOCK', code: 'BLOCK_RULE' },
+      requiredInputs: ['TaskContract'],
+      overrideAllowed: true,
+      priorityClass: 'STANDARD',
+      scope: 'GLOBAL',
+    });
+    await cpService.createDecisionPolicyRevision({
+      policyRevisionId: p2,
+      policyId: 'p-c-2',
+      tenantId: tenantA,
+      conditions: { op: 'IS_TRUE', left: 'TaskContract.standalone_task' },
+      action: { effect: 'NO_RELEASE_EFFECT', code: 'ALLOW_RULE' },
+      requiredInputs: ['TaskContract'],
+      overrideAllowed: false,
+      priorityClass: 'STANDARD',
+      scope: 'GLOBAL',
+    });
+
+    await createTestSnapshot(snapId, { policyRevisionIds: [p1, p2] });
+    const results = await govService.evaluatePolicySet({ snapshotId: snapId, tenantId: tenantA });
+    const resolutions = await govService.detectAndResolveConflicts({
+      snapshotId: snapId,
+      tenantId: tenantA,
+      workspaceId: workspaceA,
+    });
+    const firstRes = resolutions[0];
+    return {
+      policyResultIds: results.map((r) => r.policyResultId),
+      conflictResolution: {
+        resolutionId: firstRes.resolution_id,
+        resolution_id: firstRes.resolution_id,
+        conflictKey: firstRes.conflict_key,
+        conflict_key: firstRes.conflict_key,
+        resolutionType: firstRes.resolution_type,
+        resolution_type: firstRes.resolution_type,
+      },
+    };
   }
 
   async function insertPolicyResult(params: {
@@ -897,8 +947,8 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
   });
 
   // Vector 28: policy schema unsupported but evaluator guesses
-  it('Vector 28: policy schema unsupported but evaluator guesses (fails closed)', () => {
-    // 1. Unsupported operator
+  it('Vector 28: policy schema unsupported but evaluator guesses (fails closed)', async () => {
+    // 1. Pure AST validation
     expect(() =>
       evaluatePolicyDsl(
         {
@@ -910,7 +960,6 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
       ),
     ).toThrow(/POLICY_SCHEMA_UNSUPPORTED/i);
 
-    // 2. Unsupported expected_type in selector schema
     expect(() =>
       evaluatePolicyDsl(
         {
@@ -925,7 +974,6 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
       ),
     ).toThrow(/POLICY_SCHEMA_UNSUPPORTED/i);
 
-    // 3. Unsupported action effect
     expect(() =>
       evaluatePolicyDsl(
         {
@@ -937,7 +985,6 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
       ),
     ).toThrow(/POLICY_SCHEMA_UNSUPPORTED/i);
 
-    // 4. Malformed AST (e.g. ALL operator with empty args array)
     expect(() =>
       evaluatePolicyDsl(
         {
@@ -948,6 +995,149 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
         {},
       ),
     ).toThrow(/POLICY_SCHEMA_UNSUPPORTED/i);
+
+    // 2. Action parameter semantic type not allowed by pinned schema (fails closed)
+    expect(() =>
+      evaluatePolicyDsl(
+        {
+          conditions: { op: 'IS_TRUE', left: 'TaskContract.standalone_task' },
+          action: {
+            effect: 'REQUIREMENT',
+            code: 'BAD_SEMANTICS',
+            parameter_schemas: { mode: 'UNAUTHORIZED_SEMANTIC_KIND' as any },
+          },
+          required_inputs: ['TaskContract'],
+        },
+        { TaskContract: { standalone_task: true } },
+      ),
+    ).toThrow(/POLICY_SCHEMA_UNSUPPORTED/i);
+
+    // 3. Missing policy schema revision (RunConfig has empty params and policy has no schema_revision_id) -> fails closed
+    const rcEmptyId = uid('rc-empty-schema');
+    await sql`
+      INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id)
+      VALUES ('RunConfig', ${rcEmptyId}, ${tenantA})
+    `;
+    await sql`
+      INSERT INTO run_configs (run_config_id, tenant_id, workspace_id, runtime_parameters, created_at)
+      VALUES (${rcEmptyId}, ${tenantA}, ${workspaceA}, '{}', now())
+    `;
+
+    const polMissingSchemaId = uid('pol-missing-schema');
+    await cpService.createDecisionPolicyRevision({
+      policyRevisionId: polMissingSchemaId,
+      policyId: 'pol-missing-schema-id',
+      tenantId: tenantA,
+      conditions: { op: 'IS_TRUE', left: 'TaskContract.standalone_task' },
+      action: { effect: 'NO_RELEASE_EFFECT', code: 'PASS' },
+      requiredInputs: ['TaskContract'],
+    });
+
+    const snapMissingSchemaId = uid('snap-missing-schema');
+    await createTestSnapshot(snapMissingSchemaId, {
+      policyRevisionIds: [polMissingSchemaId],
+      runConfigId: rcEmptyId,
+    });
+
+    await expect(
+      govService.evaluatePolicySet({ snapshotId: snapMissingSchemaId, tenantId: tenantA })
+    ).rejects.toThrow(/POLICY_SCHEMA_UNSUPPORTED/i);
+
+    // 4. Unknown schema revision (not registered in RevisionRegistry) -> fails closed
+    const rcUnknownSchemaId = uid('rc-unknown-schema');
+    await sql`
+      INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id)
+      VALUES ('RunConfig', ${rcUnknownSchemaId}, ${tenantA})
+    `;
+    await sql`
+      INSERT INTO run_configs (run_config_id, tenant_id, workspace_id, runtime_parameters, created_at)
+      VALUES (${rcUnknownSchemaId}, ${tenantA}, ${workspaceA}, ${JSON.stringify({ policy_schema_revision_id: 'unknown-schema-def-999' })}, now())
+    `;
+
+    const polUnknownSchemaId = uid('pol-unknown-schema');
+    await cpService.createDecisionPolicyRevision({
+      policyRevisionId: polUnknownSchemaId,
+      policyId: 'pol-unknown-schema-id',
+      tenantId: tenantA,
+      conditions: { op: 'IS_TRUE', left: 'TaskContract.standalone_task' },
+      action: { effect: 'NO_RELEASE_EFFECT', code: 'PASS' },
+      requiredInputs: ['TaskContract'],
+    });
+
+    const snapUnknownSchemaId = uid('snap-unknown-schema');
+    await createTestSnapshot(snapUnknownSchemaId, {
+      policyRevisionIds: [polUnknownSchemaId],
+      runConfigId: rcUnknownSchemaId,
+    });
+
+    await expect(
+      govService.evaluatePolicySet({ snapshotId: snapUnknownSchemaId, tenantId: tenantA })
+    ).rejects.toThrow(/POLICY_SCHEMA_UNSUPPORTED/i);
+
+    // 5. Unsupported interpreter/schema version (registered in DB, but runtime interpreter cannot safely execute it) -> fails closed
+    const unsupportedSchemaRev = uid('schema-policy-dsl-v99');
+    await sql`
+      INSERT INTO revision_registry (entity_type, stable_id, revision_id, tenant_id)
+      VALUES ('SchemaDefinition', 'schema-policy-dsl', ${unsupportedSchemaRev}, ${tenantA})
+    `;
+    const rcUnsupportedInterpreterId = uid('rc-unsupported-interp');
+    await sql`
+      INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id)
+      VALUES ('RunConfig', ${rcUnsupportedInterpreterId}, ${tenantA})
+    `;
+    await sql`
+      INSERT INTO run_configs (run_config_id, tenant_id, workspace_id, runtime_parameters, created_at)
+      VALUES (${rcUnsupportedInterpreterId}, ${tenantA}, ${workspaceA}, ${JSON.stringify({ policy_schema_revision_id: unsupportedSchemaRev })}, now())
+    `;
+
+    const polUnsupportedInterpId = uid('pol-unsupported-interp');
+    await cpService.createDecisionPolicyRevision({
+      policyRevisionId: polUnsupportedInterpId,
+      policyId: 'pol-unsupported-interp-id',
+      tenantId: tenantA,
+      conditions: { op: 'IS_TRUE', left: 'TaskContract.standalone_task' },
+      action: { effect: 'NO_RELEASE_EFFECT', code: 'PASS' },
+      requiredInputs: ['TaskContract'],
+    });
+
+    const snapUnsupportedInterpId = uid('snap-unsupported-interp');
+    await createTestSnapshot(snapUnsupportedInterpId, {
+      policyRevisionIds: [polUnsupportedInterpId],
+      runConfigId: rcUnsupportedInterpreterId,
+    });
+
+    await expect(
+      govService.evaluatePolicySet({ snapshotId: snapUnsupportedInterpId, tenantId: tenantA })
+    ).rejects.toThrow(/POLICY_INTERPRETER_INCOMPATIBLE/i);
+
+    // 6. Historical Replay: same historical policy revision resolves same exact pinned schema; newer SchemaDefinition does NOT silently reinterpret old policy
+    const polHistoricalId = uid('pol-historical');
+    await cpService.createDecisionPolicyRevision({
+      policyRevisionId: polHistoricalId,
+      policyId: 'pol-hist-id',
+      tenantId: tenantA,
+      conditions: { op: 'IS_TRUE', left: 'TaskContract.standalone_task' },
+      action: { effect: 'NO_RELEASE_EFFECT', code: 'PASS' },
+      requiredInputs: ['TaskContract'],
+    });
+
+    const snapHistoricalId = uid('snap-historical');
+    await createTestSnapshot(snapHistoricalId, { policyRevisionIds: [polHistoricalId] });
+
+    const firstEval = await govService.evaluatePolicySet({ snapshotId: snapHistoricalId, tenantId: tenantA });
+    expect(firstEval.length).toBe(1);
+
+    // Register a newer schema in DB that could hypothetically alter interpretation
+    const newerSchemaRev = uid('schema-policy-dsl-v2');
+    await sql`
+      INSERT INTO revision_registry (entity_type, stable_id, revision_id, tenant_id)
+      VALUES ('SchemaDefinition', 'schema-policy-dsl', ${newerSchemaRev}, ${tenantA})
+    `;
+
+    // Replay evaluation of historical snapshot: must evaluate against pinned schema, not the newer one
+    const replayEval = await govService.evaluatePolicySet({ snapshotId: snapHistoricalId, tenantId: tenantA });
+    expect(replayEval.length).toBe(1);
+    expect(replayEval[0]!.policyResultId).toBe(firstEval[0]!.policyResultId);
   });
 
   // Vector 29: policy retry produces semantically different result
@@ -1458,8 +1648,9 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
     await cpService.createDecisionPolicyRevision({ policyRevisionId: p2, policyId: 'p-41-2', tenantId: tenantA });
     await createTestSnapshot(snapId, { policyRevisionIds: [p1, p2] });
 
+    const resId = uid('res-41');
     await insertPolicyResult({
-      resultId: uid('res-41'),
+      resultId: resId,
       snapshotId: snapId,
       policyRevisionId: p1,
     });
@@ -1471,36 +1662,117 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
         workspaceId: workspaceA,
       }),
     ).rejects.toThrow(/INCOMPLETE_POLICY_SET_FOR_CONFLICT_DETECTION/i);
+
+    // Also verify recordConflictResolution directly rejects partial policy set
+    await expect(
+      govService.recordConflictResolution({
+        resolutionId: uid('confres-41'),
+        snapshotId: snapId,
+        conflictKey: 'key-41',
+        resolutionType: 'HARD_DENY_OVERRIDES',
+        reasonCodes: 'DENY',
+        policyResultIds: [resId],
+        tenantId: tenantA,
+        workspaceId: workspaceA,
+      }),
+    ).rejects.toThrow(/INCOMPLETE_POLICY_SET_FOR_CONFLICT_DETECTION/i);
   });
 
   // Vector 42: same conflict gets two final resolutions
   it('Vector 42: same conflict gets two final resolutions (fails closed)', async () => {
     const snapId = uid('snap-v42');
-    await createTestSnapshot(snapId);
-    const conflictKey = 'key-42';
-    const resId1 = uid('confres-42-1');
-    const resId2 = uid('confres-42-2');
+    const { policyResultIds, conflictResolution } = await createTestConflict(snapId);
+    const { conflictKey, resolutionType } = conflictResolution;
 
-    await govService.recordConflictResolution({
-      resolutionId: resId1,
-      snapshotId: snapId,
-      conflictKey,
-      resolutionType: 'HARD_DENY_OVERRIDES',
-      reasonCodes: 'DENY',
-      policyResultIds: [],
-      tenantId: tenantA,
-      workspaceId: workspaceA,
-    });
-
-    // Second resolution for same conflict_key must fail
+    // 1. Empty policyResultIds rejected
     await expect(
       govService.recordConflictResolution({
-        resolutionId: resId2,
+        resolutionId: uid('confres-42-empty'),
         snapshotId: snapId,
         conflictKey,
-        resolutionType: 'MORE_SPECIFIC_SCOPE',
-        reasonCodes: 'SCOPE',
+        resolutionType,
+        reasonCodes: 'EMPTY',
         policyResultIds: [],
+        tenantId: tenantA,
+        workspaceId: workspaceA,
+      }),
+    ).rejects.toThrow(/CONFLICT_EMPTY_POLICY_RESULTS/i);
+
+    // 2. Arbitrary / fabricated conflictKey rejected
+    await expect(
+      govService.recordConflictResolution({
+        resolutionId: uid('confres-42-key'),
+        snapshotId: snapId,
+        conflictKey: 'arbitrary-fabricated-key',
+        resolutionType,
+        reasonCodes: 'FABRICATED',
+        policyResultIds,
+        tenantId: tenantA,
+        workspaceId: workspaceA,
+      }),
+    ).rejects.toThrow(/INVALID_CONFLICT_KEY/i);
+
+    // 3. Caller-chosen resolutionType mismatch rejected
+    const mismatchedType = resolutionType === 'ESCALATE' ? 'HARD_DENY_OVERRIDES' : 'ESCALATE';
+    await expect(
+      govService.recordConflictResolution({
+        resolutionId: uid('confres-42-type'),
+        snapshotId: snapId,
+        conflictKey,
+        resolutionType: mismatchedType,
+        reasonCodes: 'MISMATCH',
+        policyResultIds,
+        tenantId: tenantA,
+        workspaceId: workspaceA,
+      }),
+    ).rejects.toThrow(/CANONICAL_RESOLUTION_MISMATCH/i);
+
+    // 4. Non-conflicting results rejected
+    const nonConfSnap = uid('snap-v42-nc');
+    const pNc1 = uid('pol-nc-1');
+    const pNc2 = uid('pol-nc-2');
+    await cpService.createDecisionPolicyRevision({
+      policyRevisionId: pNc1,
+      policyId: 'p-nc-1',
+      tenantId: tenantA,
+      conditions: { op: 'IS_TRUE', left: 'TaskContract.standalone_task' },
+      action: { effect: 'NO_RELEASE_EFFECT', code: 'ALLOW_1' },
+      requiredInputs: ['TaskContract'],
+    });
+    await cpService.createDecisionPolicyRevision({
+      policyRevisionId: pNc2,
+      policyId: 'p-nc-2',
+      tenantId: tenantA,
+      conditions: { op: 'IS_TRUE', left: 'TaskContract.standalone_task' },
+      action: { effect: 'NO_RELEASE_EFFECT', code: 'ALLOW_2' },
+      requiredInputs: ['TaskContract'],
+    });
+    await createTestSnapshot(nonConfSnap, { policyRevisionIds: [pNc1, pNc2] });
+    const ncResults = await govService.evaluatePolicySet({ snapshotId: nonConfSnap, tenantId: tenantA });
+    const ncPrids = ncResults.map((r) => r.policyResultId);
+    const ncKey = PolicyConflictResolver.computeConflictKey(nonConfSnap, ncPrids);
+    await expect(
+      govService.recordConflictResolution({
+        resolutionId: uid('confres-42-nc'),
+        snapshotId: nonConfSnap,
+        conflictKey: ncKey,
+        resolutionType: 'HARD_DENY_OVERRIDES',
+        reasonCodes: 'NO_CONFLICT',
+        policyResultIds: ncPrids,
+        tenantId: tenantA,
+        workspaceId: workspaceA,
+      }),
+    ).rejects.toThrow(/CANONICAL_CONFLICT_NOT_FOUND/i);
+
+    // 5. Duplicate final resolution rejected
+    await expect(
+      govService.recordConflictResolution({
+        resolutionId: uid('confres-42-dup'),
+        snapshotId: snapId,
+        conflictKey,
+        resolutionType,
+        reasonCodes: 'DUPLICATE',
+        policyResultIds,
         tenantId: tenantA,
         workspaceId: workspaceA,
       }),
@@ -2355,7 +2627,19 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
   });
 
   // Vector 61: new review information used without new DecisionCycle
-  it('Vector 61: new review information used without new DecisionCycle (fails closed)', async () => {
+  it('Vector 61: new review information used without new DecisionCycle (fails closed / routes to successor cycle)', async () => {
+    const runId = uid('run-v61');
+    const initCycleId = uid('cycle-v61-init');
+    await createTestRun(runId);
+    await decService.createDecisionCycle({
+      decisionCycleId: initCycleId,
+      runId,
+      cycleNumber: 1,
+      reason: 'INITIAL_CYCLE',
+      tenantId: tenantA,
+      workspaceId: workspaceA,
+    });
+
     const snapId = uid('snap-v61');
     const revId = uid('rev-v61');
     await createTestSnapshot(snapId, { candidateIds: ['cand-legit'] });
@@ -2377,10 +2661,10 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
       serverAuthorized: true,
     });
 
-    // Attempting to authorize READY release on this snapshot using review that introduced new info
+    // 1. Attempting to authorize READY release on this snapshot using review that introduced new info fails closed
     await expect(
       decService.recordDecision({
-        decisionId: uid('dec-v61'),
+        decisionId: uid('dec-v61-rel'),
         decisionType: 'RELEASE',
         taskRevisionId: taskRevId,
         snapshotId: snapId,
@@ -2394,6 +2678,62 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
         workspaceId: workspaceA,
       }),
     ).rejects.toThrow(/NEW_INFORMATION_REQUIRES_NEW_DECISION_CYCLE/i);
+
+    // 2. Attempting to record ANY decision (including HOLD/BLOCKED) referencing this review fails closed on old snapshot
+    await expect(
+      decService.recordDecision({
+        decisionId: uid('dec-v61-hold'),
+        decisionType: 'RELEASE',
+        taskRevisionId: taskRevId,
+        snapshotId: snapId,
+        reasonCodes: 'TEST',
+        selectedAction: 'HOLD',
+        releaseStatus: 'BLOCKED',
+        policyResultIds: [],
+        humanReviewId: revId,
+        tenantId: tenantA,
+        workspaceId: workspaceA,
+      }),
+    ).rejects.toThrow(/NEW_INFORMATION_REQUIRES_NEW_DECISION_CYCLE/i);
+
+    // 3. Mechanically route to successor DecisionCycle
+    const succCycleId = uid('cycle-v61-succ');
+    const cycleRes = await decService.createSuccessorDecisionCycleForReview({
+      reviewId: revId,
+      successorCycleId: succCycleId,
+      reason: 'NEW_INFORMATION_INTRODUCED_BY_COUNSEL',
+      tenantId: tenantA,
+      workspaceId: workspaceA,
+    });
+    expect(cycleRes.successorCycleId).toBe(succCycleId);
+
+    // 4. Verify old cycle is marked SUPERSEDED and successor is OPEN
+    const [oldCycle] = await sql`SELECT status FROM decision_cycles WHERE decision_cycle_id = ${initCycleId}`;
+    expect(oldCycle.status).toBe('SUPERSEDED');
+    const [succCycle] = await sql`SELECT status, parent_cycle_id FROM decision_cycles WHERE decision_cycle_id = ${succCycleId}`;
+    expect(succCycle.status).toBe('OPEN');
+    expect(succCycle.parent_cycle_id).toBe(initCycleId);
+
+    // 5. Freeze successor snapshot and verify legitimate decision can be recorded on successor snapshot
+    const succSnapId = uid('snap-v61-succ');
+    await createTestSnapshot(succSnapId, { candidateIds: ['cand-legit'] });
+    const decId = uid('dec-v61-succ');
+    await decService.recordDecision({
+      decisionId: decId,
+      decisionType: 'RELEASE',
+      taskRevisionId: taskRevId,
+      snapshotId: succSnapId,
+      reasonCodes: 'SUCCESSOR_CYCLE_DECISION',
+      selectedAction: 'RELEASE',
+      selectedCandidateId: 'cand-legit',
+      releaseStatus: 'READY',
+      policyResultIds: [],
+      tenantId: tenantA,
+      workspaceId: workspaceA,
+    });
+    const [decRow] = await sql`SELECT decision_id, release_status FROM decision_records WHERE decision_id = ${decId}`;
+    expect(decRow.decision_id).toBe(decId);
+    expect(decRow.release_status).toBe('READY');
   });
 
   // Vector 62: reviewer mutates DecisionSnapshot
@@ -2470,19 +2810,7 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
   // Vector 66: unresolved material conflict omitted from DecisionRecord
   it('Vector 66: unresolved material conflict omitted from DecisionRecord (fails closed)', async () => {
     const snapId = uid('snap-v66');
-    const confResId = uid('confres-v66');
-    await createTestSnapshot(snapId);
-
-    await govService.recordConflictResolution({
-      resolutionId: confResId,
-      snapshotId: snapId,
-      conflictKey: 'conflict-key-66',
-      resolutionType: 'ESCALATE',
-      reasonCodes: 'UNRESOLVED_ESCALATION',
-      policyResultIds: [],
-      tenantId: tenantA,
-      workspaceId: workspaceA,
-    });
+    const { policyResultIds, conflictResolution } = await createTestConflict(snapId);
 
     // Attempting recordDecision omitting the conflict resolution
     await expect(
@@ -2494,7 +2822,7 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
         reasonCodes: 'TEST',
         selectedAction: 'HOLD',
         releaseStatus: 'BLOCKED',
-        policyResultIds: [],
+        policyResultIds,
         conflictResolutionIds: [], // Omitted conflict resolution!
         tenantId: tenantA,
         workspaceId: workspaceA,
@@ -2534,21 +2862,9 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
   it('Vector 68: DecisionRecord references conflict resolution from another snapshot (fails closed)', async () => {
     const snapA = uid('snap-68-a');
     const snapB = uid('snap-68-b');
-    const confResId = uid('confres-68');
 
-    await createTestSnapshot(snapA);
+    const { conflictResolution } = await createTestConflict(snapA);
     await createTestSnapshot(snapB);
-
-    await govService.recordConflictResolution({
-      resolutionId: confResId,
-      snapshotId: snapA,
-      conflictKey: 'key-68',
-      resolutionType: 'HARD_DENY_OVERRIDES',
-      reasonCodes: 'DENY',
-      policyResultIds: [],
-      tenantId: tenantA,
-      workspaceId: workspaceA,
-    });
 
     await expect(
       decService.recordDecision({
@@ -2560,7 +2876,7 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
         selectedAction: 'HOLD',
         releaseStatus: 'BLOCKED',
         policyResultIds: [],
-        conflictResolutionIds: [confResId],
+        conflictResolutionIds: [conflictResolution.resolutionId],
         tenantId: tenantA,
         workspaceId: workspaceA,
       }),
@@ -2570,30 +2886,17 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
   // Vector 69: DecisionRecord references duplicate conflict_key resolutions
   it('Vector 69: DecisionRecord references duplicate conflict_key resolutions (fails closed)', async () => {
     const snapId = uid('snap-69');
-    const resA = uid('confres-69-a');
-    const resB = uid('confres-69-b');
-
-    await createTestSnapshot(snapId);
-
-    await govService.recordConflictResolution({
-      resolutionId: resA,
-      snapshotId: snapId,
-      conflictKey: 'dup-key',
-      resolutionType: 'HARD_DENY_OVERRIDES',
-      reasonCodes: 'DENY',
-      policyResultIds: [],
-      tenantId: tenantA,
-      workspaceId: workspaceA,
-    });
+    const { policyResultIds, conflictResolution } = await createTestConflict(snapId);
+    const { conflictKey, resolutionType } = conflictResolution;
 
     await expect(
       govService.recordConflictResolution({
-        resolutionId: resB,
+        resolutionId: uid('confres-69-b'),
         snapshotId: snapId,
-        conflictKey: 'dup-key',
-        resolutionType: 'MORE_SPECIFIC_SCOPE',
-        reasonCodes: 'SCOPE',
-        policyResultIds: [],
+        conflictKey,
+        resolutionType,
+        reasonCodes: 'DUPLICATE_RESOLUTION',
+        policyResultIds,
         tenantId: tenantA,
         workspaceId: workspaceA,
       }),

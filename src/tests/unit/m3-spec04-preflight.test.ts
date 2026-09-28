@@ -95,6 +95,11 @@ describe('SPEC04 §146 Static Contract Preflight (34 Checks)', () => {
     const evalSection = govService.substring(govService.indexOf('evaluatePolicySet'));
     expect(evalSection).not.toMatch(/SELECT.*FROM control_plane_activations.*CURRENT/i);
     expect(evalSection).not.toMatch(/WHERE.*status\s*=\s*'ACTIVE'/i);
+
+    // Exact schema revision compatibility enforcement (SPEC04 §41, §110, §111)
+    expect(evalSection).toContain('SchemaDefinition');
+    expect(evalSection).toContain('POLICY_SCHEMA_UNSUPPORTED');
+    expect(evalSection).toContain('POLICY_INTERPRETER_INCOMPATIBLE');
   });
 
   // 05 governance refresh triggered by frozen dependency set changes
@@ -330,6 +335,14 @@ describe('SPEC04 §146 Static Contract Preflight (34 Checks)', () => {
       'utf-8',
     );
     expect(govService).toContain('DUPLICATE_FINAL_CONFLICT_RESOLUTION');
+
+    // Canonical conflict recomputation & verification in recordConflictResolution (SPEC04 §57–§66)
+    const recConfSection = govService.substring(govService.indexOf('recordConflictResolution'));
+    expect(recConfSection).toContain('CONFLICT_EMPTY_POLICY_RESULTS');
+    expect(recConfSection).toContain('INCOMPLETE_POLICY_SET_FOR_CONFLICT_DETECTION');
+    expect(recConfSection).toContain('INVALID_CONFLICT_KEY');
+    expect(recConfSection).toContain('CANONICAL_CONFLICT_NOT_FOUND');
+    expect(recConfSection).toContain('CANONICAL_RESOLUTION_MISMATCH');
   });
 
   // 22 conflict resolution vocabulary & conditions preserved
@@ -439,6 +452,18 @@ describe('SPEC04 §146 Static Contract Preflight (34 Checks)', () => {
       'utf-8',
     );
     expect(govService).toContain('NEW_INFORMATION_REQUIRES_NEW_DECISION_CYCLE');
+
+    const decService = fs.readFileSync(
+      path.join(
+        rootDir,
+        'src/persistence/relational/services/decision-persistence-service.ts',
+      ),
+      'utf-8',
+    );
+    // NEW_INFORMATION_INTRODUCED cannot finalize old snapshot decisions
+    expect(decService).toContain('NEW_INFORMATION_REQUIRES_NEW_DECISION_CYCLE');
+    // Must mechanically establish a successor DecisionCycle
+    expect(decService).toContain('createSuccessorDecisionCycleForReview');
   });
 
   // 28 DecisionRecord owns release_status

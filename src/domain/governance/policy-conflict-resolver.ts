@@ -209,17 +209,29 @@ export function areParametersIncompatible(
     }
 
     // Resolve semantic contract strictly from the immutable schema bound to DecisionPolicyRevision
-    let semType: ParameterSemanticType | undefined;
     const sA = schemaA?.[key];
     const sB = schemaB?.[key];
-    if (typeof sA === 'string' && SUPPORTED_PARAMETER_SEMANTIC_KINDS.has(sA)) {
-      semType = sA as ParameterSemanticType;
-    } else if (sA && typeof sA === 'object' && 'type' in sA && SUPPORTED_PARAMETER_SEMANTIC_KINDS.has(sA.type)) {
-      semType = sA.type as ParameterSemanticType;
-    } else if (typeof sB === 'string' && SUPPORTED_PARAMETER_SEMANTIC_KINDS.has(sB)) {
-      semType = sB as ParameterSemanticType;
-    } else if (sB && typeof sB === 'object' && 'type' in sB && SUPPORTED_PARAMETER_SEMANTIC_KINDS.has(sB.type)) {
-      semType = sB.type as ParameterSemanticType;
+    const rawA = typeof sA === 'string' ? sA : (sA && typeof sA === 'object' && 'type' in sA ? (sA as any).type : undefined);
+    const rawB = typeof sB === 'string' ? sB : (sB && typeof sB === 'object' && 'type' in sB ? (sB as any).type : undefined);
+
+    if (rawA && !SUPPORTED_PARAMETER_SEMANTIC_KINDS.has(rawA)) {
+      throw new RegistryValidationError(
+        'POLICY_SCHEMA_UNSUPPORTED',
+        `Parameter semantic kind '${rawA}' is not authorized by the pinned schema contract (SPEC04 §41, §110).`,
+      );
+    }
+    if (rawB && !SUPPORTED_PARAMETER_SEMANTIC_KINDS.has(rawB)) {
+      throw new RegistryValidationError(
+        'POLICY_SCHEMA_UNSUPPORTED',
+        `Parameter semantic kind '${rawB}' is not authorized by the pinned schema contract (SPEC04 §41, §110).`,
+      );
+    }
+
+    let semType: ParameterSemanticType | undefined;
+    if (rawA && SUPPORTED_PARAMETER_SEMANTIC_KINDS.has(rawA)) {
+      semType = rawA as ParameterSemanticType;
+    } else if (rawB && SUPPORTED_PARAMETER_SEMANTIC_KINDS.has(rawB)) {
+      semType = rawB as ParameterSemanticType;
     }
 
     if (!semType) {

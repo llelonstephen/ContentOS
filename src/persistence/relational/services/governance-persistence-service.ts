@@ -21,6 +21,7 @@ import {
 import {
   evaluatePolicyDsl,
   assertPolicyResultEquivalence,
+  SUPPORTED_POLICY_SCHEMA_REVISIONS,
 } from '../../../domain/governance/policy-dsl.js';
 import {
   PolicyConflictResolver,
@@ -389,6 +390,24 @@ export class GovernancePersistenceService {
         throw new RegistryValidationError('POLICY_SET_INCOMPLETE', `GovernanceSnapshot '${snapshot.governance_snapshot_id}' contains zero policies.`);
       }
 
+      // Load RunConfig runtime_parameters to resolve policy schema pinning (SPEC04 §41, §110)
+      const [rcRow] = await sqlTx`
+        SELECT run_config_id, runtime_parameters
+        FROM run_configs
+        WHERE run_config_id = ${snapshot.run_config_id}
+      `;
+      if (!rcRow) {
+        throw new RegistryValidationError('RUN_CONFIG_NOT_FOUND', `RunConfig '${snapshot.run_config_id}' not found for DecisionSnapshot '${snapshotId}'.`);
+      }
+      let rcParams: any = {};
+      try {
+        rcParams = typeof rcRow.runtime_parameters === 'string'
+          ? JSON.parse(rcRow.runtime_parameters)
+          : rcRow.runtime_parameters ?? {};
+      } catch {
+        rcParams = {};
+      }
+
       // 3. Load snapshot candidates & closure
       const candidates = await sqlTx`
         SELECT candidate_id FROM decision_snapshot_candidates WHERE snapshot_id = ${snapshotId}
@@ -421,6 +440,54 @@ export class GovernancePersistenceService {
 
       // 4. Evaluate each policy in the expected set
       for (const policyRow of expectedPolicies) {
+        // Resolve exact schema revision (SPEC04 §41, §110)
+        let policyActionObj: any = {};
+        try {
+          policyActionObj = typeof policyRow.action === 'string' ? JSON.parse(policyRow.action) : policyRow.action ?? {};
+        } catch {
+          policyActionObj = {};
+        }
+        let policyConditionsObj: any = {};
+        try {
+          policyConditionsObj = typeof policyRow.conditions === 'string' ? JSON.parse(policyRow.conditions) : policyRow.conditions ?? {};
+        } catch {
+          policyConditionsObj = {};
+        }
+
+        const policySchemaRev =
+          policyActionObj.schema_revision_id ??
+          policyConditionsObj.schema_revision_id ??
+          rcParams.policy_schema_pins?.[policyRow.policy_revision_id] ??
+          rcParams.policy_schema_revision_id;
+
+        if (!policySchemaRev || typeof policySchemaRev !== 'string' || policySchemaRev.trim() === '') {
+          throw new RegistryValidationError(
+            'POLICY_SCHEMA_UNSUPPORTED',
+            `DecisionPolicyRevision '${policyRow.policy_revision_id}' does not resolve to an exact pinned SchemaDefinition revision (SPEC04 §41, §110). Absence of schema version cannot be inferred.`,
+          );
+        }
+
+        // Verify that the resolved schema revision exists in revision_registry as SchemaDefinition
+        const [schemaDef] = await sqlTx`
+          SELECT revision_id
+          FROM revision_registry
+          WHERE entity_type = 'SchemaDefinition' AND revision_id = ${policySchemaRev}
+        `;
+        if (!schemaDef) {
+          throw new RegistryValidationError(
+            'POLICY_SCHEMA_UNSUPPORTED',
+            `SchemaDefinition revision '${policySchemaRev}' pinned by policy '${policyRow.policy_revision_id}' does not exist in RevisionRegistry (SPEC04 §41, §110).`,
+          );
+        }
+
+        // Verify interpreter compatibility (SPEC04 §111)
+        if (!SUPPORTED_POLICY_SCHEMA_REVISIONS.has(policySchemaRev)) {
+          throw new RegistryValidationError(
+            'POLICY_INTERPRETER_INCOMPATIBLE',
+            `Policy interpreter version is incompatible with schema revision '${policySchemaRev}' (SPEC04 §111). Fail closed.`,
+          );
+        }
+
         // Deterministic evaluation
         const evalOutcome = evaluatePolicyDsl(
           {
@@ -428,8 +495,10 @@ export class GovernancePersistenceService {
             action: policyRow.action,
             required_inputs: policyRow.required_inputs,
             priority_class: policyRow.priority_class,
+            schemaRevisionId: policySchemaRev,
           },
           contextData,
+          { schemaRevisionId: policySchemaRev },
         );
 
         // Verify policy revision belongs to GovernanceSnapshot (SPEC04 §49, §56, Vector 36, Preflight 14)
@@ -814,26 +883,37 @@ export class GovernancePersistenceService {
       );
     }
 
+    // Material conflict resolution requires non-empty policyResultIds (SPEC04 §57)
+    if (!Array.isArray(policyResultIds) || policyResultIds.length === 0) {
+      throw new RegistryValidationError(
+        'CONFLICT_EMPTY_POLICY_RESULTS',
+        'Material conflict resolution requires non-empty policyResultIds (SPEC04 §57).',
+      );
+    }
+
     await this.sql.begin(async (sqlTx) => {
-      // Vector 42: same conflict gets two final resolutions
-      const [existing] = await sqlTx`
-        SELECT resolution_id, resolution_type
-        FROM policy_conflict_resolutions
-        WHERE snapshot_id = ${snapshotId} AND conflict_key = ${conflictKey}
+      // 1. Verify snapshot exists
+      const [snapshot] = await sqlTx`
+        SELECT snapshot_id, governance_snapshot_id
+        FROM decision_snapshots
+        WHERE snapshot_id = ${snapshotId}
       `;
-      if (existing) {
-        throw new RegistryValidationError(
-          'DUPLICATE_FINAL_CONFLICT_RESOLUTION',
-          `Conflict key '${conflictKey}' already has a final resolution '${existing.resolution_id}'.`,
-        );
+      if (!snapshot) {
+        throw new RegistryValidationError('SNAPSHOT_NOT_FOUND', `Snapshot '${snapshotId}' not found.`);
       }
 
-      // Vector 44: conflict combines results from different snapshots
+      // 2. Vector 44: Verify all policyResultIds exist and belong to snapshotId
       for (const prid of policyResultIds) {
         const [pr] = await sqlTx`
           SELECT snapshot_id FROM policy_results WHERE policy_result_id = ${prid}
         `;
-        if (pr && pr.snapshot_id !== snapshotId) {
+        if (!pr) {
+          throw new RegistryValidationError(
+            'POLICY_RESULT_NOT_FOUND',
+            `PolicyResult '${prid}' not found for snapshot '${snapshotId}'.`,
+          );
+        }
+        if (pr.snapshot_id !== snapshotId) {
           throw new RegistryValidationError(
             'CROSS_SNAPSHOT_CONFLICT',
             `PolicyResult '${prid}' belongs to snapshot '${pr.snapshot_id}', not '${snapshotId}'.`,
@@ -841,10 +921,91 @@ export class GovernancePersistenceService {
         }
       }
 
-      // Vector 65: conflict finalized AUTHORIZED_OVERRIDE before override exists
+      // 3. Completeness barrier: policy result set must be complete for snapshot (SPEC04 §51, §58)
+      const expectedPolicies = await sqlTx`
+        SELECT policy_revision_id
+        FROM governance_snapshot_policies
+        WHERE governance_snapshot_id = ${snapshot.governance_snapshot_id}
+      `;
+
+      const resultsRows = await sqlTx`
+        SELECT pr.policy_result_id, pr.snapshot_id, pr.policy_revision_id, pr.triggered,
+               pr.action, pr.reason_code, p.priority_class, p.scope, p.override_allowed
+        FROM policy_results pr
+        JOIN decision_policy_revisions p ON p.policy_revision_id = pr.policy_revision_id
+        WHERE pr.snapshot_id = ${snapshotId}
+      `;
+
+      if (resultsRows.length !== expectedPolicies.length) {
+        throw new RegistryValidationError(
+          'INCOMPLETE_POLICY_SET_FOR_CONFLICT_DETECTION',
+          `Cannot record conflict resolution: policy result set is incomplete (${resultsRows.length}/${expectedPolicies.length}) (SPEC04 §51, §58).`,
+        );
+      }
+
+      // 4. Verify conflictKey equals canonical hash of snapshot_id + canonical_sorted(policy_result_ids) (SPEC04 §59)
+      const canonicalConflictKey = PolicyConflictResolver.computeConflictKey(snapshotId, policyResultIds);
+      if (conflictKey !== canonicalConflictKey) {
+        throw new RegistryValidationError(
+          'INVALID_CONFLICT_KEY',
+          `Supplied conflictKey '${conflictKey}' does not match canonical conflict key '${canonicalConflictKey}'. Caller cannot fabricate conflict keys.`,
+        );
+      }
+
+      // 5. Mechanical conflict detection on complete descriptor set (SPEC04 §57)
+      const descriptors: PolicyResultDescriptor[] = resultsRows.map((r: any) => {
+        let effect: any = 'NO_RELEASE_EFFECT';
+        let actCode: string = r.reason_code;
+        let actParams: Record<string, unknown> | undefined;
+        let actSchema: Record<string, any> | undefined;
+        try {
+          const actObj = JSON.parse(r.action);
+          effect = actObj.effect ?? (r.triggered ? 'BLOCK' : 'NO_RELEASE_EFFECT');
+          if (actObj.code) actCode = actObj.code;
+          if (actObj.parameters) actParams = actObj.parameters;
+          if (actObj.parameter_schemas) actSchema = actObj.parameter_schemas;
+          else if (actObj.action_schema) actSchema = actObj.action_schema;
+          else if (actObj.schema) actSchema = actObj.schema;
+        } catch {
+          effect = r.triggered ? 'BLOCK' : 'NO_RELEASE_EFFECT';
+        }
+        return {
+          policyResultId: r.policy_result_id,
+          snapshotId: r.snapshot_id,
+          policyRevisionId: r.policy_revision_id,
+          triggered: r.triggered,
+          actionEffect: effect,
+          actionCode: actCode,
+          actionParameters: actParams,
+          actionSchema: actSchema,
+          priorityClass: r.priority_class,
+          scope: r.scope,
+          overrideAllowed: r.override_allowed,
+        };
+      });
+
+      const detectedConflicts = PolicyConflictResolver.detectConflicts(descriptors);
+      const detected = detectedConflicts.find((c) => c.conflictKey === canonicalConflictKey);
+      if (!detected) {
+        throw new RegistryValidationError(
+          'CANONICAL_CONFLICT_NOT_FOUND',
+          `Supplied policyResultIds do not form a mechanically detected canonical conflict. Non-conflicting results cannot be persisted as a conflict.`,
+        );
+      }
+
+      // 6. Verify supplied resolutionType equals mechanically derived resolution (SPEC04 §60–§66)
+      const canonicalOutcome = PolicyConflictResolver.resolveConflict(detected);
+      if (resolutionType !== 'AUTHORIZED_OVERRIDE' && resolutionType !== canonicalOutcome.resolutionType) {
+        throw new RegistryValidationError(
+          'CANONICAL_RESOLUTION_MISMATCH',
+          `Caller-supplied resolutionType '${resolutionType}' does not match canonical resolution '${canonicalOutcome.resolutionType}'. Caller cannot choose resolution authority manually (SPEC04 §58–§65).`,
+        );
+      }
+
+      // 7. Vector 65: conflict finalized AUTHORIZED_OVERRIDE before override exists
       if (overrideId) {
         const [override] = await sqlTx`
-          SELECT override_id, snapshot_id FROM policy_overrides WHERE override_id = ${overrideId}
+          SELECT override_id, snapshot_id, policy_result_id FROM policy_overrides WHERE override_id = ${overrideId}
         `;
         if (!override) {
           throw new RegistryValidationError(
@@ -860,7 +1021,20 @@ export class GovernancePersistenceService {
         }
       }
 
-      // Register in ImmutableEntityRegistry
+      // 8. Vector 42: same conflict gets two final resolutions
+      const [existing] = await sqlTx`
+        SELECT resolution_id, resolution_type
+        FROM policy_conflict_resolutions
+        WHERE snapshot_id = ${snapshotId} AND conflict_key = ${conflictKey}
+      `;
+      if (existing) {
+        throw new RegistryValidationError(
+          'DUPLICATE_FINAL_CONFLICT_RESOLUTION',
+          `Conflict key '${conflictKey}' already has a final resolution '${existing.resolution_id}'.`,
+        );
+      }
+
+      // 9. Register in ImmutableEntityRegistry
       await sqlTx`
         INSERT INTO immutable_entity_registry (
           entity_type, entity_id, tenant_id, workspace_id, payload_state, created_at
@@ -869,7 +1043,7 @@ export class GovernancePersistenceService {
         )
       `;
 
-      // Insert policy_conflict_resolutions
+      // 10. Insert policy_conflict_resolutions
       await sqlTx`
         INSERT INTO policy_conflict_resolutions (
           resolution_id, tenant_id, workspace_id, snapshot_id, conflict_key,
@@ -880,7 +1054,7 @@ export class GovernancePersistenceService {
         )
       `;
 
-      // Insert policy_conflict_results
+      // 11. Insert policy_conflict_results
       for (const prid of policyResultIds) {
         await sqlTx`
           INSERT INTO policy_conflict_results (resolution_id, policy_result_id)

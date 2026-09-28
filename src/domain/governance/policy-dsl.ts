@@ -55,6 +55,9 @@ export interface PolicyActionPayload {
   code: string;
   message?: string;
   parameters?: Record<string, unknown>;
+  parameter_schemas?: Record<string, string | { type: string }>;
+  action_schema?: Record<string, string | { type: string }>;
+  schema_revision_id?: string;
 }
 
 export interface PolicyEvaluationResult {
@@ -64,6 +67,20 @@ export interface PolicyEvaluationResult {
   inputUncertainty: string;
   inputRefs: string[];
 }
+
+export const SUPPORTED_POLICY_SCHEMA_REVISIONS = new Set<string>([
+  'schema-policy-dsl-v1',
+  'schema-policy-dsl-v1.0.0',
+  'policy-dsl-v1',
+]);
+
+export const FROZEN_POLICY_PARAMETER_SEMANTIC_KINDS = new Set<string>([
+  'MONOTONIC_LOWER_BOUND',
+  'MONOTONIC_UPPER_BOUND',
+  'ADDITIVE_COLLECTION',
+  'EXCLUSIVE_ENUM',
+  'BOOLEAN_FLAG',
+]);
 
 export const FROZEN_SUPPORTED_OPS = new Set<string>([
   'ALL', 'ANY', 'NOT',
@@ -615,8 +632,13 @@ export function evaluatePolicyDsl(
     action: string | PolicyActionPayload;
     required_inputs: string | string[];
     priority_class?: string;
+    schema_revision_id?: string;
+    schemaRevisionId?: string;
   },
   contextData: Record<string, unknown>,
+  options?: {
+    schemaRevisionId?: string;
+  },
 ): PolicyEvaluationResult {
   const collectedRefs = new Set<string>();
 
@@ -685,6 +707,33 @@ export function evaluatePolicyDsl(
       'POLICY_SCHEMA_UNSUPPORTED',
       `Unsupported policy action effect '${actionPayload.effect}' (SPEC04 §44). Must be one of: [${Array.from(FROZEN_ACTION_EFFECTS).join(', ')}].`,
     );
+  }
+
+  // Validate action parameter semantic kinds against pinned schema vocabulary (SPEC04 §41, §110)
+  const schemasObj = actionPayload.parameter_schemas ?? actionPayload.action_schema;
+  if (schemasObj && typeof schemasObj === 'object') {
+    for (const [paramKey, semDecl] of Object.entries(schemasObj)) {
+      const semKind = typeof semDecl === 'string'
+        ? semDecl
+        : (semDecl && typeof semDecl === 'object' && 'type' in semDecl ? (semDecl as any).type : undefined);
+      if (!semKind || !FROZEN_POLICY_PARAMETER_SEMANTIC_KINDS.has(semKind)) {
+        throw new RegistryValidationError(
+          'POLICY_SCHEMA_UNSUPPORTED',
+          `Action parameter '${paramKey}' specifies unauthorized semantic kind '${semKind}' under pinned schema contract (SPEC04 §41, §110).`,
+        );
+      }
+    }
+  }
+
+  // Validate interpreter compatibility if schema revision is specified (SPEC04 §110, §111)
+  const schemaRev = options?.schemaRevisionId ?? policyJson.schemaRevisionId ?? policyJson.schema_revision_id ?? actionPayload.schema_revision_id;
+  if (schemaRev !== undefined) {
+    if (!SUPPORTED_POLICY_SCHEMA_REVISIONS.has(schemaRev)) {
+      throw new RegistryValidationError(
+        'POLICY_INTERPRETER_INCOMPATIBLE',
+        `Policy interpreter does not support schema revision '${schemaRev}'. Deterministic incompatibility failure (SPEC04 §111).`,
+      );
+    }
   }
 
   // 4. Evaluate predicate

@@ -427,10 +427,10 @@ export class DecisionPersistenceService {
             `HumanReviewRecord '${humanReviewId}' belongs to snapshot '${review.snapshot_id}', not '${snapshotId}'.`,
           );
         }
-        if (review.review_mode === 'NEW_INFORMATION_INTRODUCED' && ['READY', 'READY_WITH_WARNINGS'].includes(releaseStatus)) {
+        if (review.review_mode === 'NEW_INFORMATION_INTRODUCED') {
           throw new RegistryValidationError(
             'NEW_INFORMATION_REQUIRES_NEW_DECISION_CYCLE',
-            `Human review introduced new information. Release requires a new DecisionCycle and new snapshot (SPEC04 §83, §130).`,
+            `HumanReviewRecord '${humanReviewId}' introduced new information. Decisions cannot be finalized on old snapshot '${snapshotId}'; new information requires a successor DecisionCycle and new snapshot (SPEC04 §83, §130, §131).`,
           );
         }
       }
@@ -614,6 +614,118 @@ export class DecisionPersistenceService {
           await sqlTx`INSERT INTO package_alternative_candidates (package_id, candidate_id) VALUES (${packageId}, ${id})`;
         }
       }
+    });
+  }
+
+  /**
+   * Routes a NEW_INFORMATION_INTRODUCED human review to a successor DecisionCycle (SPEC04 §83, §130, §131).
+   * Verifies the review introduced new information, marks the current cycle superseded/closed,
+   * establishes a successor DecisionCycle linked to the parent cycle, and updates the Run.
+   */
+  async createSuccessorDecisionCycleForReview(params: {
+    reviewId: string;
+    successorCycleId: string;
+    runId?: string;
+    reason?: string;
+    tenantId: string;
+    workspaceId?: string | null;
+  }): Promise<{
+    successorCycleId: string;
+    parentCycleId: string;
+    cycleNumber: number;
+    runId: string;
+  }> {
+    const { reviewId, successorCycleId, runId: suppliedRunId, reason, tenantId, workspaceId } = params;
+
+    return await this.sql.begin(async (sqlTx) => {
+      // 1. Verify HumanReviewRecord exists and is NEW_INFORMATION_INTRODUCED
+      const [review] = await sqlTx`
+        SELECT review_id, snapshot_id, review_mode, tenant_id
+        FROM human_review_records
+        WHERE review_id = ${reviewId}
+      `;
+      if (!review) {
+        throw new RegistryValidationError('HUMAN_REVIEW_NOT_FOUND', `HumanReviewRecord '${reviewId}' not found.`);
+      }
+      if (review.tenant_id !== tenantId) {
+        throw new RegistryValidationError('CROSS_TENANT_REVIEW', `HumanReviewRecord '${reviewId}' belongs to another tenant.`);
+      }
+      if (review.review_mode !== 'NEW_INFORMATION_INTRODUCED') {
+        throw new RegistryValidationError(
+          'INVALID_REVIEW_MODE_FOR_SUCCESSOR_CYCLE',
+          `HumanReviewRecord '${reviewId}' has review_mode '${review.review_mode}'. Only NEW_INFORMATION_INTRODUCED creates a successor cycle (SPEC04 §130).`,
+        );
+      }
+
+      // 2. Find the active run for tenant
+      let run: any;
+      if (suppliedRunId) {
+        const [foundRun] = await sqlTx`
+          SELECT run_id, current_decision_cycle_id, tenant_id
+          FROM runs
+          WHERE run_id = ${suppliedRunId} AND tenant_id = ${tenantId}
+        `;
+        run = foundRun;
+      } else {
+        const [foundRun] = await sqlTx`
+          SELECT run_id, current_decision_cycle_id, tenant_id
+          FROM runs
+          WHERE tenant_id = ${tenantId}
+          ORDER BY started_at DESC
+          LIMIT 1
+        `;
+        run = foundRun;
+      }
+      if (!run) {
+        throw new RegistryValidationError('RUN_NOT_FOUND', `No Run found for tenant '${tenantId}'.`);
+      }
+
+      // 3. Load active/parent decision cycle
+      const [currentCycle] = await sqlTx`
+        SELECT decision_cycle_id, cycle_number, status, fencing_epoch
+        FROM decision_cycles
+        WHERE decision_cycle_id = ${run.current_decision_cycle_id}
+        FOR UPDATE
+      `;
+      if (!currentCycle) {
+        throw new RegistryValidationError('CYCLE_NOT_FOUND', `Current DecisionCycle '${run.current_decision_cycle_id}' not found.`);
+      }
+
+      // 4. Invalidate/close old cycle to prevent old cycle from absorbing new facts
+      await sqlTx`
+        UPDATE decision_cycles
+        SET status = 'SUPERSEDED',
+            fencing_epoch = fencing_epoch + 1
+        WHERE decision_cycle_id = ${currentCycle.decision_cycle_id}
+      `;
+
+      const newCycleNumber = currentCycle.cycle_number + 1;
+
+      // 5. Create successor cycle
+      await sqlTx`
+        INSERT INTO decision_cycles (
+          decision_cycle_id, tenant_id, workspace_id, run_id, cycle_number,
+          parent_cycle_id, reason, status, fencing_epoch, opened_at
+        ) VALUES (
+          ${successorCycleId}, ${tenantId}, ${workspaceId ?? null}, ${run.run_id}, ${newCycleNumber},
+          ${currentCycle.decision_cycle_id}, ${reason ?? 'NEW_INFORMATION_INTRODUCED'}, 'OPEN', 0, now()
+        )
+      `;
+
+      // 6. Update Run to point to successor cycle
+      await sqlTx`
+        UPDATE runs
+        SET current_decision_cycle_id = ${successorCycleId},
+            version = version + 1
+        WHERE run_id = ${run.run_id}
+      `;
+
+      return {
+        successorCycleId,
+        parentCycleId: currentCycle.decision_cycle_id,
+        cycleNumber: newCycleNumber,
+        runId: run.run_id,
+      };
     });
   }
 }
