@@ -3026,16 +3026,55 @@ canonical knowledge input hash
 derivation config
 ```
 
-For v1.0.2, the canonical knowledge input hash must cover, when applicable:
+For audience derivation under v1.0.5:
 
-```text
-eligible Task audience-context inputs
-eligible AUDIENCE Proposition refs
-exact decision-time EpistemicStateVersion refs
-structured KnowledgeGap inputs
-exact audience derivation manifest
-pinned audience schema/config
-```
+StageExecution.canonical_input_hash
+MUST be the deterministic hash of the exact:
+
+PRE_PROVIDER_MANIFEST_CORE
+
+as defined by §112–§113.
+
+It therefore covers, where applicable:
+
+- eligible exact Task audience-context inputs;
+- eligible AUDIENCE Proposition refs;
+- exact decision-time EpistemicStateVersion refs;
+- structured KnowledgeGap / ResearchTrace inputs;
+- exact RunConfig;
+- exact CONTENT_INTELLIGENCE_AUDIENCE RunConfigSchemaRoleBinding;
+- exact normalized schema membership proof;
+- exact SchemaDefinition revision and immutable payload identity/hash;
+- complete AudienceSemanticProjectionSchema configuration;
+- traversal/path/classification configuration;
+- uncertainty-coverage configuration;
+- tenant/workspace;
+- trusted audience_knowledge_cutoff_time;
+- all other deterministic material pre-provider inputs.
+
+It MUST NOT hash:
+
+PRE_PROVIDER_MANIFEST_ENVELOPE
+
+as a whole if that envelope contains:
+
+StageExecution.canonical_input_hash.
+
+The hash field itself is excluded from its own hash input.
+
+The sealed envelope may record the already-computed hash only after:
+
+PRE_PROVIDER_MANIFEST_CORE
+→ canonical deterministic serialization
+→ canonical_input_hash
+
+No recursive or fixed-point hashing is permitted.
+
+Generated-leaf-specific/post-provider admission identity remains governed by:
+
+audience_admission_hash
+
+under §113.
 
 If decision-relevant input changes materially:
 
