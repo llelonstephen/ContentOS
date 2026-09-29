@@ -64,8 +64,12 @@ ContentOS SPEC 05 v1.0.4 — FROZEN
 SHA256 25c5c0ec1513c77c72773cf25b32ac085f3bb1412165a02d1dfb9619efd36c95
 
 PATCH TARGET
-Demonstrated v1.0.4 temporal circular dependency —
-pre-provider canonical_input_hash vs post-provider generated-leaf admission identity
+
+Demonstrated v1.0.4 Audience hash-lifecycle contradictions:
+
+1. pre-provider StageExecution.canonical_input_hash vs post-provider generated-leaf admission identity;
+
+2. atomic StageExecution execution authority vs trusted finalization of the exact pre-provider canonical input identity.
 
 SPEC05 defines runtime behavior.
 
@@ -5325,10 +5329,57 @@ v1.0.5 closes BOTH demonstrated temporal circularities:
 The two-phase-hash patch also makes the pre-provider hash serialization mechanically non-self-referential:
 manifest core → canonical_input_hash → sealed manifest envelope. No upstream fencing semantics are changed.
 
-- all unrelated v1.0.4 closures remain preserved;
-- v1.0.5 supersedes ONLY the v1.0.4 clauses that require generated-leaf-specific/post-provider admission values inside the pre-provider StageExecution.canonical_input_hash;
-- those values now belong to audience_admission_hash;
-- RunConfigSchemaRoleBinding, projection authority, uncertainty, basis, cutoff, fencing and SPEC03 resolver ownership remain unchanged.
+v1.0.5 supersedes ONLY the demonstrated conflicting v1.0.4 HASH-LIFECYCLE clauses in TWO categories:
+
+A. PRE/POST PROVIDER HASH IDENTITY
+
+Any v1.0.4 clause requiring generated-leaf-specific or other post-provider admission values inside the pre-provider:
+
+StageExecution.canonical_input_hash
+
+is superseded.
+
+Those values now belong to:
+
+audience_admission_hash.
+
+B. CLAIM/HASH ORDERING
+
+Any v1.0.4 clause requiring the Audience StageExecution to become authoritatively claimed before the trusted runtime can construct the exact:
+
+PRE_PROVIDER_MANIFEST_CORE
++
+StageExecution.canonical_input_hash
+
+is superseded.
+
+For Audience derivation v1.0.5, trusted non-authoritative claim preparation may construct the exact core/hash before the atomic claim.
+
+Execution authority still begins ONLY after the atomic claim succeeds.
+
+Provider execution before claim remains forbidden.
+
+All OTHER v1.0.4 closures remain preserved, including:
+
+- StageExecution atomic-claim authority;
+- lease semantics;
+- fencing_token semantics;
+- DecisionCycle fencing;
+- FREEZING barrier;
+- stale-worker rejection;
+- RunConfigSchemaRoleBinding;
+- schema membership closure;
+- AudienceSemanticProjectionSchema;
+- AudienceFactBasisLink;
+- exact path-bound uncertainty;
+- trusted temporal cutoff semantics;
+- SPEC03 evaluateSemanticEquivalence ownership;
+- tenant/workspace isolation;
+- atomic Audience admission.
+
+The ordering change does NOT grant execution authority before claim.
+
+It only permits trusted non-authoritative preparation of the exact input identity required by the atomic claim.
 
 # 155. Verification Record — v1.0.5 Freeze Candidate
 
@@ -5343,7 +5394,8 @@ PATCH BASE SHA256
 25c5c0ec1513c77c72773cf25b32ac085f3bb1412165a02d1dfb9619efd36c95
 
 DEMONSTRATED PATCH TARGET
-two-phase hash temporal circularity
+PRE/POST PROVIDER HASH SEPARATION
+CLAIM/HASH FINALIZATION ORDERING
 
 INTERNAL SELF-AUDIT
 PASS
