@@ -825,23 +825,32 @@ Before audience provider/model invocation, the trusted runtime MUST establish on
 Canonical pattern:
 
 ```text
-claim valid StageExecution
-↓
-open coherent read boundary
+prepare trusted claim attempt/read boundary
 (REPEATABLE READ or stronger equivalent where applicable)
 ↓
 trusted runtime captures:
 audience_knowledge_cutoff_time
 ↓
-resolve exact eligible audience inputs as-of that boundary
+resolve exact eligible canonical pre-provider inputs as-of that boundary
 ↓
 construct PRE_PROVIDER_MANIFEST_CORE
 ↓
-compute StageExecution.canonical_input_hash
+compute deterministic StageExecution.canonical_input_hash
 over the core only
 ↓
+ATOMIC StageExecution CLAIM
+using:
+  exact idempotency_key
+  exact run_id
+  exact decision_cycle_id
+  exact stage_name
+  exact canonical_input_hash
+  lease/fencing ownership state
+↓
+only the winning claimant may proceed
+↓
 seal PRE_PROVIDER_MANIFEST_ENVELOPE
-with the computed hash
+with the already-computed exact hash
 ↓
 provider/model invocation
 ```
@@ -856,6 +865,8 @@ chosen by the caller
 taken from mutable CURRENT/LATEST state
 backfilled from future DecisionSnapshot.frozen_at
 ```
+
+Pre-claim preparation (including manifest core construction and hash computation) is non-authoritative until the atomic claim succeeds. A losing concurrent claim attempt MUST NOT invoke the provider, MUST NOT commit AudienceState, MUST NOT become canonical authority, and may discard its temporary read preparation.
 
 The provider/caller may echo/assert the cutoff only for equality checking.
 
@@ -3092,6 +3103,8 @@ If an uncertainty becomes resolvable because new canonical knowledge entered, th
 
 Content runtime stages execute through SPEC01 StageExecution.
 
+For Audience derivation, StageExecution execution authority begins ONLY after successful atomic claim. Trusted calculation of the exact input hash before that claim does not itself grant stage authority.
+
 Suggested stage names:
 
 ```text
@@ -3555,6 +3568,8 @@ hash(PRE_PROVIDER_MANIFEST_CORE canonical serialization)
 and NOT:
 hash(PRE_PROVIDER_MANIFEST_ENVELOPE containing canonical_input_hash)
 
+For Audience derivation, the hash MUST be finalized before / as part of the atomic StageExecution claim that authorizes provider execution. It MUST NOT first become authoritative through a post-claim replacement.
+
 It MUST NOT require generated-output-dependent values such as:
 - final generated Audience factual leaf values;
 - generated fact paths that cannot exist before output;
@@ -3947,7 +3962,7 @@ Provider/model work remains outside database transactions.
 Required lifecycle:
 
 ```text
-claim valid StageExecution
+prepare trusted claim attempt
 ↓
 open coherent read boundary
 ↓
@@ -3961,7 +3976,11 @@ resolve exact SchemaDefinition payload
 ↓
 construct PRE_PROVIDER_MANIFEST_CORE
 ↓
-compute/finalize StageExecution.canonical_input_hash
+compute deterministic StageExecution.canonical_input_hash
+↓
+atomically claim StageExecution with that exact hash
+↓
+verify worker owns resulting lease/fencing token
 ↓
 seal PRE_PROVIDER_MANIFEST_ENVELOPE
 ↓
@@ -4773,6 +4792,11 @@ The provider or caller attempts to forge hash identity or assert authoritative p
 
 **Subcases (MUST FAIL CLOSED):**
 - implementation attempts to verify canonical_input_hash by hashing an envelope containing that same hash field (INVALID IMPLEMENTATION CONTRACT)
+- provider invoked before StageExecution claim succeeds
+- losing concurrent claim attempt invokes provider
+- StageExecution is claimed with dummy/incomplete hash then hash replaced later
+- caller supplies pre-claim hash instead of trusted core-derived hash
+- takeover overwrites finalized canonical_input_hash with a different prepared identity
 - forged caller/provider `canonical_input_hash` (mismatch against reconstructed pre-provider manifest)
 - forged caller/provider `audience_admission_hash` (mismatch against reconstructed trusted admission)
 - provider attempts to select projection rule (authoritative selection belongs solely to runtime)
@@ -4789,8 +4813,11 @@ The provider or caller attempts to forge hash identity or assert authoritative p
 Demonstrates that full semantic projection and two-phase hash integration correctly generate factual claims that pass ALL strict post-provider validations.
 
 Required assertions:
+- trusted read preparation
 - canonical pre-provider context is constructed
 - `StageExecution.canonical_input_hash` is finalized
+- atomic claim with exact hash succeeds for winning worker only
+- envelope sealed
 - provider-generated proposal is returned
 - trusted post-provider admission resolution validates all claims and projection rules
 - `audience_admission_hash` is computed
@@ -4902,7 +4929,12 @@ For v1.0.5 this additionally requires:
 - canonical_input_hash hashes an exact deterministic pre-provider manifest core;
 - the hash field is excluded from its own hash input;
 - the final manifest envelope may record the resulting hash only after computation;
-- self-referential/fixed-point hashing is forbidden.
+- self-referential/fixed-point hashing is forbidden;
+- Audience canonical_input_hash is computed from trusted core before/as part of atomic StageExecution claim;
+- no placeholder/provisional hash is persisted as authority;
+- successful claim is required before provider execution;
+- losing claim preparation has zero execution authority;
+- finalized StageExecution canonical_input_hash is not silently replaced by takeover/retry workers.
 
 4.
 Audience changes create new immutable state.
@@ -5282,8 +5314,16 @@ v1.0.5 therefore closes this circular dependency with explicit two-phase hash se
 1. `StageExecution.canonical_input_hash`: Strictly represents pre-provider material stage input identity.
 2. `audience_admission_hash`: Strictly represents post-provider trusted audience admission identity.
 
+v1.0.5 closes BOTH demonstrated temporal circularities:
+
+1. PRE-PROVIDER vs POST-PROVIDER:
+   canonical_input_hash vs generated admission state.
+
+2. CLAIM AUTHORITY vs TRUSTED INPUT FINALIZATION:
+   exact trusted pre-provider core/hash is prepared before/as part of atomic StageExecution claim, while provider execution remains forbidden until the claim succeeds.
+
 The two-phase-hash patch also makes the pre-provider hash serialization mechanically non-self-referential:
-manifest core → canonical_input_hash → sealed manifest envelope.
+manifest core → canonical_input_hash → sealed manifest envelope. No upstream fencing semantics are changed.
 
 - all unrelated v1.0.4 closures remain preserved;
 - v1.0.5 supersedes ONLY the v1.0.4 clauses that require generated-leaf-specific/post-provider admission values inside the pre-provider StageExecution.canonical_input_hash;
