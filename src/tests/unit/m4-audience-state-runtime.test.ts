@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { DeriveAudienceState } from '../../application/content-intelligence/derive-audience-state.js';
-import type { AudienceStateView } from '../../domain/content/index.js';
+import { hashAudienceDerivationManifest, type AudienceStateView } from '../../domain/content/index.js';
 import {
   AudienceStatePersistenceService,
   type AudienceStateAtomicCommitPort,
@@ -24,6 +24,35 @@ const authority = {
 };
 const pins = { prompt_revision_id: 'prompt-1', model_revision_id: 'model-1',
   schema_revision_id: 'schema-1', tool_revision_ids: ['tool-1'] };
+const manifest = {
+  tenant_id: 'tenant-1', workspace_id: 'workspace-1', run_config_id: 'config-1',
+  task_id: 'task-stable-1', task_revision_id: 'task-1',
+  audience_knowledge_cutoff_time: '2026-09-28T00:30:00.000Z', canonical_input_hash: 'hash-1',
+  derivation_manifest_hash: '',
+  audience_schema_ref: { entity_type: 'SchemaDefinition', stable_id: 'audience-schema',
+    revision_id: 'schema-1' },
+  audience_schema_payload_hash: 'schema-hash-1',
+  eligible_task_audience_context: [], eligible_epistemic_refs: [],
+};
+const admissionAuthority = {
+  manifest: { ...manifest, derivation_manifest_hash: hashAudienceDerivationManifest(manifest) },
+  schema_role_bindings: [{
+    run_config_id: 'config-1', role: 'CONTENT_INTELLIGENCE_AUDIENCE' as const,
+    schema_entity_type: 'SchemaDefinition' as const, schema_stable_id: 'audience-schema',
+    schema_revision_id: 'schema-1', schema_object_id: 'schema-object-1',
+    schema_object_key: 'schemas/audience-v1.json', schema_payload_hash: 'schema-hash-1',
+    schema_payload_schema_revision_id: 'meta-schema-v1',
+  }],
+  schema: {
+    schema_ref: { entity_type: 'SchemaDefinition', stable_id: 'audience-schema',
+      revision_id: 'schema-1' },
+    payload_hash: 'schema-hash-1', path_encoding: 'JSON_POINTER_V1' as const,
+    scalar_serialization: 'CANONICAL_JSON_SCALAR_V1' as const,
+    classification_rules: [], projection_rules: [],
+  },
+  task_market: 'VN', task_jurisdiction: 'VN', task_audience_context: {},
+  propositions: [], epistemic_states: [],
+};
 
 describe('M4 audience runtime', () => {
   it('generates before atomic commit and binds governance refresh to the new final state', async () => {
@@ -41,6 +70,7 @@ describe('M4 audience runtime', () => {
         return {
           previous_state: previous,
           provider_context: { exact: true },
+          admission_authority: admissionAuthority,
           material_governance_dependencies_changed: true,
           governance_refresh: {
             governance_snapshot_id: 'gov-refresh-1', dependency_fingerprint: 'deps-2',
@@ -51,7 +81,7 @@ describe('M4 audience runtime', () => {
         order.push('provider');
         const { audience_state_id: _id, task_revision_id: _task, state_stage: _stage,
           created_at: _created, ...proposal } = previous;
-        return proposal;
+        return { proposal, basis_selections: [] };
       } },
       new AudienceStatePersistenceService(port),
       { nextAudienceStateId: () => 'aud-final', now: () => new Date('2026-09-28T01:00:00Z') },

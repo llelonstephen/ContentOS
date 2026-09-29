@@ -1,0 +1,136 @@
+import {
+  CONTENT_CANONICAL_SERIALIZATION_VERSION,
+  hashCanonicalInput,
+  serializeCanonicalInput,
+  type CanonicalField,
+  type CanonicalInputManifest,
+} from "./canonical-input-serialization.js";
+import type {
+  AudienceManifestEpistemicRef,
+  AudienceManifestTaskContextValue,
+  AudienceSchemaRoleBinding,
+} from "./audience-admission-types.js";
+import type { ExactRevisionRef } from "./types.js";
+
+/**
+ * Pre-provider derivation manifest core representing the deterministic
+ * canonical input state supplied to an audience generation attempt.
+ *
+ * StageExecution.canonical_input_hash = hash(PRE_PROVIDER_MANIFEST_CORE)
+ *
+ * In accordance with SPEC05 v1.0.5 §112–§113:
+ * - canonical_input_hash is pre-provider only.
+ * - PRE_PROVIDER_MANIFEST_CORE is reconstructable, not a canonical entity.
+ * - The hash field itself is excluded from its own hash input.
+ * - Generated-leaf-specific post-provider admission identity belongs to audience_admission_hash.
+ */
+export interface PreProviderManifestCore {
+  readonly tenant_id: string;
+  readonly workspace_id?: string | null;
+  readonly run_config_id: string;
+  readonly task_id: string;
+  readonly task_revision_id: string;
+  readonly audience_knowledge_cutoff_time: string;
+  readonly audience_schema_ref: ExactRevisionRef;
+  readonly audience_schema_payload_hash: string;
+  readonly audience_schema_role_binding?: AudienceSchemaRoleBinding;
+  readonly eligible_task_audience_context: readonly AudienceManifestTaskContextValue[];
+  readonly eligible_epistemic_refs: readonly AudienceManifestEpistemicRef[];
+  readonly knowledge_gap_refs?: readonly string[];
+  readonly research_trace_refs?: readonly string[];
+}
+
+export function buildPreProviderManifestCanonicalManifest(
+  core: PreProviderManifestCore,
+): CanonicalInputManifest {
+  const fields: CanonicalField[] = [
+    { name: "tenant_id", kind: "VALUE", value: core.tenant_id },
+    { name: "workspace_id", kind: "VALUE", value: core.workspace_id ?? null },
+    { name: "run_config_id", kind: "VALUE", value: core.run_config_id },
+    { name: "task_id", kind: "VALUE", value: core.task_id },
+    { name: "task_revision_id", kind: "VALUE", value: core.task_revision_id },
+    {
+      name: "audience_knowledge_cutoff_time",
+      kind: "TIMESTAMP",
+      value: core.audience_knowledge_cutoff_time,
+    },
+    {
+      name: "audience_schema_ref",
+      kind: "VALUE",
+      value: {
+        entity_type: core.audience_schema_ref.entity_type,
+        stable_id: core.audience_schema_ref.stable_id,
+        revision_id: core.audience_schema_ref.revision_id,
+      },
+    },
+    {
+      name: "audience_schema_payload_hash",
+      kind: "VALUE",
+      value: core.audience_schema_payload_hash,
+    },
+    {
+      name: "eligible_task_audience_context",
+      kind: "SEMANTIC_SET",
+      value: (core.eligible_task_audience_context ?? []).map((item) => ({
+        path: item.path,
+        value_hash: item.value_hash,
+      })),
+    },
+    {
+      name: "eligible_epistemic_refs",
+      kind: "SEMANTIC_SET",
+      value: (core.eligible_epistemic_refs ?? []).map((item) => ({
+        proposition_id: item.proposition_id,
+        epistemic_state_id: item.epistemic_state_id,
+      })),
+    },
+  ];
+
+  if (core.audience_schema_role_binding) {
+    fields.push({
+      name: "audience_schema_role_binding",
+      kind: "VALUE",
+      value: {
+        run_config_id: core.audience_schema_role_binding.run_config_id,
+        role: core.audience_schema_role_binding.role,
+        schema_entity_type: core.audience_schema_role_binding.schema_entity_type,
+        schema_stable_id: core.audience_schema_role_binding.schema_stable_id,
+        schema_revision_id: core.audience_schema_role_binding.schema_revision_id,
+        schema_object_id: core.audience_schema_role_binding.schema_object_id,
+        schema_object_key: core.audience_schema_role_binding.schema_object_key,
+        schema_payload_hash: core.audience_schema_role_binding.schema_payload_hash,
+        schema_payload_schema_revision_id:
+          core.audience_schema_role_binding.schema_payload_schema_revision_id,
+      },
+    });
+  }
+
+  if (core.knowledge_gap_refs && core.knowledge_gap_refs.length > 0) {
+    fields.push({
+      name: "knowledge_gap_refs",
+      kind: "SEMANTIC_SET",
+      value: [...core.knowledge_gap_refs],
+    });
+  }
+
+  if (core.research_trace_refs && core.research_trace_refs.length > 0) {
+    fields.push({
+      name: "research_trace_refs",
+      kind: "SEMANTIC_SET",
+      value: [...core.research_trace_refs],
+    });
+  }
+
+  return {
+    serialization_version: CONTENT_CANONICAL_SERIALIZATION_VERSION,
+    fields,
+  };
+}
+
+export function serializePreProviderManifestCore(core: PreProviderManifestCore): string {
+  return serializeCanonicalInput(buildPreProviderManifestCanonicalManifest(core));
+}
+
+export function hashPreProviderManifestCore(core: PreProviderManifestCore): string {
+  return hashCanonicalInput(buildPreProviderManifestCanonicalManifest(core));
+}

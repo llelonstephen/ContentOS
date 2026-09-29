@@ -8,7 +8,7 @@ import {
   type StrategyHypothesisView,
 } from '../../domain/content/index.js';
 
-const frozen = readFileSync(path.join(process.cwd(), 'ContentOS_SPEC05_Content_Intelligence_Runtime_v1.0.1_FROZEN.md'), 'utf8');
+const frozen = readFileSync(path.join(process.cwd(), 'ContentOS_SPEC05_Content_Intelligence_Runtime_v1.0.4_FROZEN.md'), 'utf8');
 const section = frozen.slice(frozen.indexOf('# 152. Fixed Adversarial Test Suite'), frozen.indexOf('# 153. Static Contract Preflight'));
 const vectors = [...section.matchAll(/^(\d{2}) (.+)$/gm)].map((match) => ({ id: Number(match[1]), description: match[2] }))
   .filter(({ description }) => !description.startsWith('/'));

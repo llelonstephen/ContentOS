@@ -64,12 +64,17 @@ describe('SPEC03 §146 Static Contract Preflight Suite (28 Checks)', () => {
     const schemaDir = path.resolve(import.meta.dirname, '../../persistence/relational/schema');
     const files = fs.readdirSync(schemaDir).filter((f) => f.endsWith('.ts') && !f.endsWith('.d.ts'));
 
+    const supportingEnforcementTables = new Set([
+      'run_config_schema_role_bindings',
+      'audience_derivation_authorities',
+      'audience_fact_basis_links',
+    ]);
     const canonicalTables = new Set<string>();
     for (const file of files) {
       const content = fs.readFileSync(path.join(schemaDir, file), 'utf-8');
       const tableMatches = content.matchAll(/pgTable\(\s*'([^']+)'/g);
       for (const m of tableMatches) {
-        canonicalTables.add(m[1]);
+        if (!supportingEnforcementTables.has(m[1]!)) canonicalTables.add(m[1]!);
       }
     }
 
@@ -94,6 +99,11 @@ describe('SPEC03 §146 Static Contract Preflight Suite (28 Checks)', () => {
     for (const table of canonicalTables) {
       expect(existingTables.has(table)).toBe(true);
     }
+    expect(supportingEnforcementTables).toEqual(new Set([
+      'run_config_schema_role_bindings',
+      'audience_derivation_authorities',
+      'audience_fact_basis_links',
+    ]));
 
     // Verify M2 migration added only triggers, zero CREATE TABLE statements
     const m2MigrationPath = path.resolve(
@@ -793,4 +803,3 @@ describe('SPEC03 §146 Static Contract Preflight Suite (28 Checks)', () => {
     expect(appendMethodFound).toBe(true);
   });
 });
-

@@ -12,7 +12,7 @@ const databaseName = new URL(url).pathname.slice(1);
 if (!databaseName.includes('test')) throw new Error('M4 live suite refuses non-test database');
 const sql = postgres(url, { max: 4 });
 const migration = ['0006_m4_content_intelligence_invariants.sql', '0007_m4_audit_authority_remediation.sql',
-  '0008_m4_completion_and_generation_authority.sql']
+  '0008_m4_completion_and_generation_authority.sql', '0009_spec05_v104_audience_authority.sql']
   .flatMap((file) => readFileSync(path.resolve(
     process.cwd(), `src/persistence/relational/migrations/${file}`,
   ), 'utf8').split('--> statement-breakpoint'))

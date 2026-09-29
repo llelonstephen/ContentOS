@@ -193,9 +193,9 @@ BEGIN
         ON audience.audience_state_id = NEW.audience_state_id
       WHERE task.task_revision_id = NEW.task_revision_id
         AND task.tenant_id = NEW.tenant_id
-        AND task.workspace_id IS NOT DISTINCT FROM NEW.workspace_id
+        AND (task.workspace_id IS NOT DISTINCT FROM NEW.workspace_id OR (NEW.workspace_id IS NOT NULL AND task.workspace_id IS NULL))
         AND audience.tenant_id = NEW.tenant_id
-        AND audience.workspace_id IS NOT DISTINCT FROM NEW.workspace_id) THEN
+        AND (audience.workspace_id IS NOT DISTINCT FROM NEW.workspace_id OR (NEW.workspace_id IS NOT NULL AND audience.workspace_id IS NULL))) THEN
       RAISE EXCEPTION 'M4_REFERENCE_SCOPE_VIOLATION: Strategy inputs';
     END IF;
   ELSIF TG_TABLE_NAME = 'content_architectures' THEN

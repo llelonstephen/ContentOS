@@ -7,7 +7,7 @@ import {
   validateMeaningPreservation,
 } from '../../domain/content/index.js';
 
-const spec = readFileSync(path.join(process.cwd(), 'ContentOS_SPEC05_Content_Intelligence_Runtime_v1.0.1_FROZEN.md'), 'utf8');
+const spec = readFileSync(path.join(process.cwd(), 'ContentOS_SPEC05_Content_Intelligence_Runtime_v1.0.4_FROZEN.md'), 'utf8');
 const block = spec.slice(spec.indexOf('# 154. Acceptance Criteria'), spec.indexOf('# 154A. v1.0.1 Patch Closure'));
 const criteria = [...block.matchAll(/^(\d+)\.\n([\s\S]*?)(?=\n\d+\.\n|\n```)/gm)];
 const rejects = (fn: () => void) => { try { fn(); return false; } catch { return true; } };

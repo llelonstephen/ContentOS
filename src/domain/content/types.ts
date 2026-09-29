@@ -34,7 +34,24 @@ export interface AudienceUncertainty {
   readonly kind: string;
   readonly description: string;
   readonly blocking?: boolean;
+  readonly audience_field?: AudienceFactualField;
+  readonly fact_path?: string;
+  readonly status?: 'UNRESOLVED';
 }
+
+export const AUDIENCE_FACTUAL_FIELDS = [
+  'knowledge_state',
+  'problem_state',
+  'solution_state',
+  'product_state',
+  'brand_state',
+  'intent_state',
+  'desired_outcome',
+  'objections',
+  'decision_criteria',
+  'prior_exposure',
+] as const;
+export type AudienceFactualField = (typeof AUDIENCE_FACTUAL_FIELDS)[number];
 
 /** Read-only view of the frozen AudienceState contract, not a persistence schema. */
 export interface AudienceStateView {

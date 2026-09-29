@@ -4,7 +4,7 @@ import path from 'node:path';
 
 const root = process.cwd();
 const read = (file: string): string => readFileSync(path.join(root, file), 'utf8');
-const spec = read('ContentOS_SPEC05_Content_Intelligence_Runtime_v1.0.1_FROZEN.md');
+const spec = read('ContentOS_SPEC05_Content_Intelligence_Runtime_v1.0.4_FROZEN.md');
 const block = spec.slice(spec.indexOf('# 153. Static Contract Preflight'),
   spec.indexOf('# 154. Acceptance Criteria'));
 const checks = [...block.matchAll(/^(\d{2}) (.+)$/gm)].map((match) => ({

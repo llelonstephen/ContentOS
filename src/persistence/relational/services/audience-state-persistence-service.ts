@@ -7,6 +7,7 @@ import {
   type ContentRuntimeCommitAuthority,
 } from './content-runtime-authority.js';
 import type { PinnedGenerationConfig } from '../../../application/content-intelligence/content-generation-context-builder.js';
+import type { AudienceSchemaBindingAuthority } from './audience-derivation-authority-resolver.js';
 
 export interface AudienceCommitAuthority extends ContentRuntimeCommitAuthority {}
 
@@ -16,6 +17,35 @@ export interface AudienceGovernanceRefreshEvidence {
   readonly dependency_fingerprint: string;
 }
 
+export interface AudienceDerivationAuthorityMetadata {
+  readonly audience_knowledge_cutoff_time: string;
+  readonly derivation_manifest: Readonly<Record<string, unknown>>;
+  readonly derivation_manifest_hash: string;
+  readonly schema_binding: AudienceSchemaBindingAuthority;
+}
+
+interface AudienceFactBasisCommon {
+  readonly audience_field: string;
+  readonly fact_path: string;
+  readonly fact_value_hash: string;
+  readonly ordinal: number;
+}
+
+export type AudienceFactBasisLinkInput = AudienceFactBasisCommon & (
+  | {
+      readonly basis_kind: 'TASK_AUDIENCE_CONTEXT';
+      readonly task_id: string;
+      readonly task_revision_id: string;
+      readonly task_audience_context_path: string;
+      readonly task_audience_context_value_hash: string;
+    }
+  | {
+      readonly basis_kind: 'AUDIENCE_EPISTEMIC_STATE';
+      readonly proposition_id: string;
+      readonly epistemic_state_id: string;
+    }
+);
+
 export interface AudienceStateCommitRequest {
   readonly authority: AudienceCommitAuthority;
   readonly request_identity: string;
@@ -24,6 +54,8 @@ export interface AudienceStateCommitRequest {
   readonly previous_state?: AudienceStateView;
   readonly material_governance_dependencies_changed: boolean;
   readonly governance_refresh?: AudienceGovernanceRefreshEvidence;
+  readonly derivation_authority?: AudienceDerivationAuthorityMetadata;
+  readonly fact_basis_links?: readonly AudienceFactBasisLinkInput[];
 }
 
 /**
@@ -41,6 +73,49 @@ function requireValue(value: string, name: string): void {
 function sameAudienceEffect(left: AudienceStateView, right: AudienceStateView): boolean {
   const omitIdentity = ({ audience_state_id: _id, created_at: _created, ...value }: AudienceStateView) => value;
   return JSON.stringify(omitIdentity(left)) === JSON.stringify(omitIdentity(right));
+}
+
+export function requireAudienceDerivationAuthority(
+  request: AudienceStateCommitRequest,
+): {
+  derivationAuthority: AudienceDerivationAuthorityMetadata;
+  factBasisLinks: readonly AudienceFactBasisLinkInput[];
+} {
+  const derivationAuthority = request.derivation_authority;
+  if (!derivationAuthority || !request.fact_basis_links) {
+    throw new Error('Audience commit requires exact v1.0.4 derivation authority and fact basis links');
+  }
+  const cutoff = new Date(derivationAuthority.audience_knowledge_cutoff_time);
+  if (!Number.isFinite(cutoff.getTime()) ||
+      cutoff.toISOString() !== derivationAuthority.audience_knowledge_cutoff_time) {
+    throw new Error('Audience commit requires a canonical UTC audience knowledge cutoff');
+  }
+  if (!derivationAuthority.derivation_manifest_hash.trim() ||
+      Object.keys(derivationAuthority.derivation_manifest).length === 0) {
+    throw new Error('Audience commit requires a non-empty exact derivation manifest identity');
+  }
+  const binding = derivationAuthority.schema_binding;
+  if (binding.run_config_id !== request.authority.run_config_id ||
+      binding.role !== 'CONTENT_INTELLIGENCE_AUDIENCE' ||
+      binding.schema_entity_type !== 'SchemaDefinition' ||
+      binding.schema_revision_id !== request.generation_config.schema_revision_id) {
+    throw new Error('Audience generation schema must equal the exact normalized role binding');
+  }
+  const unique = new Set<string>();
+  for (const link of request.fact_basis_links) {
+    // The empty JSON Pointer is the canonical path for a scalar surface root.
+    if (!link.audience_field.trim() || typeof link.fact_path !== 'string' || !link.fact_value_hash.trim() ||
+        !Number.isSafeInteger(link.ordinal) || link.ordinal < 0) {
+      throw new Error('Audience fact basis link has invalid path, hash, or ordinal');
+    }
+    const branch = link.basis_kind === 'TASK_AUDIENCE_CONTEXT'
+      ? `${link.task_id}\u0000${link.task_revision_id}\u0000${link.task_audience_context_path}`
+      : `${link.proposition_id}\u0000${link.epistemic_state_id}`;
+    const identity = `${link.audience_field}\u0000${link.fact_path}\u0000${link.basis_kind}\u0000${branch}`;
+    if (unique.has(identity)) throw new Error('Audience fact basis identity must be unique');
+    unique.add(identity);
+  }
+  return { derivationAuthority, factBasisLinks: request.fact_basis_links };
 }
 
 export class AudienceStatePersistenceService {
@@ -86,6 +161,9 @@ export class AudienceStatePersistenceService {
           'FINAL_FOR_DECISION audience with changed governance dependencies requires bound refresh evidence',
         );
       }
+    }
+    if (state.state_stage === 'FINAL_FOR_DECISION') {
+      requireAudienceDerivationAuthority(request);
     }
 
     const committed = await this.commitPort.commitAudienceState(request);

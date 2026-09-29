@@ -9,8 +9,13 @@ import {
   pgTable,
   text,
   integer,
+  timestamp,
   primaryKey,
+  foreignKey,
+  uniqueIndex,
+  check,
 } from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
 import {
   contentProgramRevisions,
   outcomeModels,
@@ -23,6 +28,7 @@ import {
   normativeRuleRevisions,
   decisionPolicyRevisions,
   attributionModelRevisions,
+  registeredControlPlaneRevisions,
 } from './control-plane.js';
 import {
   sourceArtifacts,
@@ -48,6 +54,7 @@ import {
   riskAssessments,
   rightsPolicies,
   rightsChecks,
+  audienceStates,
 } from './content.js';
 import {
   knowledgeManifests,
@@ -67,6 +74,8 @@ import {
   performanceObservations,
   replayabilityStatuses,
 } from './publication-measurement.js';
+import { stageExecutions } from './operational.js';
+import { objectRegistry } from './registries.js';
 
 // --- Control Plane Link Tables ---
 
@@ -1049,10 +1058,174 @@ export const runConfigSchemaRevisions = pgTable(
     run_config_id: text('run_config_id')
       .notNull()
       .references(() => runConfigs.run_config_id),
+    entity_type: text('entity_type').notNull(),
+    stable_id: text('stable_id').notNull(),
     revision_id: text('revision_id').notNull(),
   },
   (table) => [
-    primaryKey({ columns: [table.run_config_id, table.revision_id] }),
+    primaryKey({ columns: [
+      table.run_config_id, table.entity_type, table.stable_id, table.revision_id,
+    ] }),
+    foreignKey({
+      columns: [table.entity_type, table.stable_id, table.revision_id],
+      foreignColumns: [
+        registeredControlPlaneRevisions.entity_type,
+        registeredControlPlaneRevisions.stable_id,
+        registeredControlPlaneRevisions.revision_id,
+      ],
+    }),
+    check('ck_run_config_schema_member_type', sql`${table.entity_type} = 'SchemaDefinition'`),
+  ],
+);
+
+export const runConfigSchemaRoleBindings = pgTable(
+  'run_config_schema_role_bindings',
+  {
+    run_config_id: text('run_config_id')
+      .notNull()
+      .references(() => runConfigs.run_config_id),
+    role: text('role').notNull(),
+    schema_entity_type: text('schema_entity_type').notNull(),
+    schema_stable_id: text('schema_stable_id').notNull(),
+    schema_revision_id: text('schema_revision_id').notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.run_config_id, table.role] }),
+    uniqueIndex('uq_run_config_schema_role_exact').on(
+      table.run_config_id, table.role, table.schema_entity_type,
+      table.schema_stable_id, table.schema_revision_id,
+    ),
+    foreignKey({
+      columns: [
+        table.run_config_id, table.schema_entity_type,
+        table.schema_stable_id, table.schema_revision_id,
+      ],
+      foreignColumns: [
+        runConfigSchemaRevisions.run_config_id, runConfigSchemaRevisions.entity_type,
+        runConfigSchemaRevisions.stable_id, runConfigSchemaRevisions.revision_id,
+      ],
+    }),
+    check(
+      'ck_run_config_schema_role',
+      sql`${table.role} = 'CONTENT_INTELLIGENCE_AUDIENCE'`,
+    ),
+    check(
+      'ck_run_config_schema_role_entity_type',
+      sql`${table.schema_entity_type} = 'SchemaDefinition'`,
+    ),
+  ],
+);
+
+export const audienceDerivationAuthorities = pgTable(
+  'audience_derivation_authorities',
+  {
+    audience_state_id: text('audience_state_id')
+      .primaryKey()
+      .references(() => audienceStates.audience_state_id),
+    tenant_id: text('tenant_id').notNull(),
+    workspace_id: text('workspace_id'),
+    stage_execution_id: text('stage_execution_id')
+      .notNull()
+      .references(() => stageExecutions.stage_execution_id),
+    run_config_id: text('run_config_id').notNull(),
+    schema_role: text('schema_role').notNull(),
+    schema_entity_type: text('schema_entity_type').notNull(),
+    schema_stable_id: text('schema_stable_id').notNull(),
+    schema_revision_id: text('schema_revision_id').notNull(),
+    schema_object_id: text('schema_object_id')
+      .notNull()
+      .references(() => objectRegistry.object_id),
+    schema_payload_hash: text('schema_payload_hash').notNull(),
+    audience_knowledge_cutoff_time: timestamp('audience_knowledge_cutoff_time', {
+      withTimezone: true,
+    }).notNull(),
+    derivation_manifest: text('derivation_manifest').notNull(),
+    derivation_manifest_hash: text('derivation_manifest_hash').notNull(),
+    canonical_input_hash: text('canonical_input_hash').notNull(),
+    created_at: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('uq_audience_derivation_stage').on(table.stage_execution_id),
+    foreignKey({
+      columns: [
+        table.run_config_id, table.schema_role, table.schema_entity_type,
+        table.schema_stable_id, table.schema_revision_id,
+      ],
+      foreignColumns: [
+        runConfigSchemaRoleBindings.run_config_id, runConfigSchemaRoleBindings.role,
+        runConfigSchemaRoleBindings.schema_entity_type,
+        runConfigSchemaRoleBindings.schema_stable_id,
+        runConfigSchemaRoleBindings.schema_revision_id,
+      ],
+    }),
+    check(
+      'ck_audience_derivation_schema_role',
+      sql`${table.schema_role} = 'CONTENT_INTELLIGENCE_AUDIENCE'`,
+    ),
+    check(
+      'ck_audience_derivation_schema_type',
+      sql`${table.schema_entity_type} = 'SchemaDefinition'`,
+    ),
+  ],
+);
+
+export const audienceFactBasisLinks = pgTable(
+  'audience_fact_basis_links',
+  {
+    audience_state_id: text('audience_state_id')
+      .notNull()
+      .references(() => audienceStates.audience_state_id),
+    tenant_id: text('tenant_id').notNull(),
+    workspace_id: text('workspace_id'),
+    audience_field: text('audience_field').notNull(),
+    fact_path: text('fact_path').notNull(),
+    fact_value_hash: text('fact_value_hash').notNull(),
+    basis_kind: text('basis_kind').notNull(),
+    task_id: text('task_id'),
+    task_revision_id: text('task_revision_id').references(
+      () => taskContractRevisions.task_revision_id,
+    ),
+    task_audience_context_path: text('task_audience_context_path'),
+    task_audience_context_value_hash: text('task_audience_context_value_hash'),
+    proposition_id: text('proposition_id').references(() => propositions.proposition_id),
+    epistemic_state_id: text('epistemic_state_id').references(
+      () => epistemicStateVersions.epistemic_state_id,
+    ),
+    ordinal: integer('ordinal').notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [
+      table.audience_state_id, table.audience_field, table.fact_path, table.ordinal,
+    ] }),
+    uniqueIndex('uq_audience_fact_task_basis').on(
+      table.audience_state_id, table.audience_field, table.fact_path,
+      table.task_id, table.task_revision_id, table.task_audience_context_path,
+    ),
+    uniqueIndex('uq_audience_fact_epistemic_basis').on(
+      table.audience_state_id, table.audience_field, table.fact_path,
+      table.proposition_id, table.epistemic_state_id,
+    ),
+    check('ck_audience_fact_basis_ordinal', sql`${table.ordinal} >= 0`),
+    check(
+      'ck_audience_fact_basis_branch',
+      sql`(
+        ${table.basis_kind} = 'TASK_AUDIENCE_CONTEXT'
+        AND ${table.task_id} IS NOT NULL
+        AND ${table.task_revision_id} IS NOT NULL
+        AND ${table.task_audience_context_path} IS NOT NULL
+        AND ${table.task_audience_context_value_hash} IS NOT NULL
+        AND ${table.proposition_id} IS NULL
+        AND ${table.epistemic_state_id} IS NULL
+      ) OR (
+        ${table.basis_kind} = 'AUDIENCE_EPISTEMIC_STATE'
+        AND ${table.task_id} IS NULL
+        AND ${table.task_revision_id} IS NULL
+        AND ${table.task_audience_context_path} IS NULL
+        AND ${table.task_audience_context_value_hash} IS NULL
+        AND ${table.proposition_id} IS NOT NULL
+        AND ${table.epistemic_state_id} IS NOT NULL
+      )`,
+    ),
   ],
 );
 
@@ -1159,4 +1332,3 @@ export const replayabilityMissingRefs = pgTable(
     primaryKey({ columns: [table.decision_id, table.ordinal] }),
   ],
 );
-
