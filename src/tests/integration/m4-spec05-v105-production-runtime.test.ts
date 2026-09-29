@@ -357,6 +357,11 @@ describe("SPEC05 v1.0.5 production runtime integration (19 required cases)", () 
       };
       const identity = { nextAudienceStateId: () => "aud-" + randomUUID(), now: () => new Date() };
       const persistence = new AudienceStatePersistenceService(new PostgresAudienceStateCommitPort(tx, f.objectStore));
+      const claimPort: AudienceStageClaimPort = {
+        async claimStageExecution(params) {
+          return claimContentStageExecution(tx, params);
+        },
+      };
       const orchestrator = new DeriveAudienceState(
         defaultInputResolver,
         provider,
@@ -364,6 +369,7 @@ describe("SPEC05 v1.0.5 production runtime integration (19 required cases)", () 
         identity,
         pinsResolver,
         resolver,
+        claimPort,
       );
 
       await expect(
@@ -1990,4 +1996,216 @@ describe("SPEC05 v1.0.5 production runtime integration (19 required cases)", () 
       expect(linkRows[0].epistemic_state_id).toBe(f.epiId);
     });
   });
+  it("case 20: varying provider_context produces distinct canonical_input_hash under identical canonical records", async () => {
+    await withRollback(async (tx) => {
+      const f = await seedTestEnvironment(tx);
+      const resolver = new TrustedPreProviderResolver(tx, f.objectStore);
+
+      const resolvedA = await resolver.resolveCanonicalInputs({
+        tenant_id: f.tenantId,
+        workspace_id: f.workspaceId,
+        run_id: f.runId,
+        run_config_id: f.configId,
+        task_revision_id: f.taskRevId,
+        decision_cycle_id: f.cycleId,
+        provider_context: { industry: "technology", target_segment: "b2b" },
+      });
+
+      const resolvedB = await resolver.resolveCanonicalInputs({
+        tenant_id: f.tenantId,
+        workspace_id: f.workspaceId,
+        run_id: f.runId,
+        run_config_id: f.configId,
+        task_revision_id: f.taskRevId,
+        decision_cycle_id: f.cycleId,
+        provider_context: { industry: "healthcare", target_segment: "b2c" },
+      });
+
+      expect(resolvedA.canonicalInputHash).not.toBe(resolvedB.canonicalInputHash);
+    });
+  });
+
+  it("case 21: generic pin resolver forged/mismatched pins rejected before claim and provider", async () => {
+    await withRollback(async (tx) => {
+      const f = await seedTestEnvironment(tx);
+      const resolver = new TrustedPreProviderResolver(tx, f.objectStore);
+      let claimCalls = 0;
+      let providerCalls = 0;
+
+      const claimPort: AudienceStageClaimPort = {
+        async claimStageExecution() {
+          claimCalls++;
+          return { claimed: true, fencingToken: 1 };
+        },
+      };
+
+      const forgedPinsResolver = {
+        async resolve() {
+          return {
+            prompt_revision_id: "forged-prompt-id",
+            model_revision_id: "forged-model-id",
+            schema_revision_id: f.schemaRevId,
+            tool_revision_ids: [],
+          };
+        },
+      };
+
+      const provider: AudienceProposalProvider = {
+        async generateAudienceProposal() {
+          providerCalls++;
+          return {} as any;
+        },
+      };
+
+      const orchestrator = new DeriveAudienceState(
+        {
+          async resolveAuthorizedInputs() {
+            return {
+              provider_context: {},
+              material_governance_dependencies_changed: false,
+            };
+          },
+        },
+        provider,
+        new AudienceStatePersistenceService(new PostgresAudienceStateCommitPort(tx, f.objectStore)),
+        { nextAudienceStateId: () => "aud-" + randomUUID(), now: () => new Date() },
+        forgedPinsResolver,
+        resolver,
+        claimPort,
+      );
+
+      await expect(
+        orchestrator.execute({
+          request_identity: "tok-forged",
+          authority: {
+            tenant_id: f.tenantId,
+            workspace_id: f.workspaceId,
+            run_id: f.runId,
+            decision_cycle_id: f.cycleId,
+            stage_execution_id: f.stageId,
+            stage_name: "AUDIENCE_FINALIZE",
+            idempotency_key: "idem-" + randomUUID(),
+            lease_owner: "worker-1",
+            cycle_epoch: 1,
+            fencing_token: 1,
+            run_config_id: f.configId,
+          },
+          task_revision_id: f.taskRevId,
+          target_stage: "FINAL_FOR_DECISION",
+        }),
+      ).rejects.toMatchObject({ code: "PINNED_GENERATION_CONFIG_MISMATCH" });
+
+      expect(claimCalls).toBe(0);
+      expect(providerCalls).toBe(0);
+    });
+  });
+
+  it("case 22: FINAL commit with missing or empty audience_admission_hash fails closed", async () => {
+    await withRollback(async (tx) => {
+      const f = await seedTestEnvironment(tx);
+      const commitPort = new PostgresAudienceStateCommitPort(tx, f.objectStore);
+
+      const resolver = new TrustedPreProviderResolver(tx, f.objectStore);
+      const resolved = await resolver.resolveCanonicalInputs({
+        tenant_id: f.tenantId,
+        workspace_id: f.workspaceId,
+        run_id: f.runId,
+        run_config_id: f.configId,
+        task_revision_id: f.taskRevId,
+        decision_cycle_id: f.cycleId,
+      });
+
+      const idemKey = "idem-" + randomUUID();
+      await claimContentStageExecution(tx, {
+        tenantId: f.tenantId,
+        workspaceId: f.workspaceId,
+        runId: f.runId,
+        decisionCycleId: f.cycleId,
+        stageExecutionId: f.stageId,
+        stageName: "AUDIENCE_FINALIZE",
+        idempotencyKey: idemKey,
+        canonicalInputHash: resolved.canonicalInputHash,
+        leaseOwner: "worker-1",
+        cycleEpoch: 1,
+      });
+
+      const manifestBase = {
+        tenant_id: f.tenantId,
+        workspace_id: f.workspaceId,
+        run_config_id: f.configId,
+        task_id: f.taskId,
+        task_revision_id: f.taskRevId,
+        audience_knowledge_cutoff_time: resolved.trustedCutoff,
+        audience_valid_time: resolved.trustedCutoff,
+        canonical_input_hash: resolved.canonicalInputHash,
+        derivation_manifest_hash: "",
+        audience_schema_ref: resolved.preProviderCore.audience_schema_ref,
+        audience_schema_payload_hash: resolved.preProviderCore.audience_schema_payload_hash,
+        audience_schema_role_binding: resolved.schemaBinding,
+        eligible_task_audience_context: resolved.eligibleTaskAudienceContext,
+        eligible_epistemic_refs: resolved.eligibleEpistemicRefs,
+        fact_admissions: [],
+      };
+      const manifest: AudienceDerivationManifest = {
+        ...manifestBase,
+        derivation_manifest_hash: hashAudienceDerivationManifest(manifestBase),
+      };
+      const proposal = createAudienceProposal(f.taskRevId, "developers");
+
+      const commitRequestBase = {
+        authority: {
+          tenant_id: f.tenantId,
+          workspace_id: f.workspaceId,
+          run_id: f.runId,
+          decision_cycle_id: f.cycleId,
+          stage_execution_id: f.stageId,
+          stage_name: "AUDIENCE_FINALIZE" as const,
+          idempotency_key: idemKey,
+          lease_owner: "worker-1",
+          cycle_epoch: 1,
+          fencing_token: 1,
+          run_config_id: f.configId,
+          canonical_input_hash: resolved.canonicalInputHash,
+        },
+        request_identity: "req-" + randomUUID(),
+        generation_config: {
+          prompt_revision_id: "prompt-rev-1",
+          model_revision_id: "model-rev-1",
+          schema_revision_id: f.schemaRevId,
+          tool_revision_ids: [],
+        },
+        state: proposal,
+        material_governance_dependencies_changed: false,
+        derivation_authority: {
+          audience_knowledge_cutoff_time: resolved.trustedCutoff,
+          derivation_manifest: manifest,
+          derivation_manifest_hash: manifest.derivation_manifest_hash,
+          schema_binding: resolved.schemaBinding,
+        },
+        fact_basis_links: [],
+      };
+
+      // 1. Missing audience_admission_hash
+      await expect(
+        commitPort.commitAudienceState(commitRequestBase),
+      ).rejects.toMatchObject({ code: "AUDIENCE_ADMISSION_HASH_REQUIRED" });
+
+      // 2. Empty string audience_admission_hash
+      try {
+        await commitPort.commitAudienceState({
+          ...commitRequestBase,
+          state: { ...commitRequestBase.state, audience_state_id: "aud-" + randomUUID() },
+          audience_admission_hash: "",
+          derivation_authority: {
+            ...commitRequestBase.derivation_authority,
+            audience_admission_hash: "",
+          },
+        });
+        expect.unreachable("should have thrown");
+      } catch (err: any) {
+        expect(err.code).toBe("AUDIENCE_ADMISSION_HASH_REQUIRED");
+      }
+    });
+  });
 });
+

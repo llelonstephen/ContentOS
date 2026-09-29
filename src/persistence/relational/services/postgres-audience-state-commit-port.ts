@@ -1,3 +1,8 @@
+import {
+  CONTENT_CANONICAL_SERIALIZATION_VERSION,
+  hashCanonicalInput,
+} from "../../../domain/content/canonical-input-serialization.js";
+import { resolveCanonicalM4RunConfig } from "./content-runtime-run-config-resolver.js";
 import { randomUUID } from "node:crypto";
 import type { AudienceStateView } from "../../../domain/content/index.js";
 import type {
@@ -57,6 +62,12 @@ export class PostgresAudienceStateCommitPort implements AudienceStateAtomicCommi
 
   async commitAudienceState(request: AudienceStateCommitRequest): Promise<AudienceStateView> {
     const { authority, state } = request;
+    if (state.state_stage === "FINAL_FOR_DECISION" && !request.derivation_authority) {
+      throw new RegistryValidationError(
+        "AUDIENCE_DERIVATION_AUTHORITY_REQUIRED",
+        "FINAL_FOR_DECISION audience state commit requires derivation_authority.",
+      );
+    }
     const { derivationAuthority, factBasisLinks } = requireAudienceDerivationAuthority(request);
     const binding = derivationAuthority.schema_binding;
 
@@ -133,6 +144,47 @@ export class PostgresAudienceStateCommitPort implements AudienceStateAtomicCommi
           currentBinding,
           this.objectStore,
         );
+
+        const currentRunConfig = await resolveCanonicalM4RunConfig(sqlTx, {
+          tenant_id: authority.tenant_id,
+          workspace_id: (authority.workspace_id || null) as any,
+          run_id: authority.run_id,
+          decision_cycle_id: authority.decision_cycle_id,
+          run_config_id: authority.run_config_id,
+        });
+        if (currentRunConfig.schema_revision_id !== currentBinding.schema_revision_id) {
+          throw new RegistryValidationError(
+            "AUDIENCE_DERIVATION_AUTHORITY_STALE",
+            `RunConfig schema pin '${currentRunConfig.schema_revision_id}' does not match Audience schema role binding '${currentBinding.schema_revision_id}'.`,
+          );
+        }
+
+        const [configRow] = await sqlTx`
+          SELECT runtime_parameters FROM run_configs
+          WHERE run_config_id = ${authority.run_config_id}
+            AND tenant_id = ${authority.tenant_id}
+            AND workspace_id IS NOT DISTINCT FROM ${authority.workspace_id || null}
+        `;
+        const runtimeParamsCanonical = typeof configRow?.runtime_parameters === "string"
+          ? JSON.parse(configRow.runtime_parameters)
+          : (configRow?.runtime_parameters ?? {});
+        const runtimeParamsHash = hashCanonicalInput({
+          serialization_version: CONTENT_CANONICAL_SERIALIZATION_VERSION,
+          fields: [{ name: "runtime_parameters", kind: "VALUE", value: runtimeParamsCanonical }],
+        });
+
+        const schemaRefRows = await sqlTx`
+          SELECT revision_id FROM run_config_schema_revisions
+          WHERE run_config_id = ${authority.run_config_id}
+          ORDER BY revision_id ASC
+        `;
+        const schemaRevisionRefs = schemaRefRows.map((r: any) => String(r.revision_id));
+        if (schemaRevisionRefs.length > 0 && !schemaRevisionRefs.includes(currentBinding.schema_revision_id)) {
+          throw new RegistryValidationError(
+            "AUDIENCE_DERIVATION_AUTHORITY_STALE",
+            `Audience schema role binding revision '${currentBinding.schema_revision_id}' is not in RunConfig.schema_revision_refs`,
+          );
+        }
 
         // Step 4: Recover exact cutoff and Task basis
         const cutoff = derivationAuthority.audience_knowledge_cutoff_time;
@@ -253,10 +305,17 @@ export class PostgresAudienceStateCommitPort implements AudienceStateAtomicCommi
         const researchTraceRefs = traceRows.map((r: any) => String(r.research_trace_id));
 
         // Step 5: Reconstruct PRE_PROVIDER_MANIFEST_CORE
+        const derivationManifestRaw = derivationAuthority?.derivation_manifest as Record<string, unknown> | undefined;
+        const providerContextHash = (derivationManifestRaw?.provider_context_hash as string) ?? undefined;
+
         const reconstructedCore: PreProviderManifestCore = {
           tenant_id: authority.tenant_id,
           workspace_id: authority.workspace_id ?? null,
           run_config_id: authority.run_config_id,
+          generation_config: currentRunConfig,
+          run_config_runtime_parameters_hash: runtimeParamsHash,
+          schema_revision_refs: schemaRevisionRefs,
+          provider_context_hash: providerContextHash,
           task_id: String(taskRow.task_id),
           task_revision_id: String(taskRow.task_revision_id),
           audience_knowledge_cutoff_time: cutoff,
@@ -284,6 +343,19 @@ export class PostgresAudienceStateCommitPort implements AudienceStateAtomicCommi
 
         // Steps 8–19: For FINAL_FOR_DECISION, re-run full admission validation and compare audience_admission_hash
         if (state.state_stage === "FINAL_FOR_DECISION") {
+          const expectedAdmissionHash =
+            request.audience_admission_hash ?? derivationAuthority?.audience_admission_hash;
+          if (
+            !expectedAdmissionHash ||
+            typeof expectedAdmissionHash !== "string" ||
+            expectedAdmissionHash.trim().length === 0
+          ) {
+            throw new RegistryValidationError(
+              "AUDIENCE_ADMISSION_HASH_REQUIRED",
+              "Trusted precommit audience_admission_hash is mandatory and cannot be empty for FINAL_FOR_DECISION audience commit.",
+            );
+          }
+
           const basisSelections = factBasisLinks.map((link) => {
             return link.basis_kind === "TASK_AUDIENCE_CONTEXT"
               ? {
@@ -326,9 +398,7 @@ export class PostgresAudienceStateCommitPort implements AudienceStateAtomicCommi
 
           const revalidated = validateAudienceAdmission(admissionInput, admissionExpectation);
 
-          const expectedAdmissionHash =
-            request.audience_admission_hash ?? derivationAuthority.audience_admission_hash;
-          if (expectedAdmissionHash && revalidated.audience_admission_hash !== expectedAdmissionHash) {
+          if (revalidated.audience_admission_hash !== expectedAdmissionHash) {
             throw new RegistryValidationError(
               "AUDIENCE_ADMISSION_HASH_MISMATCH",
               `Commit-time recomputed audience_admission_hash '${revalidated.audience_admission_hash}' does not match precommit '${expectedAdmissionHash}'.`,

@@ -3,8 +3,13 @@ import { getDefaultObjectStore } from "../../objects/default-object-store.js";
 import { failContent } from "../../../domain/content/content-error-codes.js";
 import {
   hashPreProviderManifestCore,
+  hashProviderContext,
   type PreProviderManifestCore,
 } from "../../../domain/content/pre-provider-manifest-core.js";
+import {
+  CONTENT_CANONICAL_SERIALIZATION_VERSION,
+  hashCanonicalInput,
+} from "../../../domain/content/canonical-input-serialization.js";
 import {
   hashAudienceScalar,
   type JsonPrimitive,
@@ -38,31 +43,32 @@ export function extractEligibleTaskAudienceContext(
       result.push(...extractEligibleTaskAudienceContext(item, `${basePath}/${idx}`));
     });
   } else if (typeof context === "object") {
-    for (const key of Object.keys(context).sort()) {
-      const encodedKey = key.replace(/~/g, "~0").replace(/\//g, "~1");
-      result.push(
-        ...extractEligibleTaskAudienceContext(
-          (context as Record<string, JsonValue>)[key]!,
-          `${basePath}/${encodedKey}`,
-        ),
-      );
+    const keys = Object.keys(context).sort();
+    for (const key of keys) {
+      const val = (context as Record<string, JsonValue>)[key];
+      const childPath = `${basePath}/${key}`;
+      if (val !== null && typeof val === "object") {
+        result.push(...extractEligibleTaskAudienceContext(val, childPath));
+      } else {
+        result.push({
+          path: childPath,
+          value_hash: hashAudienceScalar(val as JsonPrimitive),
+        });
+      }
     }
-  } else {
-    result.push({
-      path: basePath,
-      value_hash: hashAudienceScalar(context as JsonPrimitive),
-    });
   }
   return result;
 }
 
-export interface TrustedPreProviderResolutionScope {
+export interface TrustedPreProviderResolverScope {
   readonly tenant_id: string;
   readonly workspace_id?: string | null;
   readonly run_id: string;
   readonly decision_cycle_id: string;
   readonly run_config_id: string;
   readonly task_revision_id: string;
+  readonly provider_context_hash?: string;
+  readonly provider_context?: JsonValue;
 }
 
 export interface TrustedPreProviderInputs {
@@ -72,8 +78,8 @@ export interface TrustedPreProviderInputs {
     readonly task_revision_id: string;
     readonly market: string;
     readonly jurisdiction: string;
-    readonly brand_id: string;
-    readonly product_id: string;
+    readonly brand_id?: string | null;
+    readonly product_id?: string | null;
     readonly audience_context: JsonValue;
   };
   readonly runConfig: CanonicalM4RunConfig;
@@ -96,7 +102,7 @@ export class TrustedPreProviderResolver {
   ) {}
 
   async resolveCanonicalInputs(
-    scope: TrustedPreProviderResolutionScope,
+    scope: TrustedPreProviderResolverScope,
     sqlTx?: any,
   ): Promise<TrustedPreProviderInputs> {
     const execute = async (tx: any): Promise<TrustedPreProviderInputs> => {
@@ -145,6 +151,47 @@ export class TrustedPreProviderResolver {
         schemaBinding,
         this.objectStore,
       );
+
+      // Verify RunConfig runtime parameters canonical hash
+      const [configRow] = await tx`
+        SELECT runtime_parameters FROM run_configs
+        WHERE run_config_id = ${scope.run_config_id}
+          AND tenant_id = ${scope.tenant_id}
+          AND workspace_id IS NOT DISTINCT FROM ${scope.workspace_id || null}
+      `;
+      const runtimeParamsCanonical = typeof configRow?.runtime_parameters === "string"
+        ? JSON.parse(configRow.runtime_parameters)
+        : (configRow?.runtime_parameters ?? {});
+      const runtimeParamsHash = hashCanonicalInput({
+        serialization_version: CONTENT_CANONICAL_SERIALIZATION_VERSION,
+        fields: [{ name: "runtime_parameters", kind: "VALUE", value: runtimeParamsCanonical }],
+      });
+
+      // Verify exact schema membership
+      const schemaRefRows = await tx`
+        SELECT revision_id FROM run_config_schema_revisions
+        WHERE run_config_id = ${scope.run_config_id}
+        ORDER BY revision_id ASC
+      `;
+      const schemaRevisionRefs = schemaRefRows.map((r: any) => String(r.revision_id));
+      if (schemaRevisionRefs.length > 0 && !schemaRevisionRefs.includes(schemaBinding.schema_revision_id)) {
+        failContent(
+          "AUDIENCE_PROVENANCE_INVALID",
+          `Audience schema role binding revision '${schemaBinding.schema_revision_id}' is not a member of RunConfig.schema_revision_refs`,
+        );
+      }
+      if (runConfig.schema_revision_id !== schemaBinding.schema_revision_id) {
+        failContent(
+          "AUDIENCE_PROVENANCE_INVALID",
+          `RunConfig schema pin '${runConfig.schema_revision_id}' does not match Audience schema role binding '${schemaBinding.schema_revision_id}'`,
+        );
+      }
+
+      const providerContextHash =
+        scope.provider_context_hash ??
+        (scope.provider_context !== undefined
+          ? hashProviderContext(scope.provider_context)
+          : undefined);
 
       const propRows = await tx`
         SELECT proposition.proposition_id, proposition.canonical_meaning, proposition.subject,
@@ -242,6 +289,10 @@ export class TrustedPreProviderResolver {
         tenant_id: scope.tenant_id,
         workspace_id: scope.workspace_id ?? null,
         run_config_id: scope.run_config_id,
+        generation_config: runConfig,
+        run_config_runtime_parameters_hash: runtimeParamsHash,
+        schema_revision_refs: schemaRevisionRefs,
+        provider_context_hash: providerContextHash,
         task_id: String(taskRow.task_id),
         task_revision_id: String(taskRow.task_revision_id),
         audience_knowledge_cutoff_time: trustedCutoff,

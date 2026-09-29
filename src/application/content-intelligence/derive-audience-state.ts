@@ -11,13 +11,19 @@ import {
   type JsonValue,
   type ValidatedAudienceAdmission,
 } from "../../domain/content/index.js";
+import {
+  hashProviderContext,
+} from "../../domain/content/pre-provider-manifest-core.js";
 import { isolateProviderJsonContext } from "./content-generation-context-builder.js";
 import type {
   AudienceCommitAuthority,
   AudienceGovernanceRefreshEvidence,
   AudienceStatePersistenceService,
 } from "../../persistence/relational/services/audience-state-persistence-service.js";
-import type { M4GenerationPinResolver } from "../../persistence/relational/services/content-runtime-run-config-resolver.js";
+import {
+  assertPinnedGenerationConfig,
+  type M4GenerationPinResolver,
+} from "../../persistence/relational/services/content-runtime-run-config-resolver.js";
 import type { PinnedGenerationConfig } from "./content-generation-context-builder.js";
 import type {
   TrustedPreProviderResolver,
@@ -126,15 +132,33 @@ export class DeriveAudienceState {
     private readonly identity: AudienceIdentityFactory,
     private readonly generationPins: M4GenerationPinResolver,
     private readonly trustedResolver: TrustedPreProviderResolver,
-    private readonly claimPort?: AudienceStageClaimPort,
-  ) {}
+    private readonly claimPort: AudienceStageClaimPort,
+  ) {
+    if (!this.claimPort) {
+      failContent(
+        "AUDIENCE_PROVENANCE_INVALID",
+        "StageExecution claim authority (claimPort) is mandatory for Audience derivation",
+      );
+    }
+  }
 
   async execute(request: AudienceDerivationRequest): Promise<AudienceStateView> {
+    if (!this.claimPort) {
+      failContent(
+        "AUDIENCE_PROVENANCE_INVALID",
+        "StageExecution claim authority (claimPort) is mandatory for Audience derivation",
+      );
+    }
+
     const resolved = await this.resolver.resolveAuthorizedInputs(request);
     const previous = resolved.previous_state;
     if (request.previous_audience_state_id !== previous?.audience_state_id) {
       throw new Error("Audience derivation did not resolve the exact requested previous state");
     }
+
+    // Isolate & normalize provider generation context and compute its deterministic hash
+    const providerContext = isolateProviderJsonContext(resolved.provider_context ?? {});
+    const providerContextHash = hashProviderContext(providerContext);
 
     // 1. Trusted canonical resolution
     const trusted = await this.trustedResolver.resolveCanonicalInputs({
@@ -144,6 +168,7 @@ export class DeriveAudienceState {
       decision_cycle_id: request.authority.decision_cycle_id,
       run_config_id: request.authority.run_config_id,
       task_revision_id: request.task_revision_id,
+      provider_context_hash: providerContextHash,
     });
 
     const authoritativeCanonicalInputHash = trusted.canonicalInputHash;
@@ -159,40 +184,37 @@ export class DeriveAudienceState {
       );
     }
 
-    // 2. Atomic StageExecution claim with exact hash BEFORE provider invocation
-    let effectiveFencingToken = request.authority.fencing_token;
-    if (this.claimPort) {
-      const claimResult = await this.claimPort.claimStageExecution({
-        tenantId: request.authority.tenant_id,
-        workspaceId: request.authority.workspace_id,
-        runId: request.authority.run_id,
-        decisionCycleId: request.authority.decision_cycle_id,
-        stageExecutionId: request.authority.stage_execution_id,
-        stageName: request.authority.stage_name,
-        idempotencyKey: request.authority.idempotency_key,
-        canonicalInputHash: authoritativeCanonicalInputHash,
-        leaseOwner: request.authority.lease_owner,
-        cycleEpoch: request.authority.cycle_epoch,
-      });
-      if (!claimResult.claimed) {
-        failContent(
-          "AUDIENCE_PROVENANCE_INVALID",
-          claimResult.reason ?? "StageExecution claim rejected",
-        );
-      }
-      effectiveFencingToken = claimResult.fencingToken;
+    // Verify generation pins before claim if generationPins resolver is provided
+    if (this.generationPins) {
+      const claimedPins = await this.generationPins.resolve(request.authority);
+      assertPinnedGenerationConfig(claimedPins, trusted.runConfig);
     }
 
-    // 3. Provider work (only reached by winning claimant)
-    const genericPins = await this.generationPins.resolve(request.authority);
-    const pins: PinnedGenerationConfig = {
-      ...genericPins,
-      schema_revision_id: trusted.schemaBinding.schema_revision_id,
-    };
+    // 2. Atomic StageExecution claim with exact hash BEFORE provider invocation
+    const claimResult = await this.claimPort.claimStageExecution({
+      tenantId: request.authority.tenant_id,
+      workspaceId: request.authority.workspace_id,
+      runId: request.authority.run_id,
+      decisionCycleId: request.authority.decision_cycle_id,
+      stageExecutionId: request.authority.stage_execution_id,
+      stageName: request.authority.stage_name,
+      idempotencyKey: request.authority.idempotency_key,
+      canonicalInputHash: authoritativeCanonicalInputHash,
+      leaseOwner: request.authority.lease_owner,
+      cycleEpoch: request.authority.cycle_epoch,
+    });
+    if (!claimResult.claimed) {
+      failContent(
+        "AUDIENCE_PROVENANCE_INVALID",
+        claimResult.reason ?? "StageExecution claim rejected",
+      );
+    }
+    const effectiveFencingToken = claimResult.fencingToken;
 
+    // 3. Provider work (only reached by winning claimant, uses exact already-trusted RunConfig pins)
     const envelope = await this.provider.generateAudienceProposal(
-      isolateProviderJsonContext(resolved.provider_context),
-      pins,
+      providerContext,
+      trusted.runConfig,
     );
     assertProviderEnvelope(envelope);
 
@@ -226,6 +248,7 @@ export class DeriveAudienceState {
       eligible_task_audience_context: trusted.eligibleTaskAudienceContext,
       eligible_epistemic_refs: trusted.eligibleEpistemicRefs,
       fact_admissions: [],
+      provider_context_hash: providerContextHash,
     };
     const derivationManifest: AudienceDerivationManifest = {
       ...manifestWithoutHash,
@@ -323,7 +346,7 @@ export class DeriveAudienceState {
       authority: commitAuthority,
       request_identity: request.request_identity,
       state,
-      generation_config: pins,
+      generation_config: trusted.runConfig,
       ...(previous ? { previous_state: previous } : {}),
       material_governance_dependencies_changed:
         resolved.material_governance_dependencies_changed,

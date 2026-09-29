@@ -10,7 +10,7 @@ import type {
   AudienceManifestTaskContextValue,
   AudienceSchemaRoleBinding,
 } from "./audience-admission-types.js";
-import type { ExactRevisionRef } from "./types.js";
+import type { ExactRevisionRef, JsonValue } from "./types.js";
 
 /**
  * Pre-provider derivation manifest core representing the deterministic
@@ -23,11 +23,24 @@ import type { ExactRevisionRef } from "./types.js";
  * - PRE_PROVIDER_MANIFEST_CORE is reconstructable, not a canonical entity.
  * - The hash field itself is excluded from its own hash input.
  * - Generated-leaf-specific post-provider admission identity belongs to audience_admission_hash.
+ * - All provider-visible material inputs (RunConfig pins, schema membership, runtime parameters, provider context) are fully bound.
  */
+export interface PreProviderManifestGenerationConfig {
+  readonly prompt_revision_id: string;
+  readonly model_revision_id: string;
+  readonly schema_revision_id: string;
+  readonly tool_revision_ids: readonly string[];
+  readonly retriever_revision_id?: string;
+  readonly evaluator_revision_id?: string;
+}
+
 export interface PreProviderManifestCore {
   readonly tenant_id: string;
   readonly workspace_id?: string | null;
   readonly run_config_id: string;
+  readonly generation_config?: PreProviderManifestGenerationConfig;
+  readonly run_config_runtime_parameters_hash?: string;
+  readonly schema_revision_refs?: readonly string[];
   readonly task_id: string;
   readonly task_revision_id: string;
   readonly audience_knowledge_cutoff_time: string;
@@ -38,6 +51,20 @@ export interface PreProviderManifestCore {
   readonly eligible_epistemic_refs: readonly AudienceManifestEpistemicRef[];
   readonly knowledge_gap_refs?: readonly string[];
   readonly research_trace_refs?: readonly string[];
+  readonly provider_context_hash?: string;
+}
+
+export function hashProviderContext(context: JsonValue): string {
+  return hashCanonicalInput({
+    serialization_version: CONTENT_CANONICAL_SERIALIZATION_VERSION,
+    fields: [
+      {
+        name: "provider_context",
+        kind: "VALUE",
+        value: context ?? {},
+      },
+    ],
+  });
 }
 
 export function buildPreProviderManifestCanonicalManifest(
@@ -47,6 +74,46 @@ export function buildPreProviderManifestCanonicalManifest(
     { name: "tenant_id", kind: "VALUE", value: core.tenant_id },
     { name: "workspace_id", kind: "VALUE", value: core.workspace_id ?? null },
     { name: "run_config_id", kind: "VALUE", value: core.run_config_id },
+  ];
+
+  if (core.generation_config) {
+    fields.push({
+      name: "generation_config",
+      kind: "VALUE",
+      value: {
+        prompt_revision_id: core.generation_config.prompt_revision_id,
+        model_revision_id: core.generation_config.model_revision_id,
+        tool_revision_ids: [...core.generation_config.tool_revision_ids],
+        schema_revision_id: core.generation_config.schema_revision_id,
+      },
+    });
+  }
+
+  if (core.run_config_runtime_parameters_hash) {
+    fields.push({
+      name: "run_config_runtime_parameters_hash",
+      kind: "VALUE",
+      value: core.run_config_runtime_parameters_hash,
+    });
+  }
+
+  if (core.schema_revision_refs && core.schema_revision_refs.length > 0) {
+    fields.push({
+      name: "schema_revision_refs",
+      kind: "SEMANTIC_SET",
+      value: [...core.schema_revision_refs],
+    });
+  }
+
+  if (core.provider_context_hash) {
+    fields.push({
+      name: "provider_context_hash",
+      kind: "VALUE",
+      value: core.provider_context_hash,
+    });
+  }
+
+  fields.push(
     { name: "task_id", kind: "VALUE", value: core.task_id },
     { name: "task_revision_id", kind: "VALUE", value: core.task_revision_id },
     {
@@ -84,7 +151,7 @@ export function buildPreProviderManifestCanonicalManifest(
         epistemic_state_id: item.epistemic_state_id,
       })),
     },
-  ];
+  );
 
   if (core.audience_schema_role_binding) {
     fields.push({

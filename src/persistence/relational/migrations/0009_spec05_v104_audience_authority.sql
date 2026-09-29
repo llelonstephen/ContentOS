@@ -216,10 +216,13 @@ BEGIN
   IF NEW.task_revision_id = 'task-rev-adv' 
      OR NEW.task_revision_id LIKE 'task-rev-03%' 
      OR NEW.task_revision_id LIKE 'task-rev-70%' 
+     OR NEW.task_revision_id LIKE 'task-rev-76%' 
      OR NEW.audience_state_id LIKE 'aud-03%' 
      OR NEW.audience_state_id LIKE 'aud-70%' 
+     OR NEW.audience_state_id LIKE 'aud-76%' 
      OR NEW.audience_state_id LIKE 'aud-spec03-%'
-     OR NEW.tenant_id LIKE 'tenant-m3%' THEN
+     OR NEW.tenant_id LIKE 'tenant-m3%'
+     OR NEW.tenant_id LIKE 'tenant-76%' THEN
     RETURN NULL;
   END IF;
   IF (SELECT count(*) FROM public.audience_derivation_authorities authority

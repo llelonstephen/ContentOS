@@ -1,3 +1,4 @@
+import { RegistryValidationError } from '../../../domain/services/registry-validator.js';
 import type { AudienceAdmissionEvidence } from '../../../domain/content/audience-admission-types.js';
 import {
   validateAudienceState,
@@ -168,6 +169,13 @@ export class AudienceStatePersistenceService {
     }
     if (state.state_stage === 'FINAL_FOR_DECISION') {
       requireAudienceDerivationAuthority(request);
+      const admissionHash = request.audience_admission_hash ?? request.derivation_authority?.audience_admission_hash;
+      if (!admissionHash || typeof admissionHash !== 'string' || admissionHash.trim().length === 0) {
+        throw new RegistryValidationError(
+          'AUDIENCE_ADMISSION_HASH_REQUIRED',
+          'FINAL_FOR_DECISION audience commit requires a non-empty audience_admission_hash',
+        );
+      }
     }
 
     const committed = await this.commitPort.commitAudienceState(request);
