@@ -18,7 +18,7 @@ export class PostgresContentCandidateCommitPort implements ContentCandidateAtomi
     const { authority, candidate } = request;
     const result = await executeContentRuntimeCommit(this.sql, {
       tenantId: authority.tenant_id, workspaceId: authority.workspace_id, runConfigId: authority.run_config_id,
-      ...(request.generation_config ? { generationConfig: request.generation_config } : {}),
+      generationAuthority: { kind: 'PROVIDER', generationConfig: request.generation_config },
       fencingContext: toStageFencingContext(authority),
       registryEntries: [{ entityType: 'ContentCandidate', entityId: candidate.candidate_id,
         tenantId: authority.tenant_id, workspaceId: authority.workspace_id }],

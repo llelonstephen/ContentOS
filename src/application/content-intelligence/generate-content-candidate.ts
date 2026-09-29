@@ -18,6 +18,10 @@ import type {
   CandidateCommitAuthority,
   ContentCandidatePersistenceService,
 } from '../../persistence/relational/services/content-candidate-persistence-service.js';
+import {
+  assertPinnedGenerationConfig,
+  type M4GenerationPinResolver,
+} from '../../persistence/relational/services/content-runtime-run-config-resolver.js';
 
 export interface CandidateGenerationRequest {
   readonly authority: CandidateCommitAuthority;
@@ -55,6 +59,7 @@ export class GenerateContentCandidate {
     private readonly provider: ContentIntelligenceProvider,
     private readonly persistence: ContentCandidatePersistenceService,
     private readonly identity: CandidateIdentityFactory,
+    private readonly generationPins: M4GenerationPinResolver,
   ) {}
 
   async execute(request: CandidateGenerationRequest): Promise<ContentCandidateView> {
@@ -70,6 +75,13 @@ export class GenerateContentCandidate {
     }
     validateGenerationContext(resolved.context_admission);
     assertPinnedProviderRequest(resolved.provider_request);
+    const pins = await this.generationPins.resolve(request.authority);
+    assertPinnedGenerationConfig({
+      prompt_revision_id: resolved.provider_request.prompt_revision_id,
+      model_revision_id: resolved.provider_request.model_revision_id,
+      tool_revision_ids: resolved.provider_request.tool_revision_ids,
+      schema_revision_id: resolved.provider_request.schema_revision_id,
+    }, pins);
     validateMeaningPreservation(resolved.meaning);
     const payload = await this.provider.generate(resolved.provider_request);
     if (!resolved.payload_is_valid(payload)) {
@@ -103,12 +115,7 @@ export class GenerateContentCandidate {
       architecture: resolved.architecture,
       ...(resolved.parent_candidate ? { parent_candidate: resolved.parent_candidate } : {}),
       payload_is_valid: ({ content_payload }) => resolved.payload_is_valid(content_payload),
-      generation_config: {
-        prompt_revision_id: resolved.provider_request.prompt_revision_id,
-        model_revision_id: resolved.provider_request.model_revision_id,
-        tool_revision_ids: resolved.provider_request.tool_revision_ids,
-        schema_revision_id: resolved.provider_request.schema_revision_id,
-      },
+      generation_config: pins,
     });
   }
 }

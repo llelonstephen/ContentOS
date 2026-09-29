@@ -161,7 +161,6 @@ describe('M4 architecture and candidate boundaries', () => {
         },
         channel: { format: 'article', supported_formats: ['article'], permits_nonlinear_units: false },
         context: { admission: context(), values: [{}] },
-        decision_boundary: new Date('2026-09-29T00:00:00Z'),
       }) },
       { generateArchitectureProposal: vi.fn().mockResolvedValue({
         units: [{ ...unit, proposition_ids: ['prop-1', 'prop-2'] }],
@@ -179,6 +178,8 @@ describe('M4 architecture and candidate boundaries', () => {
         changes_behavioral_logic: false, changes_risk: false,
         changes_governance_dependency: false,
       }]) } as any,
+      { resolve: vi.fn().mockResolvedValue({ prompt_revision_id: 'prompt-1',
+        model_revision_id: 'model-1', schema_revision_id: 'schema-1', tool_revision_ids: ['tool-1'] }) } as any,
     );
     await expect(generator.execute({
       authority: {

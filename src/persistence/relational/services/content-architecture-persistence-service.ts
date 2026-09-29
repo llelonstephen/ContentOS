@@ -12,6 +12,7 @@ import {
   assertContentRuntimeCommitAuthority,
   type ContentRuntimeCommitAuthority,
 } from './content-runtime-authority.js';
+import type { PinnedGenerationConfig } from '../../../application/content-intelligence/content-generation-context-builder.js';
 
 export interface ArchitectureCommitAuthority extends ContentRuntimeCommitAuthority {}
 
@@ -21,6 +22,7 @@ export interface ContentArchitectureCommitRequest {
   readonly architecture_slot: string;
   readonly architecture: ContentArchitectureView;
   readonly units: readonly ContentUnitView[];
+  readonly generation_config: PinnedGenerationConfig;
   readonly strategy: StrategyHypothesisView;
   readonly gate_result: StrategyGateResult;
   readonly channel: ChannelArchitectureCapability;
@@ -47,6 +49,7 @@ export class ContentArchitecturePersistenceService {
   }> {
     const { authority, architecture, strategy, units } = request;
     assertContentRuntimeCommitAuthority(authority, 'ARCHITECTURE_GENERATE');
+    if (!request.generation_config) throw new Error('Architecture provider commit requires exact generation_config');
     for (const [name, value] of Object.entries({
       tenant_id: authority.tenant_id, workspace_id: authority.workspace_id,
       run_id: authority.run_id, decision_cycle_id: authority.decision_cycle_id,

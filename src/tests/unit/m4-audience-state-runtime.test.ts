@@ -22,6 +22,8 @@ const authority = {
   idempotency_key: 'audience-request-1', run_config_id: 'config-1',
   canonical_input_hash: 'hash-1',
 };
+const pins = { prompt_revision_id: 'prompt-1', model_revision_id: 'model-1',
+  schema_revision_id: 'schema-1', tool_revision_ids: ['tool-1'] };
 
 describe('M4 audience runtime', () => {
   it('generates before atomic commit and binds governance refresh to the new final state', async () => {
@@ -53,6 +55,7 @@ describe('M4 audience runtime', () => {
       } },
       new AudienceStatePersistenceService(port),
       { nextAudienceStateId: () => 'aud-final', now: () => new Date('2026-09-28T01:00:00Z') },
+      { async resolve() { order.push('pins'); return pins; } },
     );
 
     const state = await service.execute({
@@ -60,7 +63,7 @@ describe('M4 audience runtime', () => {
       target_stage: 'FINAL_FOR_DECISION', previous_audience_state_id: 'aud-refined',
     });
     expect(state.audience_state_id).toBe('aud-final');
-    expect(order).toEqual(['resolve', 'provider', 'commit']);
+    expect(order).toEqual(['resolve', 'pins', 'provider', 'commit']);
   });
 
   it('rejects final admission when changed governance dependencies lack refresh evidence', async () => {
@@ -70,6 +73,7 @@ describe('M4 audience runtime', () => {
     await expect(persistence.commit({
       authority, request_identity: 'audience-request-2', previous_state: previous,
       material_governance_dependencies_changed: true,
+      generation_config: pins,
       state: { ...previous, audience_state_id: 'aud-final', state_stage: 'FINAL_FOR_DECISION' },
     })).rejects.toThrow(/refresh evidence/);
   });
@@ -81,6 +85,7 @@ describe('M4 audience runtime', () => {
     await expect(persistence.commit({
       authority, request_identity: 'audience-request-3', previous_state: previous,
       material_governance_dependencies_changed: false,
+      generation_config: pins,
       state: { ...previous, state_stage: 'FINAL_FOR_DECISION' },
     })).rejects.toThrow(/new immutable ID/);
   });

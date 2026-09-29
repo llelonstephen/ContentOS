@@ -6,6 +6,19 @@ export interface CanonicalM4RunConfig extends PinnedGenerationConfig {
   readonly run_config_id: string;
 }
 
+/** Resolves provider pins before an M4 model call; the caller cannot supply them. */
+export interface M4GenerationPinResolver {
+  resolve(authority: ContentRuntimeCommitAuthority): Promise<CanonicalM4RunConfig>;
+}
+
+export class PostgresM4GenerationPinResolver implements M4GenerationPinResolver {
+  constructor(private readonly sql: any) {}
+
+  resolve(authority: ContentRuntimeCommitAuthority): Promise<CanonicalM4RunConfig> {
+    return resolveCanonicalM4RunConfig(this.sql, authority);
+  }
+}
+
 function parsePinnedConfig(value: unknown): PinnedGenerationConfig {
   const root = typeof value === 'string' ? JSON.parse(value) : value;
   const params = (root as { content_intelligence?: unknown })?.content_intelligence ?? root;

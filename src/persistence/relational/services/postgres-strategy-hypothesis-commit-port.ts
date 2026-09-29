@@ -27,6 +27,7 @@ export class PostgresStrategyHypothesisCommitPort implements StrategyHypothesisA
     const { authority, strategy } = request;
     const result = await executeContentRuntimeCommit(this.sql, {
       tenantId: authority.tenant_id, workspaceId: authority.workspace_id, runConfigId: authority.run_config_id,
+      generationAuthority: { kind: 'PROVIDER', generationConfig: request.generation_config },
       fencingContext: toStageFencingContext(authority),
       registryEntries: [{ entityType: 'StrategyHypothesis', entityId: strategy.strategy_id,
         tenantId: authority.tenant_id, workspaceId: authority.workspace_id }],

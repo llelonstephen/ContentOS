@@ -6,6 +6,7 @@ import {
   assertContentRuntimeCommitAuthority,
   type ContentRuntimeCommitAuthority,
 } from './content-runtime-authority.js';
+import type { PinnedGenerationConfig } from '../../../application/content-intelligence/content-generation-context-builder.js';
 
 export interface AudienceCommitAuthority extends ContentRuntimeCommitAuthority {}
 
@@ -19,6 +20,7 @@ export interface AudienceStateCommitRequest {
   readonly authority: AudienceCommitAuthority;
   readonly request_identity: string;
   readonly state: AudienceStateView;
+  readonly generation_config: PinnedGenerationConfig;
   readonly previous_state?: AudienceStateView;
   readonly material_governance_dependencies_changed: boolean;
   readonly governance_refresh?: AudienceGovernanceRefreshEvidence;
@@ -52,6 +54,7 @@ export class AudienceStatePersistenceService {
       FINAL_FOR_DECISION: 'AUDIENCE_FINALIZE',
     } as const;
     assertContentRuntimeCommitAuthority(authority, expectedStage[state.state_stage]);
+    if (!request.generation_config) throw new Error('Audience provider commit requires exact generation_config');
     for (const [name, value] of Object.entries({
       tenant_id: authority.tenant_id,
       workspace_id: authority.workspace_id,

@@ -13,6 +13,8 @@ import {
 import { isolateProviderJsonContext } from './content-generation-context-builder.js';
 import type { MinimizedArchitectureContext } from '../../persistence/relational/services/architecture-context-reference-resolver.js';
 import type { CanonicalSupplementalPropositionResolver } from '../../persistence/relational/services/canonical-supplemental-proposition-resolver.js';
+import type { M4GenerationPinResolver } from '../../persistence/relational/services/content-runtime-run-config-resolver.js';
+import type { PinnedGenerationConfig } from './content-generation-context-builder.js';
 import type {
   ArchitectureCommitAuthority,
   ContentArchitecturePersistenceService,
@@ -32,7 +34,6 @@ export interface ArchitectureGenerationInput {
   readonly gate_result: StrategyGateResult;
   readonly channel: ChannelArchitectureCapability;
   readonly context: MinimizedArchitectureContext;
-  readonly decision_boundary: Date;
 }
 
 export interface ArchitectureInputResolver {
@@ -52,7 +53,7 @@ export interface ArchitectureProposalProvider {
       readonly attribution: GenerationContextAdmission['items'][number]['attribution'];
     }[];
     readonly values: readonly JsonValue[];
-  }): Promise<ArchitectureProposal>;
+  }, pins: PinnedGenerationConfig): Promise<ArchitectureProposal>;
 }
 
 export interface ArchitectureIdentityFactory {
@@ -68,6 +69,7 @@ export class GenerateContentArchitecture {
     private readonly persistence: ContentArchitecturePersistenceService,
     private readonly identity: ArchitectureIdentityFactory,
     private readonly supplementalProofs: CanonicalSupplementalPropositionResolver,
+    private readonly generationPins: M4GenerationPinResolver,
   ) {}
 
   async execute(request: ArchitectureGenerationRequest): Promise<ContentArchitectureView> {
@@ -79,6 +81,7 @@ export class GenerateContentArchitecture {
     if (resolved.context.values.length !== resolved.context.admission.items.length) {
       throw new Error('Architecture context values do not match the admitted exact-reference manifest');
     }
+    const pins = await this.generationPins.resolve(request.authority);
     const proposal = await this.provider.generateArchitectureProposal({
       manifest: resolved.context.admission.items.map((item) => ({
         context_item_id: item.context_item_id,
@@ -86,7 +89,7 @@ export class GenerateContentArchitecture {
         attribution: item.attribution,
       })),
       values: resolved.context.values.map(isolateProviderJsonContext),
-    });
+    }, pins);
     const createdAt = this.identity.now();
     const units: ContentUnitView[] = proposal.units.map((unit) => ({
       ...unit,
@@ -97,10 +100,8 @@ export class GenerateContentArchitecture {
     const supplementalIds = [...new Set(units.flatMap(({ proposition_ids }) => proposition_ids)
       .filter((id) => !strategyPropositions.has(id)))];
     const admittedSupplemental = await this.supplementalProofs.resolve({
-      tenant_id: request.authority.tenant_id,
-      workspace_id: request.authority.workspace_id,
       task_revision_id: request.task_revision_id,
-      decision_boundary: resolved.decision_boundary,
+      authority: request.authority,
       audience: resolved.audience,
       strategy: resolved.strategy,
       proposition_ids: supplementalIds,
@@ -126,6 +127,7 @@ export class GenerateContentArchitecture {
       architecture_slot: request.architecture_slot,
       architecture,
       units,
+      generation_config: pins,
       strategy: resolved.strategy,
       gate_result: resolved.gate_result,
       channel: resolved.channel,

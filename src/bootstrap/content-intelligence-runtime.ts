@@ -10,6 +10,7 @@ import { PostgresStrategyGateCommitPort } from '../persistence/relational/servic
 import { PostgresStrategyHypothesisCommitPort } from '../persistence/relational/services/postgres-strategy-hypothesis-commit-port.js';
 import { StrategyHypothesisPersistenceService } from '../persistence/relational/services/strategy-hypothesis-persistence-service.js';
 import { CanonicalSupplementalPropositionResolver } from '../persistence/relational/services/canonical-supplemental-proposition-resolver.js';
+import { PostgresM4GenerationPinResolver } from '../persistence/relational/services/content-runtime-run-config-resolver.js';
 
 /** Persistence-only M4 bundle. Provider execution remains an explicit caller-owned boundary. */
 export interface ContentIntelligencePersistence {
@@ -19,6 +20,7 @@ export interface ContentIntelligencePersistence {
   readonly architecture: ContentArchitecturePersistenceService;
   readonly candidate: ContentCandidatePersistenceService;
   readonly supplementalProofs: CanonicalSupplementalPropositionResolver;
+  readonly generationPins: PostgresM4GenerationPinResolver;
 }
 
 export function createContentIntelligencePersistence(
@@ -37,5 +39,6 @@ export function createContentIntelligencePersistence(
       new PostgresContentCandidateCommitPort(sql),
     ),
     supplementalProofs: new CanonicalSupplementalPropositionResolver(sql),
+    generationPins: new PostgresM4GenerationPinResolver(sql),
   };
 }

@@ -167,6 +167,10 @@ describe('M4 persistence fencing and atomicity', () => {
     const insertGraph = vi.fn();
     const result = await executeContentRuntimeCommit(sql, {
       tenantId: 'tenant-1', workspaceId: 'workspace-1', runConfigId: 'config-1', fencingContext: fixture.context,
+      generationAuthority: { kind: 'PROVIDER', generationConfig: {
+        prompt_revision_id: 'prompt-1', model_revision_id: 'model-1',
+        schema_revision_id: 'schema-1', tool_revision_ids: ['tool-1'],
+      } },
       registryEntries: [],
       auditEvent: {
         auditEventId: 'audit-retry', tenantId: 'tenant-1', workspaceId: 'workspace-1',
@@ -187,6 +191,10 @@ describe('M4 persistence fencing and atomicity', () => {
     const { sql, queries } = createFakeSql(fixture.rows);
     const result = await executeContentRuntimeCommit(sql, {
       tenantId: 'tenant-1', workspaceId: 'workspace-1', runConfigId: 'config-1', fencingContext: fixture.context,
+      generationAuthority: { kind: 'PROVIDER', generationConfig: {
+        prompt_revision_id: 'prompt-1', model_revision_id: 'model-1',
+        schema_revision_id: 'schema-1', tool_revision_ids: ['tool-1'],
+      } },
       registryEntries: [{
         entityType: 'AudienceState', entityId: 'aud-1', tenantId: 'tenant-1',
         workspaceId: 'workspace-1',

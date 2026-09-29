@@ -33,7 +33,9 @@ export interface ContentRuntimeCommitRequest {
   tenantId: string;
   workspaceId?: string | null;
   runConfigId: string;
-  generationConfig?: Omit<CanonicalM4RunConfig, 'run_config_id'>;
+  generationAuthority:
+    | { readonly kind: 'PROVIDER'; readonly generationConfig: Omit<CanonicalM4RunConfig, 'run_config_id'> }
+    | { readonly kind: 'DETERMINISTIC_GATE' };
   fencingContext: StageFencingContext;
   registryEntries: readonly ContentRuntimeRegistryEntry[];
   auditEvent: ContentRuntimeAuditEvent;
@@ -100,7 +102,14 @@ export async function executeContentRuntimeCommit<T>(
       decision_cycle_id: request.fencingContext.decisionCycleId!,
       run_config_id: request.runConfigId,
     });
-    if (request.generationConfig) assertPinnedGenerationConfig(request.generationConfig, canonicalConfig);
+    if (request.generationAuthority.kind === 'PROVIDER') {
+      assertPinnedGenerationConfig(request.generationAuthority.generationConfig, canonicalConfig);
+    } else if (request.fencingContext.stageName !== 'STRATEGY_GATE') {
+      throw new RegistryValidationError(
+        'M4_PROVIDER_PIN_PROOF_REQUIRED',
+        'Only deterministic Strategy Gate commits may omit a provider generation pin proof.',
+      );
+    }
 
     if (verified.stageStatus === 'COMPLETED') {
       const outputRefs = await loadStageExecutionOutputRefs(
@@ -126,7 +135,10 @@ export async function executeContentRuntimeCommit<T>(
         ref,
       );
     }
-    await completeContentStageExecution(sqlTx, request.fencingContext, graph.outputRefs);
+    await completeContentStageExecution(sqlTx, request.fencingContext, {
+      tenantId: request.tenantId,
+      workspaceId: request.workspaceId,
+    }, graph.outputRefs);
     await writeContentRuntimeAuditEvent(sqlTx, request.auditEvent);
     const outboxEventIds = await writeContentRuntimeOutboxEvents(sqlTx, request.outboxEvents);
     return {

@@ -10,6 +10,8 @@ import type {
   AudienceGovernanceRefreshEvidence,
   AudienceStatePersistenceService,
 } from '../../persistence/relational/services/audience-state-persistence-service.js';
+import type { M4GenerationPinResolver } from '../../persistence/relational/services/content-runtime-run-config-resolver.js';
+import type { PinnedGenerationConfig } from './content-generation-context-builder.js';
 
 export type AudienceStateProposal = Omit<
   AudienceStateView,
@@ -38,7 +40,7 @@ export interface AudienceDerivationInputResolver {
 }
 
 export interface AudienceProposalProvider {
-  generateAudienceProposal(context: unknown): Promise<AudienceStateProposal>;
+  generateAudienceProposal(context: unknown, pins: PinnedGenerationConfig): Promise<AudienceStateProposal>;
 }
 
 export interface AudienceIdentityFactory {
@@ -52,6 +54,7 @@ export class DeriveAudienceState {
     private readonly provider: AudienceProposalProvider,
     private readonly persistence: AudienceStatePersistenceService,
     private readonly identity: AudienceIdentityFactory,
+    private readonly generationPins: M4GenerationPinResolver,
   ) {}
 
   async execute(request: AudienceDerivationRequest): Promise<AudienceStateView> {
@@ -62,8 +65,9 @@ export class DeriveAudienceState {
     }
 
     // Provider work deliberately completes before the atomic persistence call.
+    const pins = await this.generationPins.resolve(request.authority);
     const proposal = await this.provider.generateAudienceProposal(
-      isolateProviderJsonContext(resolved.provider_context),
+      isolateProviderJsonContext(resolved.provider_context), pins,
     );
     const state: AudienceStateView = {
       ...proposal,
@@ -82,6 +86,7 @@ export class DeriveAudienceState {
       authority: request.authority,
       request_identity: request.request_identity,
       state,
+      generation_config: pins,
       ...(previous ? { previous_state: previous } : {}),
       material_governance_dependencies_changed:
         resolved.material_governance_dependencies_changed,

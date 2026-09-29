@@ -21,7 +21,7 @@ export interface ContentCandidateCommitRequest {
   readonly architecture: ContentArchitectureView;
   readonly parent_candidate?: ContentCandidateView;
   readonly payload_is_valid: (candidate: ContentCandidateView) => boolean;
-  readonly generation_config?: PinnedGenerationConfig;
+  readonly generation_config: PinnedGenerationConfig;
 }
 
 export interface ContentCandidateAtomicCommitPort {
@@ -36,6 +36,7 @@ export class ContentCandidatePersistenceService {
       request.authority,
       request.parent_candidate ? 'CANDIDATE_REWRITE' : 'CANDIDATE_GENERATE',
     );
+    if (!request.generation_config) throw new Error('Candidate provider commit requires exact generation_config');
     if (!request.variant_slot.trim() || !request.request_identity.trim()) {
       throw new Error('Candidate commit requires an intentional variant slot and request identity');
     }

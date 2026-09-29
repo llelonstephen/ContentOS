@@ -11,6 +11,8 @@ import type {
   StrategyCommitAuthority,
   StrategyHypothesisPersistenceService,
 } from '../../persistence/relational/services/strategy-hypothesis-persistence-service.js';
+import type { M4GenerationPinResolver } from '../../persistence/relational/services/content-runtime-run-config-resolver.js';
+import type { PinnedGenerationConfig } from './content-generation-context-builder.js';
 
 export type StrategyHypothesisProposal = Omit<
   StrategyHypothesisView,
@@ -43,7 +45,7 @@ export interface StrategyGenerationInputResolver {
 }
 
 export interface StrategyProposalProvider {
-  generateStrategyProposal(context: unknown): Promise<StrategyProposalEnvelope>;
+  generateStrategyProposal(context: unknown, pins: PinnedGenerationConfig): Promise<StrategyProposalEnvelope>;
 }
 
 export interface StrategyIdentityFactory {
@@ -57,6 +59,7 @@ export class GenerateStrategyHypothesis {
     private readonly provider: StrategyProposalProvider,
     private readonly persistence: StrategyHypothesisPersistenceService,
     private readonly identity: StrategyIdentityFactory,
+    private readonly generationPins: M4GenerationPinResolver,
   ) {}
 
   async execute(request: StrategyGenerationRequest): Promise<StrategyHypothesisView> {
@@ -70,8 +73,9 @@ export class GenerateStrategyHypothesis {
     assertFinalAudienceForTask(resolved.audience, request.task_revision_id);
 
     // Model/provider execution happens before the short atomic commit boundary.
+    const pins = await this.generationPins.resolve(request.authority);
     const proposal = await this.provider.generateStrategyProposal(
-      isolateProviderJsonContext(resolved.provider_context),
+      isolateProviderJsonContext(resolved.provider_context), pins,
     );
     const strategy: StrategyHypothesisView = {
       ...proposal.strategy,
@@ -92,6 +96,7 @@ export class GenerateStrategyHypothesis {
       request_identity: request.request_identity,
       strategy_slot: request.strategy_slot,
       strategy,
+      generation_config: pins,
       audience: resolved.audience,
       available_proposition_ids: resolved.available_proposition_ids,
       factual_bases: proposal.factual_bases,

@@ -8,6 +8,7 @@ import {
   assertContentRuntimeCommitAuthority,
   type ContentRuntimeCommitAuthority,
 } from './content-runtime-authority.js';
+import type { PinnedGenerationConfig } from '../../../application/content-intelligence/content-generation-context-builder.js';
 
 export interface StrategyCommitAuthority extends ContentRuntimeCommitAuthority {}
 
@@ -16,6 +17,7 @@ export interface StrategyHypothesisCommitRequest {
   readonly request_identity: string;
   readonly strategy_slot: string;
   readonly strategy: StrategyHypothesisView;
+  readonly generation_config: PinnedGenerationConfig;
   readonly audience: AudienceStateView;
   readonly available_proposition_ids: readonly string[];
   readonly factual_bases: readonly StrategyFactualBasis[];
@@ -64,6 +66,7 @@ export class StrategyHypothesisPersistenceService {
   ): Promise<StrategyHypothesisView> {
     const { authority, strategy } = request;
     assertContentRuntimeCommitAuthority(authority, 'STRATEGY_GENERATE');
+    if (!request.generation_config) throw new Error('Strategy provider commit requires exact generation_config');
     for (const [name, value] of Object.entries({
       tenant_id: authority.tenant_id,
       workspace_id: authority.workspace_id,

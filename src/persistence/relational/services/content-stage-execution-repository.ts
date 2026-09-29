@@ -38,6 +38,7 @@ export async function loadStageExecutionOutputRefs(
 export async function completeContentStageExecution(
   sqlTx: any,
   context: StageFencingContext,
+  scope: { tenantId: string; workspaceId?: string | null },
   outputRefs: readonly StageExecutionOutputRef[],
 ): Promise<void> {
   const ordinals = new Set<number>();
@@ -68,7 +69,9 @@ export async function completeContentStageExecution(
   }
   const [result] = await sqlTx`
     SELECT public.complete_m4_stage_execution(
-      ${context.stageExecutionId}, ${context.fencingToken},
+      ${context.stageExecutionId}, ${scope.tenantId}, ${scope.workspaceId ?? null},
+      ${context.runId}, ${context.decisionCycleId}, ${context.cycleEpoch},
+      ${context.stageName}, ${context.leaseOwner}, ${context.fencingToken},
       ${context.idempotencyKey}, ${context.canonicalInputHash}
     ) AS completed
   `;

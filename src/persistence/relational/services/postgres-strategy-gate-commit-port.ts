@@ -17,6 +17,7 @@ export class PostgresStrategyGateCommitPort implements StrategyGateAtomicCommitP
     const { authority, result } = request;
     await executeContentRuntimeCommit(this.sql, {
       tenantId: authority.tenant_id, workspaceId: authority.workspace_id, runConfigId: authority.run_config_id,
+      generationAuthority: { kind: 'DETERMINISTIC_GATE' },
       fencingContext: toStageFencingContext(authority), registryEntries: [],
       auditEvent: { auditEventId: randomUUID(), tenantId: authority.tenant_id,
         workspaceId: authority.workspace_id, eventType: 'M4_STRATEGY_GATE_COMPLETED',

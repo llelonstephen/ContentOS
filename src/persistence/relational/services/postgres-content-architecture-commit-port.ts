@@ -48,6 +48,7 @@ export class PostgresContentArchitectureCommitPort implements ContentArchitectur
     ];
     const result = await executeContentRuntimeCommit(this.sql, {
       tenantId: authority.tenant_id, workspaceId: authority.workspace_id, runConfigId: authority.run_config_id,
+      generationAuthority: { kind: 'PROVIDER', generationConfig: request.generation_config },
       fencingContext: toStageFencingContext(authority), registryEntries: entries,
       auditEvent: { auditEventId: randomUUID(), tenantId: authority.tenant_id,
         workspaceId: authority.workspace_id, eventType: 'M4_ARCHITECTURE_COMMITTED',
