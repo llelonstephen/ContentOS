@@ -114,20 +114,17 @@ export async function claimContentStageExecution(
   const leaseMs = params.leaseDurationMs ?? 300000;
   const targetWorkspaceId = params.workspaceId ?? null;
 
-  // 1. Close run / cycle scope before stage claim
+  // 1. Close run / cycle scope before stage claim: tenant/workspace-scoped lookups
   const [run] = await sqlTx`
     SELECT run_id, tenant_id, workspace_id, status, current_decision_cycle_id
-    FROM runs WHERE run_id = ${params.runId} FOR UPDATE
+    FROM runs
+    WHERE run_id = ${params.runId}
+      AND tenant_id = ${params.tenantId}
+      AND workspace_id IS NOT DISTINCT FROM ${targetWorkspaceId}
+    FOR UPDATE
   `;
   if (!run) {
-    throw new RegistryValidationError("RUN_NOT_FOUND", `Run '${params.runId}' does not exist.`);
-  }
-  if (run.tenant_id !== params.tenantId) {
-    throw new RegistryValidationError("TENANT_ISOLATION_VIOLATION", "Run tenant mismatch.");
-  }
-  const runWorkspaceId = run.workspace_id ?? null;
-  if (runWorkspaceId !== targetWorkspaceId) {
-    throw new RegistryValidationError("WORKSPACE_ISOLATION_VIOLATION", "Run workspace mismatch.");
+    throw new RegistryValidationError("RUN_NOT_FOUND", `Run '${params.runId}' does not exist in authorized scope.`);
   }
   if (run.status !== "RUNNING") {
     throw new RegistryValidationError("STALE_WORKER_COMMIT_REJECTED", `Run '${params.runId}' is '${run.status}', not RUNNING.`);
@@ -138,20 +135,15 @@ export async function claimContentStageExecution(
 
   const [cycle] = await sqlTx`
     SELECT decision_cycle_id, tenant_id, workspace_id, run_id, status, fencing_epoch, superseded_by_cycle_id
-    FROM decision_cycles WHERE decision_cycle_id = ${params.decisionCycleId} FOR UPDATE
+    FROM decision_cycles
+    WHERE decision_cycle_id = ${params.decisionCycleId}
+      AND tenant_id = ${params.tenantId}
+      AND workspace_id IS NOT DISTINCT FROM ${targetWorkspaceId}
+      AND run_id = ${params.runId}
+    FOR UPDATE
   `;
   if (!cycle) {
-    throw new RegistryValidationError("DECISION_CYCLE_NOT_FOUND", `DecisionCycle '${params.decisionCycleId}' does not exist.`);
-  }
-  if (cycle.tenant_id !== params.tenantId) {
-    throw new RegistryValidationError("TENANT_ISOLATION_VIOLATION", "DecisionCycle tenant mismatch.");
-  }
-  const cycleWorkspaceId = cycle.workspace_id ?? null;
-  if (cycleWorkspaceId !== targetWorkspaceId) {
-    throw new RegistryValidationError("WORKSPACE_ISOLATION_VIOLATION", "DecisionCycle workspace mismatch.");
-  }
-  if (cycle.run_id !== params.runId) {
-    throw new RegistryValidationError("RUN_CYCLE_MISMATCH", "DecisionCycle run mismatch.");
+    throw new RegistryValidationError("DECISION_CYCLE_NOT_FOUND", `DecisionCycle '${params.decisionCycleId}' does not exist in authorized scope.`);
   }
   if (cycle.status === "FREEZING" || cycle.status === "FROZEN") {
     throw new RegistryValidationError("KNOWLEDGE_COMMIT_REJECTED_AFTER_FREEZING", "Cannot claim StageExecution in freezing/frozen cycle.");
@@ -163,38 +155,66 @@ export async function claimContentStageExecution(
     throw new RegistryValidationError("STALE_CYCLE_EPOCH", `Cycle epoch ${params.cycleEpoch} is stale; current epoch is ${cycle.fencing_epoch}.`);
   }
 
-  // 2. Resolve both stage identifiers safely under same locking boundary
+  // 2. Resolve both stage identifiers safely under same locking boundary, scoped to tenant & workspace
   const [stageById] = await sqlTx`
-    SELECT * FROM stage_executions WHERE stage_execution_id = ${params.stageExecutionId} FOR UPDATE
+    SELECT * FROM stage_executions
+    WHERE stage_execution_id = ${params.stageExecutionId}
+      AND tenant_id = ${params.tenantId}
+      AND workspace_id IS NOT DISTINCT FROM ${targetWorkspaceId}
+    FOR UPDATE
   `;
 
   const [stageByIdempotency] = await sqlTx`
-    SELECT * FROM stage_executions WHERE idempotency_key = ${params.idempotencyKey} FOR UPDATE
+    SELECT * FROM stage_executions
+    WHERE idempotency_key = ${params.idempotencyKey}
+      AND tenant_id = ${params.tenantId}
+      AND workspace_id IS NOT DISTINCT FROM ${targetWorkspaceId}
+    FOR UPDATE
   `;
 
   // A. Neither exists: create the new exact StageExecution
   if (!stageById && !stageByIdempotency) {
-    await sqlTx`
-      INSERT INTO stage_executions (
-        stage_execution_id, tenant_id, workspace_id, idempotency_key, run_id,
-        decision_cycle_id, stage_name, status, lease_owner, lease_expires_at,
-        fencing_token, attempt_count, canonical_input_hash, started_at, created_at
-      ) VALUES (
-        ${params.stageExecutionId}, ${params.tenantId}, ${targetWorkspaceId},
-        ${params.idempotencyKey}, ${params.runId}, ${params.decisionCycleId},
-        ${params.stageName}, 'RUNNING', ${params.leaseOwner},
-        now() + (${leaseMs} || ' milliseconds')::interval,
-        1, 1, ${params.canonicalInputHash}, now(), now()
-      )
-    `;
-    return {
-      claimed: true,
-      stageExecutionId: params.stageExecutionId,
-      fencingToken: 1,
-      leaseOwner: params.leaseOwner,
-      canonicalInputHash: params.canonicalInputHash,
-      cycleEpoch: cycle.fencing_epoch,
+    const doInsert = async (executor: any) => {
+      await executor`
+        INSERT INTO stage_executions (
+          stage_execution_id, tenant_id, workspace_id, idempotency_key, run_id,
+          decision_cycle_id, stage_name, status, lease_owner, lease_expires_at,
+          fencing_token, attempt_count, canonical_input_hash, started_at, created_at
+        ) VALUES (
+          ${params.stageExecutionId}, ${params.tenantId}, ${targetWorkspaceId},
+          ${params.idempotencyKey}, ${params.runId}, ${params.decisionCycleId},
+          ${params.stageName}, 'RUNNING', ${params.leaseOwner},
+          now() + (${leaseMs} || ' milliseconds')::interval,
+          1, 1, ${params.canonicalInputHash}, now(), now()
+        )
+      `;
     };
+
+    try {
+      if (typeof sqlTx.savepoint === "function") {
+        await sqlTx.savepoint(async (sp: any) => {
+          await doInsert(sp);
+        });
+      } else {
+        await doInsert(sqlTx);
+      }
+      return {
+        claimed: true,
+        stageExecutionId: params.stageExecutionId,
+        fencingToken: 1,
+        leaseOwner: params.leaseOwner,
+        canonicalInputHash: params.canonicalInputHash,
+        cycleEpoch: cycle.fencing_epoch,
+      };
+    } catch (insertError: any) {
+      if (insertError?.code === "23505") {
+        throw new RegistryValidationError(
+          "STAGE_CLAIM_SCOPE_MISMATCH",
+          `StageExecution claim rejected: identifier conflict on '${params.stageExecutionId}'.`,
+        );
+      }
+      throw insertError;
+    }
   }
 
   // C. Both exist but resolve to DIFFERENT StageExecutions: FAIL CLOSED

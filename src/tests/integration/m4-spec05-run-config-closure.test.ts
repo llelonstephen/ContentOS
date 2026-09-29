@@ -1,4 +1,6 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeAll } from "vitest";
+import path from "node:path";
+import fs from "node:fs";
 import postgres from "postgres";
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -259,6 +261,35 @@ async function createAlternateRunConfig(tx: any, base: Awaited<ReturnType<typeof
 }
 
 describe("RunConfig Canonical Identity Closure Suite", () => {
+  beforeAll(async () => {
+    const migrationsDir = path.resolve(import.meta.dirname, "../../persistence/relational/migrations");
+    const files = [
+      "0000_chemical_iron_man.sql",
+      "0001_fantastic_kid_colt.sql",
+      "0002_m2_immutable_triggers.sql",
+      "0003_m2_standalone_privilege_closure.sql",
+      "0004_m2_standalone_lock_authority_closure.sql",
+      "0005_m3_governance_invariants.sql",
+      "0006_m4_content_intelligence_invariants.sql",
+      "0007_m4_audit_authority_remediation.sql",
+      "0008_m4_completion_and_generation_authority.sql",
+      "0009_spec05_v104_audience_authority.sql",
+    ];
+    for (const f of files) {
+      const filePath = path.join(migrationsDir, f);
+      if (!fs.existsSync(filePath)) continue;
+      const fileSql = fs.readFileSync(filePath, "utf8");
+      const stmts = fileSql.split("--> statement-breakpoint").map((s) => s.trim()).filter(Boolean);
+      for (const stmt of stmts) {
+        try {
+          await sql.unsafe(stmt);
+        } catch {
+          // Ignore
+        }
+      }
+    }
+  });
+
   it("1. changing prompt normalized ref set changes canonical_input_hash", async () => {
     await withRollback(async (tx) => {
       const f = await seedClosureEnvironment(tx);

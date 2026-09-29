@@ -1171,6 +1171,7 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
     await sql`
       INSERT INTO revision_registry (entity_type, stable_id, revision_id, tenant_id)
       VALUES ('SchemaDefinition', 'schema-policy-dsl', ${mismatchSchemaRev}, ${tenantA})
+      ON CONFLICT DO NOTHING
     `;
     await sql`
       INSERT INTO registered_control_plane_revision_payloads (
@@ -1178,6 +1179,7 @@ describe('SPEC04 §145 Adversarial 80-Vector Suite (Live PostgreSQL)', () => {
       ) VALUES (
         'SchemaDefinition', 'schema-policy-dsl', ${mismatchSchemaRev}, ${tenantA}, ${uObjId}, '0000-WRONG-HASH', 'meta-schema-v1'
       )
+      ON CONFLICT DO NOTHING
     `;
     await sql`
       INSERT INTO run_configs (run_config_id, tenant_id, workspace_id, runtime_parameters, created_at)
