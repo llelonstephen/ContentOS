@@ -21,7 +21,7 @@ ContentOS SPEC 03 v1.0.1 — FROZEN
 ContentOS SPEC 04 v1.0.2 — FROZEN
 
 STATUS
-FREEZE CANDIDATE
+FROZEN
 ```
 
 If this SPEC conflicts with an upstream frozen source:
@@ -5455,7 +5455,7 @@ ACCEPTANCE
 32 / 32 semantic PASS
 ```
 
-No implementation result is claimed by this specification candidate.
+No implementation result is claimed by this frozen specification.
 
 v1.0.1 and v1.0.2 remain immutable historical frozen specifications.
 
