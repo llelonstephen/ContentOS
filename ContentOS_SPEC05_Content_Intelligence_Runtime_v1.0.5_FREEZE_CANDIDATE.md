@@ -21,7 +21,7 @@ ContentOS SPEC 03 v1.0.1 — FROZEN
 ContentOS SPEC 04 v1.0.2 — FROZEN
 
 STATUS
-FROZEN
+FREEZE CANDIDATE
 ```
 
 If this SPEC conflicts with an upstream frozen source:
@@ -60,16 +60,14 @@ b8fd07453cde9556e4113bebd14b3abd467fc6f04b32714c15d9ddb3c6a48d7b
 ```
 
 PATCH BASE
-ContentOS SPEC 05 v1.0.3 — FREEZE CANDIDATE
-SHA256 0af8f397159866d70e3ed75e9190d7ea16c475d456ec18ced6cd411a42246975
+ContentOS SPEC 05 v1.0.4 — FROZEN
+SHA256 25c5c0ec1513c77c72773cf25b32ac085f3bb1412165a02d1dfb9619efd36c95
 
 PATCH TARGET
-External re-audit blocker — canonical deterministic RunConfig → Audience SchemaDefinition role binding
+Demonstrated v1.0.4 temporal circular dependency —
+pre-provider canonical_input_hash vs post-provider generated-leaf admission identity
 
 SPEC05 defines runtime behavior.
-
-SPEC05 v1.0.4 preserves the frozen canonical domain schemas, all v1.0.2 provenance/temporal closure, and the v1.0.3 semantic-projection / exact-uncertainty closure.
-It closes the remaining role-selection ambiguity identified by independent re-audit: the exact Audience `SchemaDefinition` revision is selected through one normalized supporting `RunConfigSchemaRoleBinding` that can reference only an exact member of the existing `RunConfig.schema_revision_refs` set.
 
 ---
 
@@ -3418,33 +3416,45 @@ exact IDs/revisions serialized into generation context
 
 as operational metadata.
 
-For audience derivation under v1.0.4, the manifest MUST be exact enough to validate every `AudienceFactBasisLink`, every path-bound uncertainty coverage item, and every semantic-projection input.
+For audience derivation under v1.0.5, the manifest MUST be exact enough to validate every `AudienceFactBasisLink`, every path-bound uncertainty coverage item, and every semantic-projection input.
 
-At minimum it must permit deterministic verification that:
+PRE-PROVIDER DERIVATION MANIFEST
+=
+CANONICAL ELIGIBILITY CONTEXT
 
-```text
-typed basis ref was actually admitted into the audience derivation context
+The pre-provider manifest may contain:
 
-the basis was resolved at the exact audience_knowledge_cutoff_time
+- exact TaskContractRevision;
+- exact eligible Task.audience_context paths/values;
+- exact eligible AUDIENCE Proposition refs;
+- exact eligible EpistemicStateVersion refs;
+- exact KnowledgeGap / ResearchTrace refs when used;
+- exact RunConfig;
+- exact CONTENT_INTELLIGENCE_AUDIENCE RunConfigSchemaRoleBinding;
+- proof of membership in RunConfig.schema_revision_refs;
+- exact SchemaDefinition revision;
+- exact immutable SchemaDefinition payload hash/binding;
+- complete AudienceSemanticProjectionSchema configuration / eligible rule set;
+- traversal/path/classification configuration;
+- uncertainty coverage schema;
+- trusted audience_knowledge_cutoff_time;
+- tenant/workspace;
+- StageExecution.canonical_input_hash.
 
-the exact CONTENT_INTELLIGENCE_AUDIENCE RunConfigSchemaRoleBinding tuple was used
+It MUST NOT pre-provider record or claim:
 
-that exact role-binding target was an exact member of RunConfig.schema_revision_refs
+- generated factual leaf;
+- generated fact_path that does not yet exist;
+- selected projection rule_id for a generated leaf;
+- leaf-specific projection inputs;
+- projected PropositionSemanticIdentity;
+- evaluateSemanticEquivalence outcome;
+- final AudienceFactBasisLink admission result;
+- audience_admission_hash.
 
-the exact pinned SchemaDefinition / AudienceSemanticProjectionSchema revision and immutable payload binding were used
+Those are POST-PROVIDER admission values.
 
-the exact projection rule_id used for each EPISTEMIC-backed factual leaf is reconstructable
-
-every TASK_AUDIENCE_CONTEXT path/value input used by a projection or direct basis is exact
-
-provider output did not introduce projection authority
-```
-
-The manifest does NOT need a fabricated semantic-resolver config revision.
-
-Semantic equivalence is performed by the existing SPEC03 resolver against the projected complete `PropositionSemanticIdentity` and exact linked Proposition.
-
-This manifest is not a new canonical domain entity.
+The pre-provider manifest must contain enough configuration to deterministically VALIDATE those values later, not pretend they already exist.
 
 ---
 
@@ -3878,123 +3888,106 @@ not necessarily destroy historical failed artifacts.
 
 Provider/model work remains outside database transactions.
 
-Before provider invocation:
+Required lifecycle:
 
 ```text
 claim valid StageExecution
 ↓
 open coherent read boundary
 ↓
-trusted runtime captures audience_knowledge_cutoff_time
+capture trusted audience_knowledge_cutoff_time
 ↓
-resolve exact typed eligible audience bases
+resolve exact canonical eligible bases/config
 ↓
-resolve exactly one CONTENT_INTELLIGENCE_AUDIENCE RunConfigSchemaRoleBinding
+resolve exact Audience schema role binding
 ↓
-verify exact role-binding FK/membership in RunConfig.schema_revision_refs
+resolve exact SchemaDefinition payload
 ↓
-resolve exact pinned SchemaDefinition revision + immutable payload binding
+construct PRE-PROVIDER derivation manifest
 ↓
-validate traversal/classification/uncertainty/projection schema sections
-↓
-construct exact derivation manifest
-↓
-compute canonical_input_hash
+compute/finalize StageExecution.canonical_input_hash
 ↓
 provider/model invocation
+↓
+treat provider proposal as untrusted
+↓
+trusted deterministic post-provider admission resolution
+↓
+compute post_provider_precommit_audience_admission_hash
+↓
+canonical commit transaction
 ```
 
-The provider receives no authority to select the Audience SchemaDefinition role binding, projection rule, semantic identity, semantic outcome, or later cutoff.
-
-Canonical commit:
+Inside canonical commit:
 
 ```text
 BEGIN
 
-verify exact TaskContractRevision
-verify tenant/workspace scope
-
 verify StageExecution
 verify DecisionCycle
-verify lease/fencing authority
-verify cycle is writable
+verify lease/fencing
+verify writable/FREEZING state
 
-verify exact audience_knowledge_cutoff_time
-verify cutoff/manifest identity equals the pre-provider invocation identity
-verify canonical_input_hash
+re-resolve exact:
+- TaskContractRevision;
+- tenant/workspace;
+- trusted audience_knowledge_cutoff_time;
+- RunConfig;
+- Audience role binding;
+- schema membership;
+- SchemaDefinition revision/payload.
 
-verify exactly one CONTENT_INTELLIGENCE_AUDIENCE RunConfigSchemaRoleBinding
-verify role-binding tuple equals the pre-provider invocation binding
-verify exact binding FK/membership in RunConfig.schema_revision_refs
-verify exact registered SchemaDefinition revision + immutable payload binding
+reconstruct and verify the exact pre-provider input identity.
 
-validate structured AudienceState
-validate origin according to frozen upstream contract
-validate uncertainty payload against exact pinned SchemaDefinition
+require:
+recomputed StageExecution.canonical_input_hash
+==
+the canonical_input_hash finalized before provider invocation
 
-resolve exact pinned SchemaDefinition revision only through the canonical Audience role binding
-deterministically traverse all factual-state surfaces
+Then from the exact proposal being admitted:
 
-for every populated scalar leaf
-not classified STRUCTURAL_NON_FACTUAL
-by the exact pinned schema revision:
+re-run:
+- structured Audience validation;
+- factual traversal;
+- classification;
+- audience_field/fact_path;
+- fact_value_hash;
+- uncertainty coverage;
+- basis-link validation;
+- Task basis resolution;
+- Proposition resolution;
+- EpistemicStateVersion resolution;
+- cutoff/valid-time/scope checks;
+- exactly-one projection rule;
+- projection inputs;
+- PropositionSemanticIdentity construction;
+- SPEC03 evaluateSemanticEquivalence;
+- exact REUSE_EXISTING closure where required;
+- full factual coverage.
 
-    resolve exact audience_field / fact_path
-    compute exact fact_value_hash
+recompute:
 
-    resolve exact path-bound uncertainty coverage, if any
+commit_time_audience_admission_hash
 
-    require either:
-        valid AudienceUncertaintyItem coverage with status = UNRESOLVED
-    or:
-        one or more AudienceFactBasisLink rows
+require:
 
-    for each basis link:
-        verify normalized typed branch shape
-        verify FK/reference closure
-        verify tenant/workspace scope
-        verify basis existed in exact derivation manifest
-        verify fact path/hash
+commit_time_audience_admission_hash
+==
+post_provider_precommit_audience_admission_hash
 
-        if TASK_AUDIENCE_CONTEXT:
-            verify exact RevisionRef<TaskContractRevision>
-            verify exact audience_context path
-            verify exact source value hash
-            verify direct-value / explicitly pinned deterministic normalization closure
+if unequal:
+FAIL CLOSED
 
-        if AUDIENCE_EPISTEMIC_STATE:
-            verify exact Proposition
-            verify exact EpistemicStateVersion
-            verify EpistemicStateVersion.proposition_id = linked proposition_id
-            verify PropositionType = AUDIENCE
-            verify known_from <= audience_knowledge_cutoff_time
-            verify applicable valid-time/scope constraints
-            verify support-status admission rule
+only then:
 
-            select semantic projection rule from exact pinned schema
-            require exactly one rule match
-            resolve only rule-declared canonical inputs
-            construct complete derived PropositionSemanticIdentity
-            require propositionType = AUDIENCE
-
-            call existing SPEC03 evaluateSemanticEquivalence(
-                projected_identity,
-                linked_proposition_identity
-            )
-
-            require outcome = REUSE_EXISTING
-            require compared linked proposition_id = basis-link proposition_id
-
-verify no factual leaf escaped coverage through caller/provider materiality classification
-verify no application-local/current/latest/default/fallback path selected the Audience SchemaDefinition
-verify provider/caller did not supply or override the Audience schema role binding or semantic projection authority
-
-insert immutable AudienceState
-insert immutable supporting AudienceFactBasisLink rows
-write outbox event
+insert AudienceState
+insert AudienceFactBasisLink rows
+write outbox
 
 COMMIT
 ```
+
+Provider calls remain outside DB transaction.
 
 AudienceState and its factual-basis links for one canonical admission are committed atomically.
 
@@ -4733,75 +4726,17 @@ The provider or caller attempts to forge hash identity or assert authoritative p
 
 ### AV05 positive control
 
-Given:
+Demonstrates that full semantic projection and two-phase hash integration correctly generate factual claims that pass ALL strict post-provider validations.
 
-```text
-exactly one CONTENT_INTELLIGENCE_AUDIENCE RunConfigSchemaRoleBinding
-whose target is an exact member of RunConfig.schema_revision_refs
-and resolves to the immutable SchemaDefinition used for Audience admission
-```
-
-plus new valid canonical basis available at the exact trusted stage-local audience knowledge cutoff:
-
-either:
-
-```text
-direct exact Task.audience_context basis
-```
-
-or:
-
-```text
-SUPPORTED exact decision-time EpistemicStateVersion
-for an AUDIENCE Proposition
-
-+
-exactly one matching rule from the pinned AudienceSemanticProjectionSchema
-
-+
-complete projected PropositionSemanticIdentity
-
-+
-existing SPEC03 evaluateSemanticEquivalence outcome
-=
-REUSE_EXISTING
-for that exact linked proposition_id
-```
-
-admit a new AudienceState where:
-
-```text
-fact path is exact
-fact value hash matches
-typed basis ref is in exact derivation manifest
-projection rule_id/input identity is reconstructable
-basis scope/time checks pass
-the resolved path-bound uncertainty may disappear
-unrelated uncertainties remain explicit
-```
-
-Expected:
-
-```text
-PASS
-```
-
-This proves:
-
-```text
-unknown is not permanently frozen
-
-but
-
-unknown cannot become confident truth
-without exact typed canonical basis
-+
-trusted representation projection
-+
-SPEC03 semantic closure
-+
-trusted temporal closure
-```
+Required assertions:
+- canonical pre-provider context is constructed
+- `StageExecution.canonical_input_hash` is finalized
+- provider-generated proposal is returned
+- trusted post-provider admission resolution validates all claims and projection rules
+- `audience_admission_hash` is computed
+- commit-time canonical reconstruction occurs
+- same `audience_admission_hash` is verified at commit
+- canonical Audience admission PASS
 
 Expected for freeze:
 
@@ -4877,7 +4812,7 @@ Normal release strategy uses FINAL_FOR_DECISION AudienceState.
 3.
 Audience uncertainty remains explicit.
 
-For v1.0.4 this additionally requires:
+For v1.0.5 this additionally requires:
 - every factual leaf on the defined Audience factual-state surfaces is deterministically covered;
 - provider/caller materiality classification cannot exempt a factual leaf;
 - unsupported confident audience facts fail closed;
@@ -4893,7 +4828,17 @@ For v1.0.4 this additionally requires:
 - confident admission requires `REUSE_EXISTING` against the exact linked Proposition;
 - no fabricated semantic-resolver config/revision is required;
 - future/post-cutoff knowledge cannot resolve uncertainty;
-- legitimately resolved uncertainty may disappear only when the resulting factual value has eligible typed canonical basis.
+- legitimately resolved uncertainty may disappear only when the resulting factual value has eligible typed canonical basis;
+- StageExecution.canonical_input_hash contains only pre-provider-known material inputs;
+- it is finalized before provider invocation;
+- provider output cannot mutate it;
+- generated-leaf-specific projection/admission state is excluded from it;
+- trusted runtime computes audience_admission_hash only after provider output;
+- provider/caller hashes are non-authoritative;
+- commit-time canonical admission is fully re-resolved;
+- commit-time audience_admission_hash must equal the trusted post-provider precommit hash;
+- mismatch fails closed;
+- no hidden authority DTO can substitute for canonical reconstruction.
 
 4.
 Audience changes create new immutable state.
@@ -5273,78 +5218,40 @@ v1.0.5 therefore closes this circular dependency with explicit two-phase hash se
 1. `StageExecution.canonical_input_hash`: Strictly represents pre-provider material stage input identity.
 2. `audience_admission_hash`: Strictly represents post-provider trusted audience admission identity.
 
-All v1.0.4 constraints and closures are strictly preserved.
+- all unrelated v1.0.4 closures remain preserved;
+- v1.0.5 supersedes ONLY the v1.0.4 clauses that require generated-leaf-specific/post-provider admission values inside the pre-provider StageExecution.canonical_input_hash;
+- those values now belong to audience_admission_hash;
+- RunConfigSchemaRoleBinding, projection authority, uncertainty, basis, cutoff, fencing and SPEC03 resolver ownership remain unchanged.
 
 # 155. Verification Record — v1.0.5 Freeze Candidate
 
 ```text
 STATUS
-FROZEN
+FREEZE CANDIDATE
 
 PATCH BASE
-SPEC05 v1.0.3 — FREEZE CANDIDATE
-SHA256
-0af8f397159866d70e3ed75e9190d7ea16c475d456ec18ced6cd411a42246975
+SPEC05 v1.0.4 — FROZEN
+
+PATCH BASE SHA256
+25c5c0ec1513c77c72773cf25b32ac085f3bb1412165a02d1dfb9619efd36c95
 
 DEMONSTRATED PATCH TARGET
-Independent re-audit blocker:
-canonical deterministic RunConfig -> Audience SchemaDefinition role binding
+two-phase hash temporal circularity
 
-SPEC-DESIGN AUDIT TARGETS
-
-01 preserve v1.0.2 typed factual-basis closure
+INTERNAL SELF-AUDIT
 PASS
 
-02 preserve v1.0.2 trusted temporal cutoff closure
-PASS
+EXTERNAL RE-AUDIT
+PENDING
 
-03 preserve v1.0.3 deterministic Audience leaf -> PropositionSemanticIdentity projection
-PASS
-
-04 preserve v1.0.3 exact path-bound uncertainty representation
-PASS
-
-05 canonicalize Audience SchemaDefinition role binding through normalized supporting relation
-PASS
-
-06 require exact role-binding FK/membership in RunConfig.schema_revision_refs
-PASS
-
-07 keep canonical entity IDs/refs out of opaque runtime_parameters role selection
-PASS
-
-08 eliminate hidden/default/current/latest/iteration-order schema selection authority
-PASS
-
-09 bind role tuple + resolved immutable schema payload identity into manifest/canonical_input_hash
-PASS
-
-10 preserve SPEC03 evaluateSemanticEquivalence as sole semantic-equivalence authority
-PASS
-
-11 no new canonical domain/config/knowledge entity or RunConfig top-level field
-PASS
-
-12 locked 80 / 32 / 32 suite cardinality preserved
-PASS
-
-INDEPENDENT RE-AUDIT
-PASS
-
-SPEC-DESIGN BLOCKERS
-0
-
-PARTIALS
-0
-
-UPSTREAM CONTRADICTIONS
-0
-
-READY TO FREEZE
+READY FOR EXTERNAL RE-AUDIT
 YES
 
 FROZEN?
-YES
+NO
+
+INTERNAL KNOWN BLOCKERS
+0
 ```
 
 Required implementation evidence after freeze and implementation:
