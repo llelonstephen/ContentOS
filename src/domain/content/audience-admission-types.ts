@@ -140,6 +140,7 @@ export interface AudienceDerivationManifest {
   readonly eligible_task_audience_context: readonly AudienceManifestTaskContextValue[];
   readonly eligible_epistemic_refs: readonly AudienceManifestEpistemicRef[];
   readonly fact_admissions: readonly AudienceManifestFactAdmission[];
+  readonly audience_admission_hash?: string;
 }
 
 export type AudienceFactBasisSelection = {
@@ -224,11 +225,44 @@ export interface AudienceAdmissionExpectation {
   readonly canonical_input_hash: string;
 }
 
+export interface AudienceSemanticAdmissionEvidence {
+  readonly basis_kind: 'AUDIENCE_EPISTEMIC_STATE';
+  readonly audience_field: AudienceFactualField;
+  readonly fact_path: string;
+  readonly fact_value_hash: string;
+  readonly ordinal: number;
+  readonly proposition_id: string;
+  readonly epistemic_state_id: string;
+  readonly selected_projection_rule_id: string;
+  readonly projection_inputs: Readonly<Record<string, string>>;
+  readonly projection_input_hash: string;
+  readonly projected_identity: PropositionSemanticIdentity;
+  readonly semantic_equivalence_outcome: 'REUSE_EXISTING';
+  readonly compared_proposition_id: string;
+}
+
+export interface AudienceTaskBasisAdmissionEvidence {
+  readonly basis_kind: 'TASK_AUDIENCE_CONTEXT';
+  readonly audience_field: AudienceFactualField;
+  readonly fact_path: string;
+  readonly fact_value_hash: string;
+  readonly ordinal: number;
+  readonly task_id: string;
+  readonly task_revision_id: string;
+  readonly task_audience_context_path: string;
+  readonly task_audience_context_value_hash: string;
+}
+
+export type AudienceAdmissionEvidence =
+  | AudienceSemanticAdmissionEvidence
+  | AudienceTaskBasisAdmissionEvidence;
+
 export interface ValidatedAudienceAdmission {
   readonly manifest: AudienceDerivationManifest;
   readonly schema_role_binding: AudienceSchemaRoleBinding;
   readonly schema_ref: ExactRevisionRef;
   readonly schema_payload_hash: string;
   readonly fact_basis_links: readonly AudienceFactBasisLink[];
+  readonly admission_evidence: readonly AudienceAdmissionEvidence[];
   readonly audience_admission_hash: string;
 }

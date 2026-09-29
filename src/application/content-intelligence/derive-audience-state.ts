@@ -1,27 +1,35 @@
 import {
   failContent,
+  hashAudienceDerivationManifest,
   validateAudienceAdmission,
-  validateAudienceAdmissionAuthority,
   validateAudienceState,
   type AudienceAdmissionInput,
+  type AudienceDerivationManifest,
   type AudienceFactBasisSelection,
   type AudienceStateStage,
   type AudienceStateView,
   type JsonValue,
   type ValidatedAudienceAdmission,
-} from '../../domain/content/index.js';
-import { isolateProviderJsonContext } from './content-generation-context-builder.js';
+} from "../../domain/content/index.js";
+import { isolateProviderJsonContext } from "./content-generation-context-builder.js";
 import type {
   AudienceCommitAuthority,
   AudienceGovernanceRefreshEvidence,
   AudienceStatePersistenceService,
-} from '../../persistence/relational/services/audience-state-persistence-service.js';
-import type { M4GenerationPinResolver } from '../../persistence/relational/services/content-runtime-run-config-resolver.js';
-import type { PinnedGenerationConfig } from './content-generation-context-builder.js';
+} from "../../persistence/relational/services/audience-state-persistence-service.js";
+import type { M4GenerationPinResolver } from "../../persistence/relational/services/content-runtime-run-config-resolver.js";
+import type { PinnedGenerationConfig } from "./content-generation-context-builder.js";
+import type {
+  TrustedPreProviderResolver,
+} from "../../persistence/relational/services/trusted-pre-provider-resolver.js";
+import type {
+  ClaimContentStageExecutionParams,
+  ClaimContentStageExecutionResult,
+} from "../../persistence/relational/services/content-stage-execution-repository.js";
 
 export type AudienceStateProposal = Omit<
   AudienceStateView,
-  'audience_state_id' | 'task_revision_id' | 'state_stage' | 'created_at'
+  "audience_state_id" | "task_revision_id" | "state_stage" | "created_at"
 >;
 
 export interface AudienceProposalEnvelope {
@@ -29,11 +37,6 @@ export interface AudienceProposalEnvelope {
   /** Provider-selected references only; all authority is re-resolved from the trusted manifest. */
   readonly basis_selections: readonly AudienceFactBasisSelection[];
 }
-
-export type ResolvedAudienceAdmissionAuthority = Omit<
-  AudienceAdmissionInput,
-  'audience' | 'basis_selections'
->;
 
 export interface AudienceDerivationRequest {
   readonly authority: AudienceCommitAuthority;
@@ -47,8 +50,7 @@ export interface ResolvedAudienceDerivationInput {
   readonly previous_state?: AudienceStateView;
   readonly provider_context: JsonValue;
   readonly material_governance_dependencies_changed: boolean;
-  readonly governance_refresh?: Omit<AudienceGovernanceRefreshEvidence, 'audience_state_id'>;
-  readonly admission_authority?: ResolvedAudienceAdmissionAuthority;
+  readonly governance_refresh?: Omit<AudienceGovernanceRefreshEvidence, "audience_state_id">;
 }
 
 export interface AudienceDerivationInputResolver {
@@ -58,7 +60,10 @@ export interface AudienceDerivationInputResolver {
 }
 
 export interface AudienceProposalProvider {
-  generateAudienceProposal(context: unknown, pins: PinnedGenerationConfig): Promise<AudienceProposalEnvelope>;
+  generateAudienceProposal(
+    context: unknown,
+    pins: PinnedGenerationConfig,
+  ): Promise<AudienceProposalEnvelope>;
 }
 
 export interface AudienceIdentityFactory {
@@ -66,18 +71,39 @@ export interface AudienceIdentityFactory {
   now(): Date;
 }
 
+export interface AudienceStageClaimPort {
+  claimStageExecution(
+    params: ClaimContentStageExecutionParams,
+  ): Promise<ClaimContentStageExecutionResult>;
+}
+
 const PROPOSAL_FIELDS = [
-  'context', 'knowledge_state', 'problem_state', 'solution_state', 'product_state',
-  'brand_state', 'intent_state', 'desired_outcome', 'objections', 'decision_criteria',
-  'prior_exposure', 'origin', 'uncertainty',
+  "context",
+  "knowledge_state",
+  "problem_state",
+  "solution_state",
+  "product_state",
+  "brand_state",
+  "intent_state",
+  "desired_outcome",
+  "objections",
+  "decision_criteria",
+  "prior_exposure",
+  "origin",
+  "uncertainty",
 ] as const;
 
 function assertProviderEnvelope(envelope: AudienceProposalEnvelope): void {
   if (
-    !envelope || Object.keys(envelope).some((key) => !['proposal', 'basis_selections'].includes(key)) ||
-    !Array.isArray(envelope.basis_selections) || !envelope.proposal
+    !envelope ||
+    Object.keys(envelope).some((key) => !["proposal", "basis_selections"].includes(key)) ||
+    !Array.isArray(envelope.basis_selections) ||
+    !envelope.proposal
   ) {
-    failContent('AUDIENCE_PROVENANCE_INVALID', 'Audience provider returned unauthorized authority fields');
+    failContent(
+      "AUDIENCE_PROVENANCE_INVALID",
+      "Audience provider returned unauthorized authority fields",
+    );
   }
   const keys = Object.keys(envelope.proposal);
   if (
@@ -85,7 +111,10 @@ function assertProviderEnvelope(envelope: AudienceProposalEnvelope): void {
     PROPOSAL_FIELDS.some((field) => !keys.includes(field)) ||
     keys.some((key) => !PROPOSAL_FIELDS.includes(key as (typeof PROPOSAL_FIELDS)[number]))
   ) {
-    failContent('AUDIENCE_PROVENANCE_INVALID', 'Audience provider proposal does not match frozen fields');
+    failContent(
+      "AUDIENCE_PROVENANCE_INVALID",
+      "Audience provider proposal does not match frozen fields",
+    );
   }
 }
 
@@ -96,41 +125,77 @@ export class DeriveAudienceState {
     private readonly persistence: AudienceStatePersistenceService,
     private readonly identity: AudienceIdentityFactory,
     private readonly generationPins: M4GenerationPinResolver,
+    private readonly trustedResolver: TrustedPreProviderResolver,
+    private readonly claimPort?: AudienceStageClaimPort,
   ) {}
 
   async execute(request: AudienceDerivationRequest): Promise<AudienceStateView> {
     const resolved = await this.resolver.resolveAuthorizedInputs(request);
     const previous = resolved.previous_state;
     if (request.previous_audience_state_id !== previous?.audience_state_id) {
-      throw new Error('Audience derivation did not resolve the exact requested previous state');
+      throw new Error("Audience derivation did not resolve the exact requested previous state");
     }
 
-    // Provider work deliberately completes before the atomic persistence call.
-    const genericPins = await this.generationPins.resolve(request.authority);
-    const admissionExpectation = {
+    // 1. Trusted canonical resolution
+    const trusted = await this.trustedResolver.resolveCanonicalInputs({
       tenant_id: request.authority.tenant_id,
       workspace_id: request.authority.workspace_id,
+      run_id: request.authority.run_id,
+      decision_cycle_id: request.authority.decision_cycle_id,
       run_config_id: request.authority.run_config_id,
       task_revision_id: request.task_revision_id,
-      canonical_input_hash: request.authority.canonical_input_hash,
-    };
-    if (!resolved.admission_authority) {
-      failContent('AUDIENCE_PROVENANCE_INVALID', 'Audience derivation requires trusted admission authority');
+    });
+
+    const authoritativeCanonicalInputHash = trusted.canonicalInputHash;
+
+    // Reject forged / mismatched caller canonical hash
+    if (
+      request.authority.canonical_input_hash &&
+      request.authority.canonical_input_hash !== authoritativeCanonicalInputHash
+    ) {
+      failContent(
+        "AUDIENCE_PROVENANCE_INVALID",
+        `Caller-provided canonical_input_hash '${request.authority.canonical_input_hash}' mismatches trusted core '${authoritativeCanonicalInputHash}'`,
+      );
     }
-    const binding = validateAudienceAdmissionAuthority(
-      resolved.admission_authority,
-      admissionExpectation,
-    );
-    // Prompt/model/tools remain RunConfig-pinned. The Audience schema pin comes
-    // solely from the normalized role binding, never runtime_parameters.
+
+    // 2. Atomic StageExecution claim with exact hash BEFORE provider invocation
+    let effectiveFencingToken = request.authority.fencing_token;
+    if (this.claimPort) {
+      const claimResult = await this.claimPort.claimStageExecution({
+        tenantId: request.authority.tenant_id,
+        workspaceId: request.authority.workspace_id,
+        runId: request.authority.run_id,
+        decisionCycleId: request.authority.decision_cycle_id,
+        stageExecutionId: request.authority.stage_execution_id,
+        stageName: request.authority.stage_name,
+        idempotencyKey: request.authority.idempotency_key,
+        canonicalInputHash: authoritativeCanonicalInputHash,
+        leaseOwner: request.authority.lease_owner,
+        cycleEpoch: request.authority.cycle_epoch,
+      });
+      if (!claimResult.claimed) {
+        failContent(
+          "AUDIENCE_PROVENANCE_INVALID",
+          claimResult.reason ?? "StageExecution claim rejected",
+        );
+      }
+      effectiveFencingToken = claimResult.fencingToken;
+    }
+
+    // 3. Provider work (only reached by winning claimant)
+    const genericPins = await this.generationPins.resolve(request.authority);
     const pins: PinnedGenerationConfig = {
       ...genericPins,
-      schema_revision_id: binding.schema_revision_id,
+      schema_revision_id: trusted.schemaBinding.schema_revision_id,
     };
+
     const envelope = await this.provider.generateAudienceProposal(
-      isolateProviderJsonContext(resolved.provider_context), pins,
+      isolateProviderJsonContext(resolved.provider_context),
+      pins,
     );
     assertProviderEnvelope(envelope);
+
     const state: AudienceStateView = {
       ...envelope.proposal,
       audience_state_id: this.identity.nextAudienceStateId(),
@@ -144,31 +209,85 @@ export class DeriveAudienceState {
       ...(previous ? { previous_state: previous } : {}),
     });
 
+    // 4. Construct derivation manifest and validate admission
+    const manifestWithoutHash = {
+      tenant_id: trusted.preProviderCore.tenant_id,
+      workspace_id: trusted.preProviderCore.workspace_id ?? "",
+      run_config_id: trusted.preProviderCore.run_config_id,
+      task_id: trusted.preProviderCore.task_id,
+      task_revision_id: trusted.preProviderCore.task_revision_id,
+      audience_knowledge_cutoff_time: trusted.trustedCutoff,
+      audience_valid_time: trusted.trustedCutoff,
+      canonical_input_hash: authoritativeCanonicalInputHash,
+      derivation_manifest_hash: "",
+      audience_schema_ref: trusted.preProviderCore.audience_schema_ref,
+      audience_schema_payload_hash: trusted.preProviderCore.audience_schema_payload_hash,
+      audience_schema_role_binding: trusted.schemaBinding,
+      eligible_task_audience_context: trusted.eligibleTaskAudienceContext,
+      eligible_epistemic_refs: trusted.eligibleEpistemicRefs,
+      fact_admissions: [],
+    };
+    const derivationManifest: AudienceDerivationManifest = {
+      ...manifestWithoutHash,
+      derivation_manifest_hash: hashAudienceDerivationManifest(manifestWithoutHash),
+    };
+
     let audienceAdmission: ValidatedAudienceAdmission | undefined;
-    if (state.state_stage === 'FINAL_FOR_DECISION') {
-      audienceAdmission = validateAudienceAdmission({
-        ...resolved.admission_authority!,
+    if (state.state_stage === "FINAL_FOR_DECISION") {
+      const admissionInput: AudienceAdmissionInput = {
         audience: state,
+        manifest: derivationManifest,
+        schema_role_bindings: [trusted.schemaBinding],
+        schema: trusted.schemaPayload,
+        task_market: trusted.task.market,
+        task_jurisdiction: trusted.task.jurisdiction,
+        task_audience_context: trusted.task.audience_context,
         basis_selections: envelope.basis_selections,
-      }, admissionExpectation);
+        propositions: trusted.propositions,
+        epistemic_states: trusted.epistemicStates,
+      };
+      const admissionExpectation = {
+        tenant_id: request.authority.tenant_id,
+        workspace_id: request.authority.workspace_id,
+        run_config_id: request.authority.run_config_id,
+        task_revision_id: request.task_revision_id,
+        canonical_input_hash: authoritativeCanonicalInputHash,
+      };
+      audienceAdmission = validateAudienceAdmission(admissionInput, admissionExpectation);
     } else if (envelope.basis_selections.length > 0) {
-      failContent('AUDIENCE_PROVENANCE_INVALID', 'Non-final provider output cannot claim canonical fact basis');
+      failContent(
+        "AUDIENCE_PROVENANCE_INVALID",
+        "Non-final provider output cannot claim canonical fact basis",
+      );
     }
 
     const admittedAuthority = audienceAdmission ?? {
-      manifest: resolved.admission_authority.manifest,
-      schema_role_binding: binding,
+      manifest: derivationManifest,
+      schema_role_binding: trusted.schemaBinding,
       fact_basis_links: [],
+      admission_evidence: [],
+      audience_admission_hash: "",
     };
+
     const persistenceAdmission = {
       derivation_authority: {
         audience_knowledge_cutoff_time: new Date(
           admittedAuthority.manifest.audience_knowledge_cutoff_time,
         ).toISOString(),
-        derivation_manifest: { ...admittedAuthority.manifest },
+        derivation_manifest: {
+          ...admittedAuthority.manifest,
+          ...(admittedAuthority.audience_admission_hash
+            ? { audience_admission_hash: admittedAuthority.audience_admission_hash }
+            : {}),
+        },
         derivation_manifest_hash: admittedAuthority.manifest.derivation_manifest_hash,
         schema_binding: admittedAuthority.schema_role_binding,
+        ...(admittedAuthority.audience_admission_hash
+          ? { audience_admission_hash: admittedAuthority.audience_admission_hash }
+          : {}),
       },
+      audience_admission_hash: admittedAuthority.audience_admission_hash || undefined,
+      admission_evidence: admittedAuthority.admission_evidence,
       fact_basis_links: admittedAuthority.fact_basis_links.map((link) => {
         const common = {
           audience_field: link.audience_field,
@@ -176,7 +295,7 @@ export class DeriveAudienceState {
           fact_value_hash: link.fact_value_hash,
           ordinal: link.ordinal,
         };
-        return link.basis_kind === 'TASK_AUDIENCE_CONTEXT'
+        return link.basis_kind === "TASK_AUDIENCE_CONTEXT"
           ? {
               ...common,
               basis_kind: link.basis_kind,
@@ -194,8 +313,14 @@ export class DeriveAudienceState {
       }),
     };
 
+    const commitAuthority: AudienceCommitAuthority = {
+      ...request.authority,
+      canonical_input_hash: authoritativeCanonicalInputHash,
+      fencing_token: effectiveFencingToken,
+    };
+
     const commitRequest = {
-      authority: request.authority,
+      authority: commitAuthority,
       request_identity: request.request_identity,
       state,
       generation_config: pins,
@@ -212,6 +337,7 @@ export class DeriveAudienceState {
         : {}),
       ...persistenceAdmission,
     };
+
     return this.persistence.commit(commitRequest);
   }
 }

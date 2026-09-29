@@ -82,3 +82,167 @@ export async function completeContentStageExecution(
     );
   }
 }
+
+export interface ClaimContentStageExecutionParams {
+  readonly tenantId: string;
+  readonly workspaceId?: string | null;
+  readonly runId: string;
+  readonly decisionCycleId: string;
+  readonly stageExecutionId: string;
+  readonly stageName: string;
+  readonly idempotencyKey: string;
+  readonly canonicalInputHash: string;
+  readonly leaseOwner: string;
+  readonly cycleEpoch: number;
+  readonly leaseDurationMs?: number;
+}
+
+export interface ClaimContentStageExecutionResult {
+  readonly claimed: boolean;
+  readonly stageExecutionId: string;
+  readonly fencingToken: number;
+  readonly leaseOwner: string;
+  readonly canonicalInputHash: string;
+  readonly cycleEpoch: number;
+  readonly reason?: string;
+}
+
+export async function claimContentStageExecution(
+  sqlTx: any,
+  params: ClaimContentStageExecutionParams,
+): Promise<ClaimContentStageExecutionResult> {
+  const leaseMs = params.leaseDurationMs ?? 300000;
+
+  const [run] = await sqlTx`
+    SELECT run_id, tenant_id, workspace_id, status, current_decision_cycle_id
+    FROM runs WHERE run_id = ${params.runId} FOR UPDATE
+  `;
+  if (!run) {
+    throw new RegistryValidationError("RUN_NOT_FOUND", `Run '${params.runId}' does not exist.`);
+  }
+  if (run.tenant_id !== params.tenantId) {
+    throw new RegistryValidationError("TENANT_ISOLATION_VIOLATION", "Run tenant mismatch.");
+  }
+  if (run.status !== "RUNNING") {
+    throw new RegistryValidationError("STALE_WORKER_COMMIT_REJECTED", `Run '${params.runId}' is '${run.status}', not RUNNING.`);
+  }
+  if (run.current_decision_cycle_id !== params.decisionCycleId) {
+    throw new RegistryValidationError("DECISION_CYCLE_NOT_CURRENT", "Supplied DecisionCycle is not current cycle.");
+  }
+
+  const [cycle] = await sqlTx`
+    SELECT decision_cycle_id, tenant_id, workspace_id, status, fencing_epoch, superseded_by_cycle_id
+    FROM decision_cycles WHERE decision_cycle_id = ${params.decisionCycleId} FOR UPDATE
+  `;
+  if (!cycle) {
+    throw new RegistryValidationError("DECISION_CYCLE_NOT_FOUND", `DecisionCycle '${params.decisionCycleId}' does not exist.`);
+  }
+  if (cycle.status === "FREEZING" || cycle.status === "FROZEN") {
+    throw new RegistryValidationError("KNOWLEDGE_COMMIT_REJECTED_AFTER_FREEZING", "Cannot claim StageExecution in freezing/frozen cycle.");
+  }
+  if (cycle.status !== "OPEN" || cycle.superseded_by_cycle_id) {
+    throw new RegistryValidationError("STALE_WORKER_COMMIT_REJECTED", "DecisionCycle is not OPEN.");
+  }
+  if (cycle.fencing_epoch !== params.cycleEpoch) {
+    throw new RegistryValidationError("STALE_CYCLE_EPOCH", `Cycle epoch ${params.cycleEpoch} is stale; current epoch is ${cycle.fencing_epoch}.`);
+  }
+
+  const [existingStage] = await sqlTx`
+    SELECT * FROM stage_executions WHERE (tenant_id = ${params.tenantId} AND idempotency_key = ${params.idempotencyKey}) OR stage_execution_id = ${params.stageExecutionId} FOR UPDATE
+  `;
+
+  if (!existingStage) {
+    await sqlTx`
+      INSERT INTO stage_executions (
+        stage_execution_id, tenant_id, workspace_id, idempotency_key, run_id,
+        decision_cycle_id, stage_name, status, lease_owner, lease_expires_at,
+        fencing_token, attempt_count, canonical_input_hash, started_at, created_at
+      ) VALUES (
+        ${params.stageExecutionId}, ${params.tenantId}, ${params.workspaceId ?? null},
+        ${params.idempotencyKey}, ${params.runId}, ${params.decisionCycleId},
+        ${params.stageName}, 'RUNNING', ${params.leaseOwner},
+        now() + (${leaseMs} || ' milliseconds')::interval,
+        1, 1, ${params.canonicalInputHash}, now(), now()
+      )
+    `;
+    return {
+      claimed: true,
+      stageExecutionId: params.stageExecutionId,
+      fencingToken: 1,
+      leaseOwner: params.leaseOwner,
+      canonicalInputHash: params.canonicalInputHash,
+      cycleEpoch: cycle.fencing_epoch,
+    };
+  }
+
+  if (existingStage.canonical_input_hash !== params.canonicalInputHash) {
+    throw new RegistryValidationError(
+      "IDEMPOTENCY_CONFLICT",
+      `StageExecution already finalized with canonical_input_hash '${existingStage.canonical_input_hash}', cannot replace with '${params.canonicalInputHash}'.`,
+    );
+  }
+
+  if (existingStage.status === "COMPLETED") {
+    return {
+      claimed: false,
+      stageExecutionId: existingStage.stage_execution_id,
+      fencingToken: existingStage.fencing_token,
+      leaseOwner: existingStage.lease_owner,
+      canonicalInputHash: existingStage.canonical_input_hash,
+      cycleEpoch: cycle.fencing_epoch,
+      reason: "STAGE_ALREADY_COMPLETED",
+    };
+  }
+
+  const leaseExpiresAt = existingStage.lease_expires_at ? new Date(existingStage.lease_expires_at).getTime() : 0;
+  const nowTime = Date.now();
+
+  if (existingStage.status === "RUNNING" && leaseExpiresAt > nowTime && existingStage.lease_owner !== params.leaseOwner) {
+    return {
+      claimed: false,
+      stageExecutionId: existingStage.stage_execution_id,
+      fencingToken: existingStage.fencing_token,
+      leaseOwner: existingStage.lease_owner,
+      canonicalInputHash: existingStage.canonical_input_hash,
+      cycleEpoch: cycle.fencing_epoch,
+      reason: "LEASE_HELD_BY_ANOTHER_WORKER",
+    };
+  }
+
+  if (existingStage.lease_owner === params.leaseOwner && leaseExpiresAt > nowTime) {
+    await sqlTx`
+      UPDATE stage_executions
+      SET lease_expires_at = now() + (${leaseMs} || ' milliseconds')::interval
+      WHERE stage_execution_id = ${existingStage.stage_execution_id}
+    `;
+    return {
+      claimed: true,
+      stageExecutionId: existingStage.stage_execution_id,
+      fencingToken: existingStage.fencing_token,
+      leaseOwner: params.leaseOwner,
+      canonicalInputHash: existingStage.canonical_input_hash,
+      cycleEpoch: cycle.fencing_epoch,
+    };
+  }
+
+  const nextToken = existingStage.fencing_token + 1;
+  const nextAttempt = existingStage.attempt_count + 1;
+  await sqlTx`
+    UPDATE stage_executions
+    SET lease_owner = ${params.leaseOwner},
+        fencing_token = ${nextToken},
+        attempt_count = ${nextAttempt},
+        lease_expires_at = now() + (${leaseMs} || ' milliseconds')::interval,
+        started_at = now(),
+        status = 'RUNNING'
+    WHERE stage_execution_id = ${existingStage.stage_execution_id}
+  `;
+  return {
+    claimed: true,
+    stageExecutionId: existingStage.stage_execution_id,
+    fencingToken: nextToken,
+    leaseOwner: params.leaseOwner,
+    canonicalInputHash: existingStage.canonical_input_hash,
+    cycleEpoch: cycle.fencing_epoch,
+  };
+}

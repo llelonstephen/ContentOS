@@ -80,7 +80,7 @@ export async function resolveAudienceSchemaBindingAuthority(
       AND binding.role = ${AUDIENCE_SCHEMA_ROLE}
       AND binding.schema_entity_type = 'SchemaDefinition'
       AND config.tenant_id = ${scope.tenant_id}
-      AND config.workspace_id IS NOT DISTINCT FROM ${scope.workspace_id}
+      AND config.workspace_id IS NOT DISTINCT FROM ${scope.workspace_id || null}
       AND revision.tenant_id = config.tenant_id
       AND revision.workspace_id IS NOT DISTINCT FROM config.workspace_id
       AND payload.tenant_id = config.tenant_id
@@ -169,7 +169,7 @@ export async function loadAudienceReplayAuthority(
     JOIN object_registry object ON object.object_id = authority.schema_object_id
     WHERE authority.audience_state_id = ${audienceStateId}
       AND authority.tenant_id = ${scope.tenant_id}
-      AND authority.workspace_id IS NOT DISTINCT FROM ${scope.workspace_id}
+      AND authority.workspace_id IS NOT DISTINCT FROM ${scope.workspace_id || null}
   `;
   if (!row) invalidBinding('Historical Audience authority does not resolve in the exact scope.');
   const links = await sqlTx`

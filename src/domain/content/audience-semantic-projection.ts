@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { evaluateSemanticEquivalence } from '../knowledge/semantic-fingerprint.js';
 import type { PropositionSemanticIdentity } from '../knowledge/types.js';
 import { failContent } from './content-error-codes.js';
@@ -134,7 +135,12 @@ function render(template: AudienceProjectionTemplate, input: AudienceProjectionI
 export function projectAudienceFact(
   schema: AudienceSemanticProjectionSchema,
   input: AudienceProjectionInput,
-): { readonly rule_id: string; readonly identity: PropositionSemanticIdentity } {
+): {
+  readonly rule_id: string;
+  readonly identity: PropositionSemanticIdentity;
+  readonly projection_inputs: Readonly<Record<string, string>>;
+  readonly projection_input_hash: string;
+} {
   validateAudienceSemanticProjectionSchema(schema);
   const matches = schema.projection_rules.filter(
     (rule) => rule.audience_field === input.leaf.audience_field &&
@@ -147,6 +153,41 @@ export function projectAudienceFact(
     failContent('AUDIENCE_SEMANTIC_PROJECTION_AMBIGUOUS', 'Multiple pinned rules match the audience fact');
   }
   const rule = matches[0]!;
+
+  const inputs: Record<string, string> = {};
+  for (const template of allTemplates(rule)) {
+    for (const part of template) {
+      if (part.type === 'TASK_AUDIENCE_CONTEXT') {
+        const val = resolveJsonPointer(input.task_audience_context, part.path);
+        if (val === undefined) {
+          failContent('AUDIENCE_SEMANTIC_PROJECTION_INVALID', `Missing Task audience input '${part.path}'`);
+        }
+        inputs[`TASK_AUDIENCE_CONTEXT:${part.path}`] = canonicalJson(val);
+      } else if (part.type === 'OPERAND') {
+        const values = {
+          FACT_VALUE_CANONICAL: serializeAudienceScalar(input.leaf.value),
+          AUDIENCE_FIELD: input.leaf.audience_field,
+          FACT_PATH: input.leaf.fact_path,
+          TASK_MARKET: input.task_market,
+          TASK_JURISDICTION: input.task_jurisdiction,
+        } as const;
+        const val = values[part.operand];
+        if (!val) {
+          failContent('AUDIENCE_SEMANTIC_PROJECTION_INVALID', `Missing projection input '${part.operand}'`);
+        }
+        inputs[part.operand] = val;
+      }
+    }
+  }
+  const sortedKeys = Object.keys(inputs).sort();
+  const sortedInputs: Record<string, string> = {};
+  for (const k of sortedKeys) {
+    sortedInputs[k] = inputs[k]!;
+  }
+  const projection_input_hash = createHash('sha256')
+    .update(JSON.stringify(sortedInputs), 'utf8')
+    .digest('hex');
+
   const identity: PropositionSemanticIdentity = {
     propositionType: 'AUDIENCE',
     canonicalMeaning: render(rule.canonical_meaning_template, input),
@@ -161,7 +202,7 @@ export function projectAudienceFact(
   if (!identity.canonicalMeaning || !identity.subject || !identity.predicate || !identity.object) {
     failContent('AUDIENCE_SEMANTIC_PROJECTION_INVALID', 'Projected semantic identity is incomplete');
   }
-  return { rule_id: rule.rule_id, identity };
+  return { rule_id: rule.rule_id, identity, projection_inputs: sortedInputs, projection_input_hash };
 }
 
 export function assertAudienceSemanticClosure(

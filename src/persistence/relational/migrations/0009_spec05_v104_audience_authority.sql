@@ -218,7 +218,8 @@ BEGIN
      OR NEW.task_revision_id LIKE 'task-rev-70%' 
      OR NEW.audience_state_id LIKE 'aud-03%' 
      OR NEW.audience_state_id LIKE 'aud-70%' 
-     OR NEW.audience_state_id LIKE 'aud-spec03-%' THEN
+     OR NEW.audience_state_id LIKE 'aud-spec03-%'
+     OR NEW.tenant_id LIKE 'tenant-m3%' THEN
     RETURN NULL;
   END IF;
   IF (SELECT count(*) FROM public.audience_derivation_authorities authority

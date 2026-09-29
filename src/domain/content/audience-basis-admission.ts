@@ -2,10 +2,13 @@ import { failContent } from './content-error-codes.js';
 import { hashAudienceScalar, resolveJsonPointer } from './audience-fact-path.js';
 import { assertAudienceSemanticClosure, projectAudienceFact } from './audience-semantic-projection.js';
 import type {
+  AudienceAdmissionEvidence,
   AudienceAdmissionInput,
   AudienceFactBasisLink,
   AudienceFactBasisSelection,
   AudienceFactLeaf,
+  AudienceSemanticAdmissionEvidence,
+  AudienceTaskBasisAdmissionEvidence,
 } from './audience-admission-types.js';
 import type { JsonPrimitive } from './types.js';
 
@@ -46,7 +49,7 @@ function admitTaskBasis(
   input: AudienceAdmissionInput,
   selection: Extract<AudienceFactBasisSelection, { basis_kind: 'TASK_AUDIENCE_CONTEXT' }>,
   leaf: AudienceFactLeaf,
-): AudienceFactBasisLink {
+): { link: AudienceFactBasisLink; evidence: AudienceTaskBasisAdmissionEvidence } {
   const manifestValue = input.manifest.eligible_task_audience_context.find(
     ({ path }) => path === selection.task_audience_context_path,
   );
@@ -63,7 +66,7 @@ function admitTaskBasis(
   if (taskValueHash !== manifestValue.value_hash || taskValueHash !== leaf.fact_value_hash) {
     failContent('AUDIENCE_PROVENANCE_INVALID', 'Task basis value does not equal the admitted audience fact');
   }
-  return {
+  const link: AudienceFactBasisLink = {
     tenant_id: input.manifest.tenant_id,
     workspace_id: input.manifest.workspace_id,
     audience_state_id: input.audience.audience_state_id,
@@ -77,13 +80,25 @@ function admitTaskBasis(
     task_audience_context_path: selection.task_audience_context_path,
     task_audience_context_value_hash: taskValueHash,
   };
+  const evidence: AudienceTaskBasisAdmissionEvidence = {
+    basis_kind: 'TASK_AUDIENCE_CONTEXT',
+    audience_field: leaf.audience_field,
+    fact_path: leaf.fact_path,
+    fact_value_hash: leaf.fact_value_hash,
+    ordinal: selection.ordinal,
+    task_id: input.manifest.task_id,
+    task_revision_id: input.manifest.task_revision_id,
+    task_audience_context_path: selection.task_audience_context_path,
+    task_audience_context_value_hash: taskValueHash,
+  };
+  return { link, evidence };
 }
 
 function admitEpistemicBasis(
   input: AudienceAdmissionInput,
   selection: Extract<AudienceFactBasisSelection, { basis_kind: 'AUDIENCE_EPISTEMIC_STATE' }>,
   leaf: AudienceFactLeaf,
-): AudienceFactBasisLink {
+): { link: AudienceFactBasisLink; evidence: AudienceSemanticAdmissionEvidence } {
   const inManifest = input.manifest.eligible_epistemic_refs.some(
     (ref) => ref.proposition_id === selection.proposition_id &&
       ref.epistemic_state_id === selection.epistemic_state_id,
@@ -112,7 +127,7 @@ function admitEpistemicBasis(
     task_audience_context: input.task_audience_context,
   });
   assertAudienceSemanticClosure(projected.identity, proposition.semantic_identity);
-  return {
+  const link: AudienceFactBasisLink = {
     tenant_id: input.manifest.tenant_id,
     workspace_id: input.manifest.workspace_id,
     audience_state_id: input.audience.audience_state_id,
@@ -124,14 +139,37 @@ function admitEpistemicBasis(
     proposition_id: selection.proposition_id,
     epistemic_state_id: selection.epistemic_state_id,
   };
+  const evidence: AudienceSemanticAdmissionEvidence = {
+    basis_kind: 'AUDIENCE_EPISTEMIC_STATE',
+    audience_field: leaf.audience_field,
+    fact_path: leaf.fact_path,
+    fact_value_hash: leaf.fact_value_hash,
+    ordinal: selection.ordinal,
+    proposition_id: selection.proposition_id,
+    epistemic_state_id: selection.epistemic_state_id,
+    selected_projection_rule_id: projected.rule_id,
+    projection_inputs: projected.projection_inputs,
+    projection_input_hash: projected.projection_input_hash,
+    projected_identity: projected.identity,
+    semantic_equivalence_outcome: 'REUSE_EXISTING',
+    compared_proposition_id: proposition.proposition_id,
+  };
+  return { link, evidence };
 }
 
-export function materializeAudienceFactBasisLinks(
+export interface MaterializedAudienceFactBasisAdmissions {
+  readonly links: readonly AudienceFactBasisLink[];
+  readonly evidence: readonly AudienceAdmissionEvidence[];
+}
+
+export function materializeAudienceFactBasisAdmissions(
   input: AudienceAdmissionInput,
   leaves: readonly AudienceFactLeaf[],
-): readonly AudienceFactBasisLink[] {
+): MaterializedAudienceFactBasisAdmissions {
   const keys = new Set<string>();
-  return input.basis_selections.map((selection) => {
+  const links: AudienceFactBasisLink[] = [];
+  const evidence: AudienceAdmissionEvidence[] = [];
+  for (const selection of input.basis_selections) {
     assertSelectionShape(selection);
     const key = selectionKey(selection);
     if (keys.has(key)) {
@@ -139,8 +177,18 @@ export function materializeAudienceFactBasisLinks(
     }
     keys.add(key);
     const leaf = requireLeaf(leaves, selection);
-    return selection.basis_kind === 'TASK_AUDIENCE_CONTEXT'
+    const result = selection.basis_kind === 'TASK_AUDIENCE_CONTEXT'
       ? admitTaskBasis(input, selection, leaf)
       : admitEpistemicBasis(input, selection, leaf);
-  });
+    links.push(result.link);
+    evidence.push(result.evidence);
+  }
+  return { links, evidence };
+}
+
+export function materializeAudienceFactBasisLinks(
+  input: AudienceAdmissionInput,
+  leaves: readonly AudienceFactLeaf[],
+): readonly AudienceFactBasisLink[] {
+  return materializeAudienceFactBasisAdmissions(input, leaves).links;
 }

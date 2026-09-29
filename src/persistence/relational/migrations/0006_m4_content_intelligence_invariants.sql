@@ -105,7 +105,7 @@ BEGIN
     WHERE registry.entity_type = v_entity_type
       AND registry.entity_id = v_entity_id
       AND registry.tenant_id = NEW.tenant_id
-      AND registry.workspace_id IS NOT DISTINCT FROM NEW.workspace_id
+      AND (registry.workspace_id IS NOT DISTINCT FROM NEW.workspace_id OR (NEW.workspace_id IS NOT NULL AND registry.workspace_id IS NULL))
       AND registry.payload_state = 'AVAILABLE'
   ) THEN
     RAISE EXCEPTION 'REGISTRY_IDENTITY_REQUIRED: missing exact registry entry for %:%',

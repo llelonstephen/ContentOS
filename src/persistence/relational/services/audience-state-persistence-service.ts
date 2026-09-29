@@ -1,3 +1,4 @@
+import type { AudienceAdmissionEvidence } from '../../../domain/content/audience-admission-types.js';
 import {
   validateAudienceState,
   type AudienceStateView,
@@ -22,6 +23,7 @@ export interface AudienceDerivationAuthorityMetadata {
   readonly derivation_manifest: Readonly<Record<string, unknown>>;
   readonly derivation_manifest_hash: string;
   readonly schema_binding: AudienceSchemaBindingAuthority;
+  readonly audience_admission_hash?: string;
 }
 
 interface AudienceFactBasisCommon {
@@ -56,6 +58,8 @@ export interface AudienceStateCommitRequest {
   readonly governance_refresh?: AudienceGovernanceRefreshEvidence;
   readonly derivation_authority?: AudienceDerivationAuthorityMetadata;
   readonly fact_basis_links?: readonly AudienceFactBasisLinkInput[];
+  readonly audience_admission_hash?: string;
+  readonly admission_evidence?: readonly AudienceAdmissionEvidence[];
 }
 
 /**

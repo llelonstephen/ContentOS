@@ -85,7 +85,7 @@ export async function executeContentRuntimeCommit<T>(
   insertEntityGraph: (sqlTx: any) => Promise<ContentRuntimeEntityGraphResult<T>>,
 ): Promise<ContentRuntimeCommitResult<T>> {
   validateMetadata(request);
-  return sql.begin(async (sqlTx: any) => {
+  const runCommit = async (sqlTx: any) => {
     const verified = await verifyStageFencing(sqlTx, {
       fencingContext: request.fencingContext,
       tenantId: request.tenantId,
@@ -147,5 +147,9 @@ export async function executeContentRuntimeCommit<T>(
       outputRefs: graph.outputRefs,
       outboxEventIds,
     };
-  });
+  };
+  if (typeof sql.begin === "function") {
+    return sql.begin(runCommit);
+  }
+  return runCommit(sql);
 }

@@ -3,7 +3,7 @@ import {
   hashCanonicalInput,
   type CanonicalField,
 } from "./canonical-input-serialization.js";
-import { materializeAudienceFactBasisLinks } from './audience-basis-admission.js';
+import { materializeAudienceFactBasisAdmissions } from './audience-basis-admission.js';
 import { hashAudienceDerivationManifest } from './audience-derivation-manifest.js';
 import { collectAudienceFactLeaves } from './audience-fact-path.js';
 import { validateAudienceSemanticProjectionSchema } from './audience-semantic-projection.js';
@@ -18,6 +18,7 @@ import type {
   AudienceAdmissionExpectation,
   AudienceAdmissionInput,
   AudienceFactLeaf,
+  AudienceAdmissionEvidence,
   AudienceSchemaRoleBinding,
   ValidatedAudienceAdmission,
 } from './audience-admission-types.js';
@@ -131,7 +132,16 @@ export function computeAudienceAdmissionHash(
   binding: AudienceSchemaRoleBinding,
   leaves: readonly AudienceFactLeaf[],
   links: ValidatedAudienceAdmission["fact_basis_links"],
+  evidence?: readonly AudienceAdmissionEvidence[],
 ): string {
+  let effectiveEvidence = evidence;
+  if (!effectiveEvidence && input.schema && input.propositions && input.epistemic_states && input.basis_selections) {
+    try {
+      effectiveEvidence = materializeAudienceFactBasisAdmissions(input, leaves).evidence;
+    } catch {
+      effectiveEvidence = undefined;
+    }
+  }
   const proposalContent = {
     context: input.audience.context,
     knowledge_state: input.audience.knowledge_state,
@@ -229,6 +239,50 @@ export function computeAudienceAdmissionHash(
             };
       }),
     },
+    {
+      name: "semantic_admission_evidence",
+      kind: "SEMANTIC_SET",
+      value: (effectiveEvidence ?? []).map((ev) => {
+        if (ev.basis_kind === "AUDIENCE_EPISTEMIC_STATE") {
+          return {
+            basis_kind: ev.basis_kind,
+            audience_field: ev.audience_field,
+            fact_path: ev.fact_path,
+            fact_value_hash: ev.fact_value_hash,
+            ordinal: ev.ordinal,
+            proposition_id: ev.proposition_id,
+            epistemic_state_id: ev.epistemic_state_id,
+            selected_projection_rule_id: ev.selected_projection_rule_id,
+            projection_inputs: ev.projection_inputs,
+            projection_input_hash: ev.projection_input_hash,
+            projected_identity: {
+              propositionType: ev.projected_identity.propositionType,
+              canonicalMeaning: ev.projected_identity.canonicalMeaning,
+              subject: ev.projected_identity.subject,
+              predicate: ev.projected_identity.predicate,
+              object: ev.projected_identity.object,
+              qualifiers: ev.projected_identity.qualifiers,
+              conditions: ev.projected_identity.conditions,
+              populationScope: ev.projected_identity.populationScope,
+              jurisdictionScope: ev.projected_identity.jurisdictionScope,
+            },
+            semantic_equivalence_outcome: ev.semantic_equivalence_outcome,
+            compared_proposition_id: ev.compared_proposition_id,
+          };
+        }
+        return {
+          basis_kind: ev.basis_kind,
+          audience_field: ev.audience_field,
+          fact_path: ev.fact_path,
+          fact_value_hash: ev.fact_value_hash,
+          ordinal: ev.ordinal,
+          task_id: ev.task_id,
+          task_revision_id: ev.task_revision_id,
+          task_audience_context_path: ev.task_audience_context_path,
+          task_audience_context_value_hash: ev.task_audience_context_value_hash,
+        };
+      }),
+    },
   ];
 
   return hashCanonicalInput({
@@ -247,15 +301,16 @@ export function validateAudienceAdmission(
   });
   const binding = validateAudienceAdmissionAuthority(input, expected);
   const leaves = collectAudienceFactLeaves(input.audience, input.schema.classification_rules);
-  const links = materializeAudienceFactBasisLinks(input, leaves);
+  const { links, evidence } = materializeAudienceFactBasisAdmissions(input, leaves);
   validateFactCoverage(input, links);
-  const audience_admission_hash = computeAudienceAdmissionHash(input, binding, leaves, links);
+  const audience_admission_hash = computeAudienceAdmissionHash(input, binding, leaves, links, evidence);
   return {
     manifest: input.manifest,
     schema_role_binding: binding,
     schema_ref: input.schema.schema_ref,
     schema_payload_hash: input.schema.payload_hash,
     fact_basis_links: links,
+    admission_evidence: evidence,
     audience_admission_hash,
   };
 }
