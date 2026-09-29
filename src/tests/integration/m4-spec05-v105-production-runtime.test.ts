@@ -488,6 +488,7 @@ describe("SPEC05 v1.0.5 production runtime integration (19 required cases)", () 
       // Pre-claim stage execution with worker-1
       await claimContentStageExecution(tx, {
         tenantId: f.tenantId,
+        workspaceId: f.workspaceId,
         runId: f.runId,
         decisionCycleId: f.cycleId,
         stageExecutionId: f.stageId,
@@ -590,6 +591,7 @@ describe("SPEC05 v1.0.5 production runtime integration (19 required cases)", () 
       const idempotencyKey = "idem-" + randomUUID();
       await claimContentStageExecution(tx, {
         tenantId: f.tenantId,
+        workspaceId: f.workspaceId,
         runId: f.runId,
         decisionCycleId: f.cycleId,
         stageExecutionId: f.stageId,
@@ -604,6 +606,7 @@ describe("SPEC05 v1.0.5 production runtime integration (19 required cases)", () 
       await expect(
         claimContentStageExecution(tx, {
           tenantId: f.tenantId,
+          workspaceId: f.workspaceId,
           runId: f.runId,
           decisionCycleId: f.cycleId,
           stageExecutionId: f.stageId,

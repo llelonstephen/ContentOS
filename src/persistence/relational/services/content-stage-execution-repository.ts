@@ -112,7 +112,9 @@ export async function claimContentStageExecution(
   params: ClaimContentStageExecutionParams,
 ): Promise<ClaimContentStageExecutionResult> {
   const leaseMs = params.leaseDurationMs ?? 300000;
+  const targetWorkspaceId = params.workspaceId ?? null;
 
+  // 1. Close run / cycle scope before stage claim
   const [run] = await sqlTx`
     SELECT run_id, tenant_id, workspace_id, status, current_decision_cycle_id
     FROM runs WHERE run_id = ${params.runId} FOR UPDATE
@@ -123,6 +125,10 @@ export async function claimContentStageExecution(
   if (run.tenant_id !== params.tenantId) {
     throw new RegistryValidationError("TENANT_ISOLATION_VIOLATION", "Run tenant mismatch.");
   }
+  const runWorkspaceId = run.workspace_id ?? null;
+  if (runWorkspaceId !== targetWorkspaceId) {
+    throw new RegistryValidationError("WORKSPACE_ISOLATION_VIOLATION", "Run workspace mismatch.");
+  }
   if (run.status !== "RUNNING") {
     throw new RegistryValidationError("STALE_WORKER_COMMIT_REJECTED", `Run '${params.runId}' is '${run.status}', not RUNNING.`);
   }
@@ -131,34 +137,50 @@ export async function claimContentStageExecution(
   }
 
   const [cycle] = await sqlTx`
-    SELECT decision_cycle_id, tenant_id, workspace_id, status, fencing_epoch, superseded_by_cycle_id
+    SELECT decision_cycle_id, tenant_id, workspace_id, run_id, status, fencing_epoch, superseded_by_cycle_id
     FROM decision_cycles WHERE decision_cycle_id = ${params.decisionCycleId} FOR UPDATE
   `;
   if (!cycle) {
     throw new RegistryValidationError("DECISION_CYCLE_NOT_FOUND", `DecisionCycle '${params.decisionCycleId}' does not exist.`);
   }
+  if (cycle.tenant_id !== params.tenantId) {
+    throw new RegistryValidationError("TENANT_ISOLATION_VIOLATION", "DecisionCycle tenant mismatch.");
+  }
+  const cycleWorkspaceId = cycle.workspace_id ?? null;
+  if (cycleWorkspaceId !== targetWorkspaceId) {
+    throw new RegistryValidationError("WORKSPACE_ISOLATION_VIOLATION", "DecisionCycle workspace mismatch.");
+  }
+  if (cycle.run_id !== params.runId) {
+    throw new RegistryValidationError("RUN_CYCLE_MISMATCH", "DecisionCycle run mismatch.");
+  }
   if (cycle.status === "FREEZING" || cycle.status === "FROZEN") {
     throw new RegistryValidationError("KNOWLEDGE_COMMIT_REJECTED_AFTER_FREEZING", "Cannot claim StageExecution in freezing/frozen cycle.");
   }
-  if (cycle.status !== "OPEN" || cycle.superseded_by_cycle_id) {
+  if (cycle.status !== "OPEN" || cycle.superseded_by_cycle_id != null) {
     throw new RegistryValidationError("STALE_WORKER_COMMIT_REJECTED", "DecisionCycle is not OPEN.");
   }
   if (cycle.fencing_epoch !== params.cycleEpoch) {
     throw new RegistryValidationError("STALE_CYCLE_EPOCH", `Cycle epoch ${params.cycleEpoch} is stale; current epoch is ${cycle.fencing_epoch}.`);
   }
 
-  const [existingStage] = await sqlTx`
-    SELECT * FROM stage_executions WHERE (tenant_id = ${params.tenantId} AND idempotency_key = ${params.idempotencyKey}) OR stage_execution_id = ${params.stageExecutionId} FOR UPDATE
+  // 2. Resolve both stage identifiers safely under same locking boundary
+  const [stageById] = await sqlTx`
+    SELECT * FROM stage_executions WHERE stage_execution_id = ${params.stageExecutionId} FOR UPDATE
   `;
 
-  if (!existingStage) {
+  const [stageByIdempotency] = await sqlTx`
+    SELECT * FROM stage_executions WHERE idempotency_key = ${params.idempotencyKey} FOR UPDATE
+  `;
+
+  // A. Neither exists: create the new exact StageExecution
+  if (!stageById && !stageByIdempotency) {
     await sqlTx`
       INSERT INTO stage_executions (
         stage_execution_id, tenant_id, workspace_id, idempotency_key, run_id,
         decision_cycle_id, stage_name, status, lease_owner, lease_expires_at,
         fencing_token, attempt_count, canonical_input_hash, started_at, created_at
       ) VALUES (
-        ${params.stageExecutionId}, ${params.tenantId}, ${params.workspaceId ?? null},
+        ${params.stageExecutionId}, ${params.tenantId}, ${targetWorkspaceId},
         ${params.idempotencyKey}, ${params.runId}, ${params.decisionCycleId},
         ${params.stageName}, 'RUNNING', ${params.leaseOwner},
         now() + (${leaseMs} || ' milliseconds')::interval,
@@ -175,6 +197,68 @@ export async function claimContentStageExecution(
     };
   }
 
+  // C. Both exist but resolve to DIFFERENT StageExecutions: FAIL CLOSED
+  if (stageById && stageByIdempotency && stageById.stage_execution_id !== stageByIdempotency.stage_execution_id) {
+    throw new RegistryValidationError(
+      "IDEMPOTENCY_CONFLICT",
+      `Ambiguous StageExecution claim: stage_execution_id '${params.stageExecutionId}' and idempotency_key '${params.idempotencyKey}' resolve to different StageExecutions ('${stageById.stage_execution_id}' vs '${stageByIdempotency.stage_execution_id}').`,
+    );
+  }
+
+  // B, D, E. Resolve to candidate existing stage
+  const existingStage = stageById ?? stageByIdempotency;
+
+  // 3. Exact existing-stage binding: require exact equality before renew/takeover
+  if (existingStage.stage_execution_id !== params.stageExecutionId) {
+    throw new RegistryValidationError(
+      "IDEMPOTENCY_CONFLICT",
+      `Existing stage stage_execution_id '${existingStage.stage_execution_id}' does not match claimed '${params.stageExecutionId}'.`,
+    );
+  }
+
+  if (existingStage.tenant_id !== params.tenantId) {
+    throw new RegistryValidationError(
+      "TENANT_ISOLATION_VIOLATION",
+      `Existing stage tenant_id '${existingStage.tenant_id}' does not match claimed '${params.tenantId}'.`,
+    );
+  }
+
+  const existingWorkspaceId = existingStage.workspace_id ?? null;
+  if (existingWorkspaceId !== targetWorkspaceId) {
+    throw new RegistryValidationError(
+      "WORKSPACE_ISOLATION_VIOLATION",
+      `Existing stage workspace_id '${existingWorkspaceId}' does not match claimed '${targetWorkspaceId}'.`,
+    );
+  }
+
+  if (existingStage.run_id !== params.runId) {
+    throw new RegistryValidationError(
+      "STAGE_CLAIM_SCOPE_MISMATCH",
+      `Existing stage run_id '${existingStage.run_id}' does not match claimed '${params.runId}'.`,
+    );
+  }
+
+  if (existingStage.decision_cycle_id !== params.decisionCycleId) {
+    throw new RegistryValidationError(
+      "STAGE_CLAIM_SCOPE_MISMATCH",
+      `Existing stage decision_cycle_id '${existingStage.decision_cycle_id}' does not match claimed '${params.decisionCycleId}'.`,
+    );
+  }
+
+  if (existingStage.stage_name !== params.stageName) {
+    throw new RegistryValidationError(
+      "STAGE_CLAIM_SCOPE_MISMATCH",
+      `Existing stage stage_name '${existingStage.stage_name}' does not match claimed '${params.stageName}'.`,
+    );
+  }
+
+  if (existingStage.idempotency_key !== params.idempotencyKey) {
+    throw new RegistryValidationError(
+      "IDEMPOTENCY_CONFLICT",
+      `Existing stage idempotency_key '${existingStage.idempotency_key}' does not match claimed '${params.idempotencyKey}'.`,
+    );
+  }
+
   if (existingStage.canonical_input_hash !== params.canonicalInputHash) {
     throw new RegistryValidationError(
       "IDEMPOTENCY_CONFLICT",
@@ -182,6 +266,7 @@ export async function claimContentStageExecution(
     );
   }
 
+  // 4. Takeover / Renewal
   if (existingStage.status === "COMPLETED") {
     return {
       claimed: false,
@@ -214,6 +299,7 @@ export async function claimContentStageExecution(
       UPDATE stage_executions
       SET lease_expires_at = now() + (${leaseMs} || ' milliseconds')::interval
       WHERE stage_execution_id = ${existingStage.stage_execution_id}
+        AND tenant_id = ${params.tenantId}
     `;
     return {
       claimed: true,
@@ -236,6 +322,7 @@ export async function claimContentStageExecution(
         started_at = now(),
         status = 'RUNNING'
     WHERE stage_execution_id = ${existingStage.stage_execution_id}
+      AND tenant_id = ${params.tenantId}
   `;
   return {
     claimed: true,
