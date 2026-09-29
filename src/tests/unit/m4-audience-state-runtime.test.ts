@@ -50,7 +50,13 @@ const preProviderCore: PreProviderManifestCore = {
   run_config_id: "config-1",
   generation_config: { run_config_id: "config-1", ...pins },
   run_config_runtime_parameters_hash: "params-hash-1",
-  schema_revision_refs: ["schema-1"],
+  schema_revision_refs: [
+    {
+      entity_type: "SchemaDefinition",
+      stable_id: "audience-schema",
+      revision_id: "schema-1",
+    },
+  ],
   provider_context_hash: hashProviderContext({ exact: true }),
   task_id: "task-stable-1",
   task_revision_id: "task-1",

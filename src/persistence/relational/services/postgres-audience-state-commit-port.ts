@@ -173,16 +173,23 @@ export class PostgresAudienceStateCommitPort implements AudienceStateAtomicCommi
           fields: [{ name: "runtime_parameters", kind: "VALUE", value: runtimeParamsCanonical }],
         });
 
-        const schemaRefRows = await sqlTx`
-          SELECT revision_id FROM run_config_schema_revisions
-          WHERE run_config_id = ${authority.run_config_id}
-          ORDER BY revision_id ASC
-        `;
-        const schemaRevisionRefs = schemaRefRows.map((r: any) => String(r.revision_id));
-        if (schemaRevisionRefs.length > 0 && !schemaRevisionRefs.includes(currentBinding.schema_revision_id)) {
+        const promptRevisionRefs = currentRunConfig.prompt_revision_refs ?? [];
+        const modelConfigRevisionRefs = currentRunConfig.model_config_revision_refs ?? [];
+        const toolConfigRevisionRefs = currentRunConfig.tool_config_revision_refs ?? [];
+        const schemaRevisionRefs = currentRunConfig.schema_revision_refs ?? [];
+        const retrieverRevisionRefs = currentRunConfig.retriever_revision_refs ?? [];
+        const evaluatorRevisionRefs = currentRunConfig.evaluator_revision_refs ?? [];
+
+        const isRoleMember = schemaRevisionRefs.some(
+          (ref) =>
+            ref.entity_type === currentBinding.schema_entity_type &&
+            ref.stable_id === currentBinding.schema_stable_id &&
+            ref.revision_id === currentBinding.schema_revision_id,
+        );
+        if (!isRoleMember) {
           throw new RegistryValidationError(
             "AUDIENCE_DERIVATION_AUTHORITY_STALE",
-            `Audience schema role binding revision '${currentBinding.schema_revision_id}' is not in RunConfig.schema_revision_refs`,
+            `Audience schema role binding (${currentBinding.schema_entity_type}, ${currentBinding.schema_stable_id}, ${currentBinding.schema_revision_id}) is not an exact member of RunConfig.schema_revision_refs`,
           );
         }
 
@@ -314,7 +321,12 @@ export class PostgresAudienceStateCommitPort implements AudienceStateAtomicCommi
           run_config_id: authority.run_config_id,
           generation_config: currentRunConfig,
           run_config_runtime_parameters_hash: runtimeParamsHash,
+          prompt_revision_refs: promptRevisionRefs,
+          model_config_revision_refs: modelConfigRevisionRefs,
+          tool_config_revision_refs: toolConfigRevisionRefs,
           schema_revision_refs: schemaRevisionRefs,
+          retriever_revision_refs: retrieverRevisionRefs,
+          evaluator_revision_refs: evaluatorRevisionRefs,
           provider_context_hash: providerContextHash,
           task_id: String(taskRow.task_id),
           task_revision_id: String(taskRow.task_revision_id),

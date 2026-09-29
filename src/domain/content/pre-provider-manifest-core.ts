@@ -30,8 +30,6 @@ export interface PreProviderManifestGenerationConfig {
   readonly model_revision_id: string;
   readonly schema_revision_id: string;
   readonly tool_revision_ids: readonly string[];
-  readonly retriever_revision_id?: string;
-  readonly evaluator_revision_id?: string;
 }
 
 export interface PreProviderManifestCore {
@@ -40,7 +38,12 @@ export interface PreProviderManifestCore {
   readonly run_config_id: string;
   readonly generation_config?: PreProviderManifestGenerationConfig;
   readonly run_config_runtime_parameters_hash?: string;
-  readonly schema_revision_refs?: readonly string[];
+  readonly prompt_revision_refs?: readonly string[];
+  readonly model_config_revision_refs?: readonly string[];
+  readonly tool_config_revision_refs?: readonly string[];
+  readonly schema_revision_refs?: readonly ExactRevisionRef[];
+  readonly retriever_revision_refs?: readonly string[];
+  readonly evaluator_revision_refs?: readonly string[];
   readonly task_id: string;
   readonly task_revision_id: string;
   readonly audience_knowledge_cutoff_time: string;
@@ -97,11 +100,55 @@ export function buildPreProviderManifestCanonicalManifest(
     });
   }
 
-  if (core.schema_revision_refs && core.schema_revision_refs.length > 0) {
+  if (core.prompt_revision_refs !== undefined) {
+    fields.push({
+      name: "prompt_revision_refs",
+      kind: "SEMANTIC_SET",
+      value: [...core.prompt_revision_refs],
+    });
+  }
+
+  if (core.model_config_revision_refs !== undefined) {
+    fields.push({
+      name: "model_config_revision_refs",
+      kind: "SEMANTIC_SET",
+      value: [...core.model_config_revision_refs],
+    });
+  }
+
+  if (core.tool_config_revision_refs !== undefined) {
+    fields.push({
+      name: "tool_config_revision_refs",
+      kind: "SEMANTIC_SET",
+      value: [...core.tool_config_revision_refs],
+    });
+  }
+
+  if (core.schema_revision_refs !== undefined) {
     fields.push({
       name: "schema_revision_refs",
       kind: "SEMANTIC_SET",
-      value: [...core.schema_revision_refs],
+      value: core.schema_revision_refs.map((r) => ({
+        entity_type: r.entity_type,
+        stable_id: r.stable_id,
+        revision_id: r.revision_id,
+      })),
+    });
+  }
+
+  if (core.retriever_revision_refs !== undefined) {
+    fields.push({
+      name: "retriever_revision_refs",
+      kind: "SEMANTIC_SET",
+      value: [...core.retriever_revision_refs],
+    });
+  }
+
+  if (core.evaluator_revision_refs !== undefined) {
+    fields.push({
+      name: "evaluator_revision_refs",
+      kind: "SEMANTIC_SET",
+      value: [...core.evaluator_revision_refs],
     });
   }
 

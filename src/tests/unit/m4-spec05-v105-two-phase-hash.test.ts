@@ -190,7 +190,12 @@ describe("SPEC05 v1.0.5 Two-Phase Hash & Manifest Core Closure", () => {
       { knowledge_gap_refs: ["gap-2"] },
       { provider_context_hash: "hash-context-other" },
       { run_config_runtime_parameters_hash: "params-hash-other" },
-      { schema_revision_refs: ["schema-other-ref"] },
+      { prompt_revision_refs: ["prompt-ref-other"] },
+      { model_config_revision_refs: ["model-ref-other"] },
+      { tool_config_revision_refs: ["tool-ref-other"] },
+      { schema_revision_refs: [{ entity_type: "SchemaDefinition", stable_id: "audience-schema-105", revision_id: "schema-other-ref" }] },
+      { retriever_revision_refs: ["retriever-ref-other"] },
+      { evaluator_revision_refs: ["evaluator-ref-other"] },
       {
         generation_config: {
           run_config_id: "cfg-001",

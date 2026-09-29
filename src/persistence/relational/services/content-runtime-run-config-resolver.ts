@@ -1,9 +1,16 @@
-import { RegistryValidationError } from '../../../domain/services/registry-validator.js';
-import type { PinnedGenerationConfig } from '../../../application/content-intelligence/content-generation-context-builder.js';
-import type { ContentRuntimeCommitAuthority } from './content-runtime-authority.js';
+import { RegistryValidationError } from "../../../domain/services/registry-validator.js";
+import type { PinnedGenerationConfig } from "../../../application/content-intelligence/content-generation-context-builder.js";
+import type { ExactRevisionRef } from "../../../domain/content/types.js";
+import type { ContentRuntimeCommitAuthority } from "./content-runtime-authority.js";
 
 export interface CanonicalM4RunConfig extends PinnedGenerationConfig {
   readonly run_config_id: string;
+  readonly prompt_revision_refs?: readonly string[];
+  readonly model_config_revision_refs?: readonly string[];
+  readonly tool_config_revision_refs?: readonly string[];
+  readonly schema_revision_refs?: readonly ExactRevisionRef[];
+  readonly retriever_revision_refs?: readonly string[];
+  readonly evaluator_revision_refs?: readonly string[];
 }
 
 /** Resolves provider pins before an M4 model call; the caller cannot supply them. */
@@ -20,16 +27,16 @@ export class PostgresM4GenerationPinResolver implements M4GenerationPinResolver 
 }
 
 function parsePinnedConfig(value: unknown): PinnedGenerationConfig {
-  const root = typeof value === 'string' ? JSON.parse(value) : value;
+  const root = typeof value === "string" ? JSON.parse(value) : value;
   const params = (root as { content_intelligence?: unknown })?.content_intelligence ?? root;
   const config = params as Partial<PinnedGenerationConfig>;
-  if (!config || typeof config.prompt_revision_id !== 'string' ||
-      typeof config.model_revision_id !== 'string' ||
-      typeof config.schema_revision_id !== 'string' ||
+  if (!config || typeof config.prompt_revision_id !== "string" ||
+      typeof config.model_revision_id !== "string" ||
+      typeof config.schema_revision_id !== "string" ||
       !Array.isArray(config.tool_revision_ids) ||
-      config.tool_revision_ids.some((id) => typeof id !== 'string')) {
-    throw new RegistryValidationError('M4_PINNED_CONFIG_MISSING',
-      'RunConfig lacks exact prompt/model/tool/schema revisions for Content Intelligence.');
+      config.tool_revision_ids.some((id) => typeof id !== "string")) {
+    throw new RegistryValidationError("M4_PINNED_CONFIG_MISSING",
+      "RunConfig lacks exact prompt/model/tool/schema revisions for Content Intelligence.");
   }
   return {
     prompt_revision_id: config.prompt_revision_id,
@@ -43,7 +50,7 @@ function parsePinnedConfig(value: unknown): PinnedGenerationConfig {
 export async function resolveCanonicalM4RunConfig(
   sqlTx: any,
   authority: Pick<ContentRuntimeCommitAuthority,
-    'tenant_id' | 'workspace_id' | 'run_id' | 'decision_cycle_id' | 'run_config_id'>,
+    "tenant_id" | "workspace_id" | "run_id" | "decision_cycle_id" | "run_config_id">,
 ): Promise<CanonicalM4RunConfig> {
   const [row] = await sqlTx`
     SELECT run.initial_run_config_id, config.run_config_id, config.runtime_parameters
@@ -58,10 +65,54 @@ export async function resolveCanonicalM4RunConfig(
       AND config.workspace_id IS NOT DISTINCT FROM ${authority.workspace_id}
   `;
   if (!row || row.initial_run_config_id !== authority.run_config_id) {
-    throw new RegistryValidationError('RUN_CONFIG_AUTHORITY_MISMATCH',
-      'Caller RunConfig does not equal the exact Run/DecisionCycle-pinned RunConfig.');
+    throw new RegistryValidationError("RUN_CONFIG_AUTHORITY_MISMATCH",
+      "Caller RunConfig does not equal the exact Run/DecisionCycle-pinned RunConfig.");
   }
-  return { run_config_id: String(row.run_config_id), ...parsePinnedConfig(row.runtime_parameters) };
+
+  const runConfigId = String(row.run_config_id);
+
+  const [promptRows, modelRows, toolRows, schemaRows, retrieverRows, evaluatorRows] = await Promise.all([
+    sqlTx`SELECT revision_id FROM run_config_prompt_revisions WHERE run_config_id = ${runConfigId} ORDER BY revision_id ASC`,
+    sqlTx`SELECT revision_id FROM run_config_model_revisions WHERE run_config_id = ${runConfigId} ORDER BY revision_id ASC`,
+    sqlTx`SELECT revision_id FROM run_config_tool_revisions WHERE run_config_id = ${runConfigId} ORDER BY revision_id ASC`,
+    sqlTx`SELECT entity_type, stable_id, revision_id FROM run_config_schema_revisions WHERE run_config_id = ${runConfigId} ORDER BY entity_type ASC, stable_id ASC, revision_id ASC`,
+    sqlTx`SELECT revision_id FROM run_config_retriever_revisions WHERE run_config_id = ${runConfigId} ORDER BY revision_id ASC`,
+    sqlTx`SELECT revision_id FROM run_config_evaluator_revisions WHERE run_config_id = ${runConfigId} ORDER BY revision_id ASC`,
+  ]);
+
+  const prompt_revision_refs = promptRows
+    .filter((r: any) => r && r.revision_id !== undefined)
+    .map((r: any) => String(r.revision_id));
+  const model_config_revision_refs = modelRows
+    .filter((r: any) => r && r.revision_id !== undefined)
+    .map((r: any) => String(r.revision_id));
+  const tool_config_revision_refs = toolRows
+    .filter((r: any) => r && r.revision_id !== undefined)
+    .map((r: any) => String(r.revision_id));
+  const schema_revision_refs: ExactRevisionRef[] = schemaRows
+    .filter((r: any) => r && r.revision_id !== undefined && r.entity_type !== undefined)
+    .map((r: any) => ({
+      entity_type: String(r.entity_type),
+      stable_id: String(r.stable_id),
+      revision_id: String(r.revision_id),
+    }));
+  const retriever_revision_refs = retrieverRows
+    .filter((r: any) => r && r.revision_id !== undefined)
+    .map((r: any) => String(r.revision_id));
+  const evaluator_revision_refs = evaluatorRows
+    .filter((r: any) => r && r.revision_id !== undefined)
+    .map((r: any) => String(r.revision_id));
+
+  return {
+    run_config_id: runConfigId,
+    ...parsePinnedConfig(row.runtime_parameters),
+    ...(prompt_revision_refs.length > 0 ? { prompt_revision_refs } : {}),
+    ...(model_config_revision_refs.length > 0 ? { model_config_revision_refs } : {}),
+    ...(tool_config_revision_refs.length > 0 ? { tool_config_revision_refs } : {}),
+    ...(schema_revision_refs.length > 0 ? { schema_revision_refs } : {}),
+    ...(retriever_revision_refs.length > 0 ? { retriever_revision_refs } : {}),
+    ...(evaluator_revision_refs.length > 0 ? { evaluator_revision_refs } : {}),
+  };
 }
 
 export function assertPinnedGenerationConfig(
@@ -73,7 +124,7 @@ export function assertPinnedGenerationConfig(
   if (claimed.prompt_revision_id !== canonical.prompt_revision_id ||
       claimed.model_revision_id !== canonical.model_revision_id ||
       claimed.schema_revision_id !== canonical.schema_revision_id || !sameTools) {
-    throw new RegistryValidationError('PINNED_GENERATION_CONFIG_MISMATCH',
-      'Generation request does not exactly match the immutable RunConfig pin set.');
+    throw new RegistryValidationError("PINNED_GENERATION_CONFIG_MISMATCH",
+      "Generation request does not exactly match the immutable RunConfig pin set.");
   }
 }

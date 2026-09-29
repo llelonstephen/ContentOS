@@ -190,6 +190,22 @@ export class DeriveAudienceState {
       assertPinnedGenerationConfig(claimedPins, trusted.runConfig);
     }
 
+    // Verify role-binding exact tuple membership against RunConfig schema ref set
+    const schemaRefs = trusted.preProviderCore.schema_revision_refs ?? [];
+    const binding = trusted.schemaBinding;
+    const isMember = schemaRefs.some(
+      (ref) =>
+        ref.entity_type === binding.schema_entity_type &&
+        ref.stable_id === binding.schema_stable_id &&
+        ref.revision_id === binding.schema_revision_id,
+    );
+    if (!isMember) {
+      failContent(
+        "AUDIENCE_PROVENANCE_INVALID",
+        `Audience schema role binding (${binding.schema_entity_type}, ${binding.schema_stable_id}, ${binding.schema_revision_id}) is not an exact member of RunConfig.schema_revision_refs`,
+      );
+    }
+
     // 2. Atomic StageExecution claim with exact hash BEFORE provider invocation
     const claimResult = await this.claimPort.claimStageExecution({
       tenantId: request.authority.tenant_id,

@@ -167,17 +167,24 @@ export class TrustedPreProviderResolver {
         fields: [{ name: "runtime_parameters", kind: "VALUE", value: runtimeParamsCanonical }],
       });
 
-      // Verify exact schema membership
-      const schemaRefRows = await tx`
-        SELECT revision_id FROM run_config_schema_revisions
-        WHERE run_config_id = ${scope.run_config_id}
-        ORDER BY revision_id ASC
-      `;
-      const schemaRevisionRefs = schemaRefRows.map((r: any) => String(r.revision_id));
-      if (schemaRevisionRefs.length > 0 && !schemaRevisionRefs.includes(schemaBinding.schema_revision_id)) {
+      // Verify exact normalized RunConfig ref sets and exact schema membership
+      const promptRevisionRefs = runConfig.prompt_revision_refs ?? [];
+      const modelConfigRevisionRefs = runConfig.model_config_revision_refs ?? [];
+      const toolConfigRevisionRefs = runConfig.tool_config_revision_refs ?? [];
+      const schemaRevisionRefs = runConfig.schema_revision_refs ?? [];
+      const retrieverRevisionRefs = runConfig.retriever_revision_refs ?? [];
+      const evaluatorRevisionRefs = runConfig.evaluator_revision_refs ?? [];
+
+      const isRoleMember = schemaRevisionRefs.some(
+        (ref) =>
+          ref.entity_type === schemaBinding.schema_entity_type &&
+          ref.stable_id === schemaBinding.schema_stable_id &&
+          ref.revision_id === schemaBinding.schema_revision_id,
+      );
+      if (!isRoleMember) {
         failContent(
           "AUDIENCE_PROVENANCE_INVALID",
-          `Audience schema role binding revision '${schemaBinding.schema_revision_id}' is not a member of RunConfig.schema_revision_refs`,
+          `Audience schema role binding (${schemaBinding.schema_entity_type}, ${schemaBinding.schema_stable_id}, ${schemaBinding.schema_revision_id}) is not an exact member of RunConfig.schema_revision_refs`,
         );
       }
       if (runConfig.schema_revision_id !== schemaBinding.schema_revision_id) {
@@ -291,7 +298,12 @@ export class TrustedPreProviderResolver {
         run_config_id: scope.run_config_id,
         generation_config: runConfig,
         run_config_runtime_parameters_hash: runtimeParamsHash,
+        prompt_revision_refs: promptRevisionRefs,
+        model_config_revision_refs: modelConfigRevisionRefs,
+        tool_config_revision_refs: toolConfigRevisionRefs,
         schema_revision_refs: schemaRevisionRefs,
+        retriever_revision_refs: retrieverRevisionRefs,
+        evaluator_revision_refs: evaluatorRevisionRefs,
         provider_context_hash: providerContextHash,
         task_id: String(taskRow.task_id),
         task_revision_id: String(taskRow.task_revision_id),
