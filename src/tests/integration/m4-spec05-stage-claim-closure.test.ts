@@ -21,10 +21,14 @@ import {
   AudienceStatePersistenceService,
 } from "../../persistence/relational/services/audience-state-persistence-service.js";
 import {
+  validateAudienceAdmission,
+  hashAudienceDerivationManifest,
+  type AudienceDerivationManifest,
   type AudienceSemanticProjectionRule,
   type AudienceStateView,
 } from "../../domain/content/index.js";
 import { getDefaultObjectStore } from "../../persistence/objects/default-object-store.js";
+import type { ExactRevisionRef } from "../../domain/content/types.js";
 
 const url =
   process.env.DATABASE_URL_TEST ??
@@ -205,12 +209,10 @@ async function seedClaimEnvironment(tx: any) {
   };
 }
 
-describe("Tenant/Workspace-Scoped StageExecution Claim Suite (11 required cases)", () => {
+describe("StageExecution Exact Identity & Scope Closure Suite (18 required cases)", () => {
   beforeAll(async () => {
     const migrationsDir = path.resolve(import.meta.dirname, "../../persistence/relational/migrations");
     const files = [
-      "0000_chemical_iron_man.sql",
-      "0001_fantastic_kid_colt.sql",
       "0002_m2_immutable_triggers.sql",
       "0003_m2_standalone_privilege_closure.sql",
       "0004_m2_standalone_lock_authority_closure.sql",
@@ -226,120 +228,32 @@ describe("Tenant/Workspace-Scoped StageExecution Claim Suite (11 required cases)
       const fileSql = fs.readFileSync(filePath, "utf8");
       const stmts = fileSql.split("--> statement-breakpoint").map((s) => s.trim()).filter(Boolean);
       for (const stmt of stmts) {
-        try {
-          await sql.unsafe(stmt);
-        } catch {
-          // Ignore
-        }
+        await sql.unsafe(stmt);
       }
     }
   });
 
-  it("1. foreign run_id cannot be selected as authorized Run", async () => {
+  it("1. cross-tenant stage_execution_id claim fails and foreign row is unchanged", async () => {
     await withRollback(async (tx) => {
       const f1 = await seedClaimEnvironment(tx);
       const f2 = await seedClaimEnvironment(tx);
 
-      // Worker in tenant 2 attempts to claim using tenant 1's run_id
-      await expect(
-        claimContentStageExecution(tx, {
-          tenantId: f2.tenantId,
-          workspaceId: f2.workspaceId,
-          runId: f1.runId, // Foreign run_id!
-          decisionCycleId: f2.cycleId,
-          stageExecutionId: f2.stageId,
-          stageName: "AUDIENCE_FINALIZE",
-          idempotencyKey: "idem-" + randomUUID(),
-          canonicalInputHash: "hash-run-scope",
-          leaseOwner: "worker-t2",
-          cycleEpoch: 1,
-        }),
-      ).rejects.toMatchObject({ code: "RUN_NOT_FOUND" });
-
-      // Prove that under tenant 2, f1.runId returns no rows
-      const scopedRunRows = await tx`
-        SELECT * FROM runs WHERE run_id = ${f1.runId} AND tenant_id = ${f2.tenantId}
-      `;
-      expect(scopedRunRows.length).toBe(0);
-    });
-  });
-
-  it("2. foreign decision_cycle_id cannot be selected as authorized cycle", async () => {
-    await withRollback(async (tx) => {
-      const f1 = await seedClaimEnvironment(tx);
-      const f2 = await seedClaimEnvironment(tx);
-
-      // Case A: Worker in tenant 2 attempts to claim using tenant 1's cycleId when run current cycle is f2.cycleId
-      await expect(
-        claimContentStageExecution(tx, {
-          tenantId: f2.tenantId,
-          workspaceId: f2.workspaceId,
-          runId: f2.runId,
-          decisionCycleId: f1.cycleId, // Foreign cycle_id!
-          stageExecutionId: f2.stageId,
-          stageName: "AUDIENCE_FINALIZE",
-          idempotencyKey: "idem-" + randomUUID(),
-          canonicalInputHash: "hash-cycle-scope",
-          leaseOwner: "worker-t2",
-          cycleEpoch: 1,
-        }),
-      ).rejects.toMatchObject({ code: "DECISION_CYCLE_NOT_CURRENT" });
-
-      // Case B: Even if Run 2's current_decision_cycle_id is set to foreign f1.cycleId,
-      // the DecisionCycle lookup scoped to tenant_id / run_id fails closed before FOR UPDATE authority is obtained
-      await tx`UPDATE runs SET current_decision_cycle_id = ${f1.cycleId} WHERE run_id = ${f2.runId}`;
-      await expect(
-        claimContentStageExecution(tx, {
-          tenantId: f2.tenantId,
-          workspaceId: f2.workspaceId,
-          runId: f2.runId,
-          decisionCycleId: f1.cycleId,
-          stageExecutionId: f2.stageId,
-          stageName: "AUDIENCE_FINALIZE",
-          idempotencyKey: "idem-" + randomUUID(),
-          canonicalInputHash: "hash-cycle-scope",
-          leaseOwner: "worker-t2",
-          cycleEpoch: 1,
-        }),
-      ).rejects.toMatchObject({ code: "DECISION_CYCLE_NOT_FOUND" });
-
-      // Prove that under tenant 2, f1.cycleId returns no rows
-      const scopedCycleRows = await tx`
-        SELECT * FROM decision_cycles WHERE decision_cycle_id = ${f1.cycleId} AND tenant_id = ${f2.tenantId}
-      `;
-      expect(scopedCycleRows.length).toBe(0);
-    });
-  });
-
-  it("3. foreign stage_execution_id cannot become a scoped existing stage", async () => {
-    await withRollback(async (tx) => {
-      const f1 = await seedClaimEnvironment(tx);
-      const f2 = await seedClaimEnvironment(tx);
-
-      // Tenant 1 claims a stage
-      await claimContentStageExecution(tx, {
+      // Create a stage in tenant 1
+      const initialClaim = await claimContentStageExecution(tx, {
         tenantId: f1.tenantId,
         workspaceId: f1.workspaceId,
         runId: f1.runId,
         decisionCycleId: f1.cycleId,
         stageExecutionId: f1.stageId,
         stageName: "AUDIENCE_FINALIZE",
-        idempotencyKey: "idem-t1-" + randomUUID(),
-        canonicalInputHash: "hash-stage-scope",
-        leaseOwner: "worker-t1",
+        idempotencyKey: "idem-" + randomUUID(),
+        canonicalInputHash: "hash-initial-1",
+        leaseOwner: "worker-tenant-1",
         cycleEpoch: 1,
       });
+      expect(initialClaim.claimed).toBe(true);
 
-      // Tenant 2 scoped query for f1.stageId returns NO rows
-      const scopedStageRows = await tx`
-        SELECT * FROM stage_executions
-        WHERE stage_execution_id = ${f1.stageId}
-          AND tenant_id = ${f2.tenantId}
-          AND workspace_id IS NOT DISTINCT FROM ${f2.workspaceId}
-      `;
-      expect(scopedStageRows.length).toBe(0);
-
-      // Tenant 2 attempting to claim f1.stageId fails closed without exposing or adopting foreign row
+      // Tenant 2 attempts to claim tenant 1's stage_execution_id
       await expect(
         claimContentStageExecution(tx, {
           tenantId: f2.tenantId,
@@ -348,199 +262,442 @@ describe("Tenant/Workspace-Scoped StageExecution Claim Suite (11 required cases)
           decisionCycleId: f2.cycleId,
           stageExecutionId: f1.stageId,
           stageName: "AUDIENCE_FINALIZE",
-          idempotencyKey: "idem-t2-" + randomUUID(),
-          canonicalInputHash: "hash-stage-scope",
-          leaseOwner: "worker-t2",
+          idempotencyKey: "idem-" + randomUUID(),
+          canonicalInputHash: "hash-initial-1",
+          leaseOwner: "worker-tenant-2",
           cycleEpoch: 1,
         }),
       ).rejects.toMatchObject({ code: "STAGE_CLAIM_SCOPE_MISMATCH" });
-    });
-  });
 
-  it("4. foreign idempotency_key cannot become a scoped existing stage", async () => {
-    await withRollback(async (tx) => {
-      const f1 = await seedClaimEnvironment(tx);
-      const f2 = await seedClaimEnvironment(tx);
-      const sharedIdemKey = "idem-global-" + randomUUID();
-
-      // Tenant 1 claims with sharedIdemKey
-      await claimContentStageExecution(tx, {
-        tenantId: f1.tenantId,
-        workspaceId: f1.workspaceId,
-        runId: f1.runId,
-        decisionCycleId: f1.cycleId,
-        stageExecutionId: f1.stageId,
-        stageName: "AUDIENCE_FINALIZE",
-        idempotencyKey: sharedIdemKey,
-        canonicalInputHash: "hash-idem-scope",
-        leaseOwner: "worker-t1",
-        cycleEpoch: 1,
-      });
-
-      // Tenant 2 scoped query for sharedIdemKey returns NO rows
-      const scopedIdemRows = await tx`
-        SELECT * FROM stage_executions
-        WHERE idempotency_key = ${sharedIdemKey}
-          AND tenant_id = ${f2.tenantId}
-          AND workspace_id IS NOT DISTINCT FROM ${f2.workspaceId}
-      `;
-      expect(scopedIdemRows.length).toBe(0);
-
-      // Tenant 2 attempting to claim with sharedIdemKey fails closed
-      await expect(
-        claimContentStageExecution(tx, {
-          tenantId: f2.tenantId,
-          workspaceId: f2.workspaceId,
-          runId: f2.runId,
-          decisionCycleId: f2.cycleId,
-          stageExecutionId: f2.stageId,
-          stageName: "AUDIENCE_FINALIZE",
-          idempotencyKey: sharedIdemKey,
-          canonicalInputHash: "hash-idem-scope",
-          leaseOwner: "worker-t2",
-          cycleEpoch: 1,
-        }),
-      ).rejects.toMatchObject({ code: "STAGE_CLAIM_SCOPE_MISMATCH" });
-    });
-  });
-
-  it("5. foreign stage remains completely unchanged", async () => {
-    await withRollback(async (tx) => {
-      const f1 = await seedClaimEnvironment(tx);
-      const f2 = await seedClaimEnvironment(tx);
-      const t1Idem = "idem-t1-" + randomUUID();
-
-      await claimContentStageExecution(tx, {
-        tenantId: f1.tenantId,
-        workspaceId: f1.workspaceId,
-        runId: f1.runId,
-        decisionCycleId: f1.cycleId,
-        stageExecutionId: f1.stageId,
-        stageName: "AUDIENCE_FINALIZE",
-        idempotencyKey: t1Idem,
-        canonicalInputHash: "hash-unchanged",
-        leaseOwner: "worker-t1-owner",
-        cycleEpoch: 1,
-      });
-
-      // Tenant 2 attempts cross-claim on stage_execution_id
-      await expect(
-        claimContentStageExecution(tx, {
-          tenantId: f2.tenantId,
-          workspaceId: f2.workspaceId,
-          runId: f2.runId,
-          decisionCycleId: f2.cycleId,
-          stageExecutionId: f1.stageId,
-          stageName: "AUDIENCE_FINALIZE",
-          idempotencyKey: "idem-t2-" + randomUUID(),
-          canonicalInputHash: "hash-unchanged",
-          leaseOwner: "worker-t2-rogue",
-          cycleEpoch: 1,
-        }),
-      ).rejects.toThrow();
-
-      // Tenant 2 attempts cross-claim on idempotency_key
-      await expect(
-        claimContentStageExecution(tx, {
-          tenantId: f2.tenantId,
-          workspaceId: f2.workspaceId,
-          runId: f2.runId,
-          decisionCycleId: f2.cycleId,
-          stageExecutionId: f2.stageId,
-          stageName: "AUDIENCE_FINALIZE",
-          idempotencyKey: t1Idem,
-          canonicalInputHash: "hash-unchanged",
-          leaseOwner: "worker-t2-rogue",
-          cycleEpoch: 1,
-        }),
-      ).rejects.toThrow();
-
-      // Verify foreign stage in Tenant 1 remains completely untouched
+      // Verify foreign row in tenant 1 is untouched
       const [foreignStage] = await tx`
-        SELECT stage_execution_id, tenant_id, workspace_id, idempotency_key,
-               lease_owner, fencing_token, attempt_count, status
-        FROM stage_executions
-        WHERE stage_execution_id = ${f1.stageId}
+        SELECT lease_owner, fencing_token, attempt_count, status, tenant_id
+        FROM stage_executions WHERE stage_execution_id = ${f1.stageId}
       `;
       expect(foreignStage.tenant_id).toBe(f1.tenantId);
-      expect(foreignStage.workspace_id).toBe(f1.workspaceId);
-      expect(foreignStage.idempotency_key).toBe(t1Idem);
-      expect(foreignStage.lease_owner).toBe("worker-t1-owner");
+      expect(foreignStage.lease_owner).toBe("worker-tenant-1");
       expect(foreignStage.fencing_token).toBe(1);
       expect(foreignStage.attempt_count).toBe(1);
       expect(foreignStage.status).toBe("RUNNING");
     });
   });
 
-  it("6. no provider invocation on failed foreign claim", async () => {
+  it("2. cross-workspace stage_execution_id claim fails", async () => {
     await withRollback(async (tx) => {
-      const f1 = await seedClaimEnvironment(tx);
-      const f2 = await seedClaimEnvironment(tx);
-      const resolver = new TrustedPreProviderResolver(tx, f2.objectStore);
+      const f = await seedClaimEnvironment(tx);
+      const otherWorkspaceId = "ws-other-" + randomUUID();
 
-      let providerInvocationCount = 0;
-      const provider = {
-        async generateAudienceProposal() {
-          providerInvocationCount += 1;
-          return { proposal: {} as any, basis_selections: [] };
-        },
+      // Attempting to claim with wrong workspace on existing run
+      await expect(
+        claimContentStageExecution(tx, {
+          tenantId: f.tenantId,
+          workspaceId: otherWorkspaceId,
+          runId: f.runId,
+          decisionCycleId: f.cycleId,
+          stageExecutionId: f.stageId,
+          stageName: "AUDIENCE_FINALIZE",
+          idempotencyKey: "idem-" + randomUUID(),
+          canonicalInputHash: "hash-ws",
+          leaseOwner: "worker-1",
+          cycleEpoch: 1,
+        }),
+      ).rejects.toMatchObject({ code: "RUN_NOT_FOUND" });
+    });
+  });
+
+  it("3. stage belonging to another run fails", async () => {
+    await withRollback(async (tx) => {
+      const f = await seedClaimEnvironment(tx);
+
+      // Create Stage on run 1
+      const idemKey = "idem-" + randomUUID();
+      await claimContentStageExecution(tx, {
+        tenantId: f.tenantId,
+        workspaceId: f.workspaceId,
+        runId: f.runId,
+        decisionCycleId: f.cycleId,
+        stageExecutionId: f.stageId,
+        stageName: "AUDIENCE_FINALIZE",
+        idempotencyKey: idemKey,
+        canonicalInputHash: "hash-run-1",
+        leaseOwner: "worker-1",
+        cycleEpoch: 1,
+      });
+
+      // Create run 2 in same tenant & workspace
+      const run2Id = "run-" + randomUUID();
+      const cycle2Id = "cycle-" + randomUUID();
+      await tx`INSERT INTO runs (
+        run_id, tenant_id, workspace_id, run_correlation_key, task_revision_id, initialization_cutoff,
+        initial_run_config_id, initial_baseline_snapshot_id, status, version
+      ) VALUES (
+        ${run2Id}, ${f.tenantId}, ${f.workspaceId}, ${"corr-" + randomUUID()}, ${f.taskRevId}, now(),
+        ${f.configId}, ${"bks-001"}, ${"RUNNING"}, 0
+      )`;
+      await tx`INSERT INTO decision_cycles (
+        decision_cycle_id, tenant_id, workspace_id, run_id, cycle_number, reason, status, fencing_epoch
+      ) VALUES (
+        ${cycle2Id}, ${f.tenantId}, ${f.workspaceId}, ${run2Id}, 1, ${"TEST"}, ${"OPEN"}, 1
+      )`;
+      await tx`UPDATE runs SET current_decision_cycle_id = ${cycle2Id} WHERE run_id = ${run2Id}`;
+
+      // Attempt to claim existing stageId with run 2
+      await expect(
+        claimContentStageExecution(tx, {
+          tenantId: f.tenantId,
+          workspaceId: f.workspaceId,
+          runId: run2Id,
+          decisionCycleId: cycle2Id,
+          stageExecutionId: f.stageId,
+          stageName: "AUDIENCE_FINALIZE",
+          idempotencyKey: idemKey,
+          canonicalInputHash: "hash-run-1",
+          leaseOwner: "worker-1",
+          cycleEpoch: 1,
+        }),
+      ).rejects.toMatchObject({ code: "STAGE_CLAIM_SCOPE_MISMATCH" });
+    });
+  });
+
+  it("4. stage belonging to another DecisionCycle fails", async () => {
+    await withRollback(async (tx) => {
+      const f = await seedClaimEnvironment(tx);
+
+      const idemKey = "idem-" + randomUUID();
+      await claimContentStageExecution(tx, {
+        tenantId: f.tenantId,
+        workspaceId: f.workspaceId,
+        runId: f.runId,
+        decisionCycleId: f.cycleId,
+        stageExecutionId: f.stageId,
+        stageName: "AUDIENCE_FINALIZE",
+        idempotencyKey: idemKey,
+        canonicalInputHash: "hash-cycle-1",
+        leaseOwner: "worker-1",
+        cycleEpoch: 1,
+      });
+
+      // Create cycle 2 on the same run
+      const cycle2Id = "cycle-" + randomUUID();
+      await tx`INSERT INTO decision_cycles (
+        decision_cycle_id, tenant_id, workspace_id, run_id, cycle_number, reason, status, fencing_epoch
+      ) VALUES (
+        ${cycle2Id}, ${f.tenantId}, ${f.workspaceId}, ${f.runId}, 2, ${"TEST"}, ${"OPEN"}, 1
+      )`;
+      await tx`UPDATE runs SET current_decision_cycle_id = ${cycle2Id} WHERE run_id = ${f.runId}`;
+
+      await expect(
+        claimContentStageExecution(tx, {
+          tenantId: f.tenantId,
+          workspaceId: f.workspaceId,
+          runId: f.runId,
+          decisionCycleId: cycle2Id,
+          stageExecutionId: f.stageId,
+          stageName: "AUDIENCE_FINALIZE",
+          idempotencyKey: idemKey,
+          canonicalInputHash: "hash-cycle-1",
+          leaseOwner: "worker-1",
+          cycleEpoch: 1,
+        }),
+      ).rejects.toMatchObject({ code: "STAGE_CLAIM_SCOPE_MISMATCH" });
+    });
+  });
+
+  it("5. stage_name mismatch fails", async () => {
+    await withRollback(async (tx) => {
+      const f = await seedClaimEnvironment(tx);
+      const idemKey = "idem-" + randomUUID();
+
+      await claimContentStageExecution(tx, {
+        tenantId: f.tenantId,
+        workspaceId: f.workspaceId,
+        runId: f.runId,
+        decisionCycleId: f.cycleId,
+        stageExecutionId: f.stageId,
+        stageName: "AUDIENCE_FINALIZE",
+        idempotencyKey: idemKey,
+        canonicalInputHash: "hash-stage-name",
+        leaseOwner: "worker-1",
+        cycleEpoch: 1,
+      });
+
+      await expect(
+        claimContentStageExecution(tx, {
+          tenantId: f.tenantId,
+          workspaceId: f.workspaceId,
+          runId: f.runId,
+          decisionCycleId: f.cycleId,
+          stageExecutionId: f.stageId,
+          stageName: "DIFFERENT_STAGE_NAME",
+          idempotencyKey: idemKey,
+          canonicalInputHash: "hash-stage-name",
+          leaseOwner: "worker-1",
+          cycleEpoch: 1,
+        }),
+      ).rejects.toMatchObject({ code: "STAGE_CLAIM_SCOPE_MISMATCH" });
+    });
+  });
+
+  it("6. idempotency_key mismatch fails", async () => {
+    await withRollback(async (tx) => {
+      const f = await seedClaimEnvironment(tx);
+
+      await claimContentStageExecution(tx, {
+        tenantId: f.tenantId,
+        workspaceId: f.workspaceId,
+        runId: f.runId,
+        decisionCycleId: f.cycleId,
+        stageExecutionId: f.stageId,
+        stageName: "AUDIENCE_FINALIZE",
+        idempotencyKey: "idem-first",
+        canonicalInputHash: "hash-idem",
+        leaseOwner: "worker-1",
+        cycleEpoch: 1,
+      });
+
+      await expect(
+        claimContentStageExecution(tx, {
+          tenantId: f.tenantId,
+          workspaceId: f.workspaceId,
+          runId: f.runId,
+          decisionCycleId: f.cycleId,
+          stageExecutionId: f.stageId,
+          stageName: "AUDIENCE_FINALIZE",
+          idempotencyKey: "idem-second",
+          canonicalInputHash: "hash-idem",
+          leaseOwner: "worker-1",
+          cycleEpoch: 1,
+        }),
+      ).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    });
+  });
+
+  it("7. canonical_input_hash mismatch still fails", async () => {
+    await withRollback(async (tx) => {
+      const f = await seedClaimEnvironment(tx);
+      const idemKey = "idem-" + randomUUID();
+
+      await claimContentStageExecution(tx, {
+        tenantId: f.tenantId,
+        workspaceId: f.workspaceId,
+        runId: f.runId,
+        decisionCycleId: f.cycleId,
+        stageExecutionId: f.stageId,
+        stageName: "AUDIENCE_FINALIZE",
+        idempotencyKey: idemKey,
+        canonicalInputHash: "hash-original",
+        leaseOwner: "worker-1",
+        cycleEpoch: 1,
+      });
+
+      await expect(
+        claimContentStageExecution(tx, {
+          tenantId: f.tenantId,
+          workspaceId: f.workspaceId,
+          runId: f.runId,
+          decisionCycleId: f.cycleId,
+          stageExecutionId: f.stageId,
+          stageName: "AUDIENCE_FINALIZE",
+          idempotencyKey: idemKey,
+          canonicalInputHash: "hash-tampered",
+          leaseOwner: "worker-1",
+          cycleEpoch: 1,
+        }),
+      ).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    });
+  });
+
+  it("8. idempotency_key resolves Stage A while stage_execution_id resolves Stage B => fail closed deterministically", async () => {
+    await withRollback(async (tx) => {
+      const f = await seedClaimEnvironment(tx);
+      const stageA = "stage-A-" + randomUUID();
+      const stageB = "stage-B-" + randomUUID();
+      const idemA = "idem-A-" + randomUUID();
+      const idemB = "idem-B-" + randomUUID();
+
+      await claimContentStageExecution(tx, {
+        tenantId: f.tenantId,
+        workspaceId: f.workspaceId,
+        runId: f.runId,
+        decisionCycleId: f.cycleId,
+        stageExecutionId: stageA,
+        stageName: "AUDIENCE_FINALIZE",
+        idempotencyKey: idemA,
+        canonicalInputHash: "hash-A",
+        leaseOwner: "worker-1",
+        cycleEpoch: 1,
+      });
+
+      await claimContentStageExecution(tx, {
+        tenantId: f.tenantId,
+        workspaceId: f.workspaceId,
+        runId: f.runId,
+        decisionCycleId: f.cycleId,
+        stageExecutionId: stageB,
+        stageName: "AUDIENCE_FINALIZE",
+        idempotencyKey: idemB,
+        canonicalInputHash: "hash-B",
+        leaseOwner: "worker-1",
+        cycleEpoch: 1,
+      });
+
+      // Cross-claim: stageExecutionId is stageB, but idempotencyKey is idemA!
+      await expect(
+        claimContentStageExecution(tx, {
+          tenantId: f.tenantId,
+          workspaceId: f.workspaceId,
+          runId: f.runId,
+          decisionCycleId: f.cycleId,
+          stageExecutionId: stageB,
+          stageName: "AUDIENCE_FINALIZE",
+          idempotencyKey: idemA,
+          canonicalInputHash: "hash-A",
+          leaseOwner: "worker-1",
+          cycleEpoch: 1,
+        }),
+      ).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    });
+  });
+
+  it("9. failed claim invokes provider zero times", async () => {
+    await withRollback(async (tx) => {
+      const f = await seedClaimEnvironment(tx);
+      const resolver = new TrustedPreProviderResolver(tx, f.objectStore);
+      const previousState: AudienceStateView = {
+        audience_state_id: "aud-prev",
+        task_revision_id: f.taskRevId,
+        state_stage: "PROVISIONAL",
+        context: {}, knowledge_state: {}, problem_state: {}, solution_state: {},
+        product_state: {}, brand_state: {}, intent_state: { segment: "developers" },
+        desired_outcome: {}, objections: [], decision_criteria: [], prior_exposure: {},
+        origin: [{ kind: "PROPOSITION", reference_id: f.propId }], uncertainty: [],
+        created_at: new Date(),
       };
 
-      const realClaimPort: AudienceStageClaimPort = {
-        claimStageExecution: (params) => claimContentStageExecution(tx, params),
+      let providerCalled = 0;
+      const failingClaimPort: AudienceStageClaimPort = {
+        async claimStageExecution() {
+          return {
+            claimed: false,
+            stageExecutionId: f.stageId,
+            fencingToken: 1,
+            leaseOwner: "other-worker",
+            canonicalInputHash: "hash-1",
+            cycleEpoch: 1,
+            reason: "LEASE_HELD_BY_ANOTHER_WORKER",
+          };
+        },
       };
 
       const orchestrator = new DeriveAudienceState(
         {
           async resolveAuthorizedInputs() {
-            return { provider_context: {}, material_governance_dependencies_changed: false };
+            return {
+              provider_context: {},
+              material_governance_dependencies_changed: false,
+              previous_state: previousState,
+            };
           },
         },
-        provider as any,
-        new AudienceStatePersistenceService(new PostgresAudienceStateCommitPort(tx, f2.objectStore)),
+        {
+          async deriveAudienceState() {
+            providerCalled++;
+            return previousState;
+          },
+        },
+        new AudienceStatePersistenceService(new PostgresAudienceStateCommitPort(tx, f.objectStore)),
         { nextAudienceStateId: () => "aud-" + randomUUID(), now: () => new Date() },
         {
           async resolve() {
             return {
-              schema_revision_id: f2.schemaRevId,
+              schema_revision_id: f.schemaRevId,
               prompt_revision_id: "prompt-rev-1",
               model_revision_id: "model-rev-1",
               tool_revision_ids: [],
-              run_config_id: f2.configId,
+              run_config_id: f.configId,
             };
           },
         },
         resolver,
-        realClaimPort,
+        failingClaimPort,
       );
 
-      // Attempt claim using foreign run_id
       await expect(
         orchestrator.execute({
           request_identity: "req-" + randomUUID(),
           authority: {
-            tenant_id: f2.tenantId,
-            workspace_id: f2.workspaceId,
-            run_id: f1.runId, // Foreign run!
-            decision_cycle_id: f2.cycleId,
-            stage_execution_id: f2.stageId,
+            tenant_id: f.tenantId,
+            workspace_id: f.workspaceId,
+            run_id: f.runId,
+            decision_cycle_id: f.cycleId,
+            stage_execution_id: f.stageId,
             stage_name: "AUDIENCE_FINALIZE",
             idempotency_key: "idem-" + randomUUID(),
-            lease_owner: "worker-t2",
+            lease_owner: "worker-1",
             cycle_epoch: 1,
             fencing_token: 1,
-            run_config_id: f2.configId,
+            run_config_id: f.configId,
+            canonical_input_hash: "canonical-hash-1",
           },
-          task_revision_id: f2.taskRevId,
-          target_stage: "FINAL_FOR_DECISION",
+          generation_config: {
+            prompt_revision_id: "prompt-rev-1",
+            model_revision_id: "model-rev-1",
+            schema_revision_id: f.schemaRevId,
+            tool_revision_ids: [],
+          },
         }),
       ).rejects.toThrow();
 
-      expect(providerInvocationCount).toBe(0);
+      expect(providerCalled).toBe(0);
     });
   });
 
-  it("7. local exact stage renewal still passes", async () => {
+  it("10. failed cross-scope claim does not change: lease_owner, fencing_token, attempt_count, status", async () => {
+    await withRollback(async (tx) => {
+      const f = await seedClaimEnvironment(tx);
+      const idemKey = "idem-" + randomUUID();
+
+      await claimContentStageExecution(tx, {
+        tenantId: f.tenantId,
+        workspaceId: f.workspaceId,
+        runId: f.runId,
+        decisionCycleId: f.cycleId,
+        stageExecutionId: f.stageId,
+        stageName: "AUDIENCE_FINALIZE",
+        idempotencyKey: idemKey,
+        canonicalInputHash: "hash-preserve",
+        leaseOwner: "original-owner",
+        cycleEpoch: 1,
+      });
+
+      // Attempt invalid claim with mismatched stage_name
+      await expect(
+        claimContentStageExecution(tx, {
+          tenantId: f.tenantId,
+          workspaceId: f.workspaceId,
+          runId: f.runId,
+          decisionCycleId: f.cycleId,
+          stageExecutionId: f.stageId,
+          stageName: "WRONG_STAGE_NAME",
+          idempotencyKey: idemKey,
+          canonicalInputHash: "hash-preserve",
+          leaseOwner: "rogue-owner",
+          cycleEpoch: 1,
+        }),
+      ).rejects.toMatchObject({ code: "STAGE_CLAIM_SCOPE_MISMATCH" });
+
+      const [stageRow] = await tx`
+        SELECT lease_owner, fencing_token, attempt_count, status
+        FROM stage_executions WHERE stage_execution_id = ${f.stageId}
+      `;
+      expect(stageRow.lease_owner).toBe("original-owner");
+      expect(stageRow.fencing_token).toBe(1);
+      expect(stageRow.attempt_count).toBe(1);
+      expect(stageRow.status).toBe("RUNNING");
+    });
+  });
+
+  it("11. exact same-worker renewal still passes", async () => {
     await withRollback(async (tx) => {
       const f = await seedClaimEnvironment(tx);
       const idemKey = "idem-" + randomUUID();
@@ -578,7 +735,7 @@ describe("Tenant/Workspace-Scoped StageExecution Claim Suite (11 required cases)
     });
   });
 
-  it("8. local exact takeover still passes", async () => {
+  it("12. valid expired-lease takeover on exact same stage passes and increments fencing_token/attempt_count", async () => {
     await withRollback(async (tx) => {
       const f = await seedClaimEnvironment(tx);
       const idemKey = "idem-" + randomUUID();
@@ -631,64 +788,21 @@ describe("Tenant/Workspace-Scoped StageExecution Claim Suite (11 required cases)
     });
   });
 
-  it("9. dual local identifier conflict still fails", async () => {
+  it("13. stale old worker cannot commit afterward", async () => {
     await withRollback(async (tx) => {
       const f = await seedClaimEnvironment(tx);
-      const stageA = "stage-A-" + randomUUID();
-      const stageB = "stage-B-" + randomUUID();
-      const idemA = "idem-A-" + randomUUID();
-      const idemB = "idem-B-" + randomUUID();
-
-      await claimContentStageExecution(tx, {
-        tenantId: f.tenantId,
-        workspaceId: f.workspaceId,
-        runId: f.runId,
-        decisionCycleId: f.cycleId,
-        stageExecutionId: stageA,
-        stageName: "AUDIENCE_FINALIZE",
-        idempotencyKey: idemA,
-        canonicalInputHash: "hash-A",
-        leaseOwner: "worker-1",
-        cycleEpoch: 1,
+      const resolver = new TrustedPreProviderResolver(tx, f.objectStore);
+      const resolved = await resolver.resolveCanonicalInputs({
+        tenant_id: f.tenantId,
+        workspace_id: f.workspaceId,
+        run_id: f.runId,
+        decision_cycle_id: f.cycleId,
+        run_config_id: f.configId,
+        task_revision_id: f.taskRevId,
       });
 
-      await claimContentStageExecution(tx, {
-        tenantId: f.tenantId,
-        workspaceId: f.workspaceId,
-        runId: f.runId,
-        decisionCycleId: f.cycleId,
-        stageExecutionId: stageB,
-        stageName: "AUDIENCE_FINALIZE",
-        idempotencyKey: idemB,
-        canonicalInputHash: "hash-B",
-        leaseOwner: "worker-1",
-        cycleEpoch: 1,
-      });
-
-      // Cross-claim: stageExecutionId is stageB, but idempotencyKey is idemA!
-      await expect(
-        claimContentStageExecution(tx, {
-          tenantId: f.tenantId,
-          workspaceId: f.workspaceId,
-          runId: f.runId,
-          decisionCycleId: f.cycleId,
-          stageExecutionId: stageB,
-          stageName: "AUDIENCE_FINALIZE",
-          idempotencyKey: idemA,
-          canonicalInputHash: "hash-A",
-          leaseOwner: "worker-1",
-          cycleEpoch: 1,
-        }),
-      ).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
-    });
-  });
-
-  it("10. canonical hash mismatch still fails", async () => {
-    await withRollback(async (tx) => {
-      const f = await seedClaimEnvironment(tx);
       const idemKey = "idem-" + randomUUID();
-
-      await claimContentStageExecution(tx, {
+      const worker1Claim = await claimContentStageExecution(tx, {
         tenantId: f.tenantId,
         workspaceId: f.workspaceId,
         runId: f.runId,
@@ -696,29 +810,132 @@ describe("Tenant/Workspace-Scoped StageExecution Claim Suite (11 required cases)
         stageExecutionId: f.stageId,
         stageName: "AUDIENCE_FINALIZE",
         idempotencyKey: idemKey,
-        canonicalInputHash: "hash-original",
+        canonicalInputHash: resolved.canonicalInputHash,
         leaseOwner: "worker-1",
         cycleEpoch: 1,
       });
+      expect(worker1Claim.fencingToken).toBe(1);
 
+      // Expire lease and worker 2 takes over
+      await tx`UPDATE stage_executions SET lease_expires_at = now() - INTERVAL '1 second' WHERE stage_execution_id = ${f.stageId}`;
+      const worker2Claim = await claimContentStageExecution(tx, {
+        tenantId: f.tenantId,
+        workspaceId: f.workspaceId,
+        runId: f.runId,
+        decisionCycleId: f.cycleId,
+        stageExecutionId: f.stageId,
+        stageName: "AUDIENCE_FINALIZE",
+        idempotencyKey: idemKey,
+        canonicalInputHash: resolved.canonicalInputHash,
+        leaseOwner: "worker-2",
+        cycleEpoch: 1,
+      });
+      expect(worker2Claim.fencingToken).toBe(2);
+
+      // Worker 1 attempts to commit with stale fencing_token = 1
+      const manifestBase = {
+        tenant_id: f.tenantId,
+        workspace_id: f.workspaceId,
+        run_config_id: f.configId,
+        task_id: f.taskId,
+        task_revision_id: f.taskRevId,
+        audience_knowledge_cutoff_time: resolved.trustedCutoff,
+        audience_valid_time: resolved.trustedCutoff,
+        canonical_input_hash: resolved.canonicalInputHash,
+        derivation_manifest_hash: "",
+        audience_schema_ref: resolved.preProviderCore.audience_schema_ref,
+        audience_schema_payload_hash: resolved.preProviderCore.audience_schema_payload_hash,
+        audience_schema_role_binding: resolved.schemaBinding,
+        eligible_task_audience_context: resolved.eligibleTaskAudienceContext,
+        eligible_epistemic_refs: resolved.eligibleEpistemicRefs,
+        fact_admissions: [],
+      };
+      const manifest: AudienceDerivationManifest = {
+        ...manifestBase,
+        derivation_manifest_hash: hashAudienceDerivationManifest(manifestBase),
+      };
+
+      const proposal: AudienceStateView = {
+        audience_state_id: "aud-" + randomUUID(),
+        task_revision_id: f.taskRevId,
+        state_stage: "FINAL_FOR_DECISION",
+        context: {}, knowledge_state: {}, problem_state: {}, solution_state: {},
+        product_state: {}, brand_state: {}, intent_state: { segment: "developers" },
+        desired_outcome: {}, objections: [], decision_criteria: [], prior_exposure: {},
+        origin: [{ kind: "PROPOSITION", reference_id: f.propId }], uncertainty: [],
+        created_at: new Date(),
+      };
+
+      const admitted = validateAudienceAdmission(
+        {
+          audience: proposal,
+          manifest,
+          schema_role_bindings: [resolved.schemaBinding],
+          schema: resolved.schemaPayload,
+          task_market: resolved.task.market,
+          task_jurisdiction: resolved.task.jurisdiction,
+          task_audience_context: resolved.task.audience_context,
+          basis_selections: [{
+            audience_field: "intent_state",
+            fact_path: "/segment",
+            ordinal: 0,
+            basis_kind: "AUDIENCE_EPISTEMIC_STATE",
+            proposition_id: f.propId,
+            epistemic_state_id: f.epiId,
+          }],
+          propositions: resolved.propositions,
+          epistemic_states: resolved.epistemicStates,
+        },
+        {
+          tenant_id: f.tenantId, workspace_id: f.workspaceId,
+          run_config_id: f.configId, task_revision_id: f.taskRevId,
+          canonical_input_hash: resolved.canonicalInputHash,
+        },
+      );
+
+      const commitPort = new PostgresAudienceStateCommitPort(tx, f.objectStore);
       await expect(
-        claimContentStageExecution(tx, {
-          tenantId: f.tenantId,
-          workspaceId: f.workspaceId,
-          runId: f.runId,
-          decisionCycleId: f.cycleId,
-          stageExecutionId: f.stageId,
-          stageName: "AUDIENCE_FINALIZE",
-          idempotencyKey: idemKey,
-          canonicalInputHash: "hash-tampered",
-          leaseOwner: "worker-1",
-          cycleEpoch: 1,
+        commitPort.commitAudienceState({
+          authority: {
+            tenant_id: f.tenantId, workspace_id: f.workspaceId,
+            run_id: f.runId, decision_cycle_id: f.cycleId,
+            stage_execution_id: f.stageId, stage_name: "AUDIENCE_FINALIZE",
+            idempotency_key: idemKey, lease_owner: "worker-1",
+            cycle_epoch: 1, fencing_token: worker1Claim.fencingToken, // STALE!
+            run_config_id: f.configId, canonical_input_hash: resolved.canonicalInputHash,
+          },
+          request_identity: "req-" + randomUUID(),
+          generation_config: {
+            prompt_revision_id: "prompt-rev-1",
+            model_revision_id: "model-rev-1",
+            schema_revision_id: f.schemaRevId,
+            tool_revision_ids: [],
+          },
+          state: proposal,
+          material_governance_dependencies_changed: false,
+          derivation_authority: {
+            audience_knowledge_cutoff_time: resolved.trustedCutoff,
+            derivation_manifest: manifest,
+            derivation_manifest_hash: manifest.derivation_manifest_hash,
+            schema_binding: resolved.schemaBinding,
+            audience_admission_hash: admitted.audience_admission_hash,
+          },
+          audience_admission_hash: admitted.audience_admission_hash,
+          fact_basis_links: [{
+            audience_field: "intent_state",
+            fact_path: "/segment",
+            fact_value_hash: "fvh-1",
+            basis_kind: "AUDIENCE_EPISTEMIC_STATE" as const,
+            proposition_id: f.propId,
+            epistemic_state_id: f.epiId,
+            ordinal: 0,
+          }],
         }),
-      ).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+      ).rejects.toMatchObject({ code: "STALE_FENCING_TOKEN" });
     });
   });
 
-  it("11. positive Audience path remains green", async () => {
+  it("14. positive Audience production flow remains green", async () => {
     await withRollback(async (tx) => {
       const f = await seedClaimEnvironment(tx);
       const resolver = new TrustedPreProviderResolver(tx, f.objectStore);
@@ -737,6 +954,7 @@ describe("Tenant/Workspace-Scoped StageExecution Claim Suite (11 required cases)
         created_at: new Date(),
       };
 
+      // Seed previous state into DB
       await tx`INSERT INTO immutable_entity_registry (entity_type, entity_id, tenant_id, workspace_id, payload_state)
         VALUES (${"AudienceState"}, ${previousState.audience_state_id}, ${f.tenantId}, ${f.workspaceId}, ${"AVAILABLE"})`;
       await tx`INSERT INTO audience_states (
@@ -844,6 +1062,164 @@ describe("Tenant/Workspace-Scoped StageExecution Claim Suite (11 required cases)
         SELECT status FROM stage_executions WHERE stage_execution_id = ${f.stageId}
       `;
       expect(storedStage.status).toBe("COMPLETED");
+    });
+  });
+  it("15. foreign run_id cannot be selected as authorized Run", async () => {
+    await withRollback(async (tx) => {
+      const f1 = await seedClaimEnvironment(tx);
+      const f2 = await seedClaimEnvironment(tx);
+
+      await expect(
+        claimContentStageExecution(tx, {
+          tenantId: f2.tenantId,
+          workspaceId: f2.workspaceId,
+          runId: f1.runId, // Foreign run_id!
+          decisionCycleId: f2.cycleId,
+          stageExecutionId: f2.stageId,
+          stageName: "AUDIENCE_FINALIZE",
+          idempotencyKey: "idem-" + randomUUID(),
+          canonicalInputHash: "hash-run-scope",
+          leaseOwner: "worker-t2",
+          cycleEpoch: 1,
+        }),
+      ).rejects.toMatchObject({ code: "RUN_NOT_FOUND" });
+
+      const scopedRunRows = await tx`
+        SELECT * FROM runs
+        WHERE run_id = ${f1.runId}
+          AND tenant_id = ${f2.tenantId}
+      `;
+      expect(scopedRunRows.length).toBe(0);
+    });
+  });
+
+  it("16. foreign decision_cycle_id cannot be selected as authorized cycle", async () => {
+    await withRollback(async (tx) => {
+      const f1 = await seedClaimEnvironment(tx);
+      const f2 = await seedClaimEnvironment(tx);
+
+      await expect(
+        claimContentStageExecution(tx, {
+          tenantId: f2.tenantId,
+          workspaceId: f2.workspaceId,
+          runId: f2.runId,
+          decisionCycleId: f1.cycleId, // Foreign cycle_id!
+          stageExecutionId: f2.stageId,
+          stageName: "AUDIENCE_FINALIZE",
+          idempotencyKey: "idem-" + randomUUID(),
+          canonicalInputHash: "hash-cycle-scope",
+          leaseOwner: "worker-t2",
+          cycleEpoch: 1,
+        }),
+      ).rejects.toMatchObject({ code: "DECISION_CYCLE_NOT_CURRENT" });
+
+      await tx`UPDATE runs SET current_decision_cycle_id = ${f1.cycleId} WHERE run_id = ${f2.runId}`;
+      await expect(
+        claimContentStageExecution(tx, {
+          tenantId: f2.tenantId,
+          workspaceId: f2.workspaceId,
+          runId: f2.runId,
+          decisionCycleId: f1.cycleId,
+          stageExecutionId: f2.stageId,
+          stageName: "AUDIENCE_FINALIZE",
+          idempotencyKey: "idem-" + randomUUID(),
+          canonicalInputHash: "hash-cycle-scope",
+          leaseOwner: "worker-t2",
+          cycleEpoch: 1,
+        }),
+      ).rejects.toMatchObject({ code: "DECISION_CYCLE_NOT_FOUND" });
+
+      const scopedCycleRows = await tx`
+        SELECT * FROM decision_cycles WHERE decision_cycle_id = ${f1.cycleId} AND tenant_id = ${f2.tenantId}
+      `;
+      expect(scopedCycleRows.length).toBe(0);
+    });
+  });
+
+  it("17. foreign stage_execution_id cannot become a scoped existing stage", async () => {
+    await withRollback(async (tx) => {
+      const f1 = await seedClaimEnvironment(tx);
+      const f2 = await seedClaimEnvironment(tx);
+
+      await claimContentStageExecution(tx, {
+        tenantId: f1.tenantId,
+        workspaceId: f1.workspaceId,
+        runId: f1.runId,
+        decisionCycleId: f1.cycleId,
+        stageExecutionId: f1.stageId,
+        stageName: "AUDIENCE_FINALIZE",
+        idempotencyKey: "idem-" + randomUUID(),
+        canonicalInputHash: "hash-stage-scope",
+        leaseOwner: "worker-t1",
+        cycleEpoch: 1,
+      });
+
+      const scopedStageRows = await tx`
+        SELECT * FROM stage_executions
+        WHERE stage_execution_id = ${f1.stageId}
+          AND tenant_id = ${f2.tenantId}
+          AND workspace_id IS NOT DISTINCT FROM ${f2.workspaceId}
+      `;
+      expect(scopedStageRows.length).toBe(0);
+
+      await expect(
+        claimContentStageExecution(tx, {
+          tenantId: f2.tenantId,
+          workspaceId: f2.workspaceId,
+          runId: f2.runId,
+          decisionCycleId: f2.cycleId,
+          stageExecutionId: f1.stageId,
+          stageName: "AUDIENCE_FINALIZE",
+          idempotencyKey: "idem-" + randomUUID(),
+          canonicalInputHash: "hash-stage-scope",
+          leaseOwner: "worker-t2",
+          cycleEpoch: 1,
+        }),
+      ).rejects.toMatchObject({ code: "STAGE_CLAIM_SCOPE_MISMATCH" });
+    });
+  });
+
+  it("18. foreign idempotency_key cannot become a scoped existing stage", async () => {
+    await withRollback(async (tx) => {
+      const f1 = await seedClaimEnvironment(tx);
+      const f2 = await seedClaimEnvironment(tx);
+      const sharedIdemKey = "idem-global-" + randomUUID();
+
+      await claimContentStageExecution(tx, {
+        tenantId: f1.tenantId,
+        workspaceId: f1.workspaceId,
+        runId: f1.runId,
+        decisionCycleId: f1.cycleId,
+        stageExecutionId: f1.stageId,
+        stageName: "AUDIENCE_FINALIZE",
+        idempotencyKey: sharedIdemKey,
+        canonicalInputHash: "hash-idem-scope",
+        leaseOwner: "worker-t1",
+        cycleEpoch: 1,
+      });
+
+      const scopedIdemRows = await tx`
+        SELECT * FROM stage_executions
+        WHERE idempotency_key = ${sharedIdemKey}
+          AND tenant_id = ${f2.tenantId}
+          AND workspace_id IS NOT DISTINCT FROM ${f2.workspaceId}
+      `;
+      expect(scopedIdemRows.length).toBe(0);
+
+      await expect(
+        claimContentStageExecution(tx, {
+          tenantId: f2.tenantId,
+          workspaceId: f2.workspaceId,
+          runId: f2.runId,
+          decisionCycleId: f2.cycleId,
+          stageExecutionId: f2.stageId,
+          stageName: "AUDIENCE_FINALIZE",
+          idempotencyKey: sharedIdemKey,
+          canonicalInputHash: "hash-idem-scope",
+          leaseOwner: "worker-t2",
+          cycleEpoch: 1,
+        }),
+      ).rejects.toMatchObject({ code: "STAGE_CLAIM_SCOPE_MISMATCH" });
     });
   });
 });

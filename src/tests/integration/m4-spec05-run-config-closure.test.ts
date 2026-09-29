@@ -264,8 +264,6 @@ describe("RunConfig Canonical Identity Closure Suite", () => {
   beforeAll(async () => {
     const migrationsDir = path.resolve(import.meta.dirname, "../../persistence/relational/migrations");
     const files = [
-      "0000_chemical_iron_man.sql",
-      "0001_fantastic_kid_colt.sql",
       "0002_m2_immutable_triggers.sql",
       "0003_m2_standalone_privilege_closure.sql",
       "0004_m2_standalone_lock_authority_closure.sql",
@@ -281,11 +279,7 @@ describe("RunConfig Canonical Identity Closure Suite", () => {
       const fileSql = fs.readFileSync(filePath, "utf8");
       const stmts = fileSql.split("--> statement-breakpoint").map((s) => s.trim()).filter(Boolean);
       for (const stmt of stmts) {
-        try {
-          await sql.unsafe(stmt);
-        } catch {
-          // Ignore
-        }
+        await sql.unsafe(stmt);
       }
     }
   });
