@@ -835,9 +835,13 @@ audience_knowledge_cutoff_time
 ↓
 resolve exact eligible audience inputs as-of that boundary
 ↓
-construct exact derivation manifest
+construct PRE_PROVIDER_MANIFEST_CORE
 ↓
-compute canonical_input_hash
+compute StageExecution.canonical_input_hash
+over the core only
+↓
+seal PRE_PROVIDER_MANIFEST_ENVELOPE
+with the computed hash
 ↓
 provider/model invocation
 ```
@@ -3422,24 +3426,30 @@ PRE-PROVIDER DERIVATION MANIFEST
 =
 CANONICAL ELIGIBILITY CONTEXT
 
-The pre-provider manifest may contain:
+The authoritative hash input is PRE_PROVIDER_MANIFEST_CORE.
+
+PRE_PROVIDER_MANIFEST_CORE includes, where applicable:
 
 - exact TaskContractRevision;
 - exact eligible Task.audience_context paths/values;
-- exact eligible AUDIENCE Proposition refs;
+- eligible AUDIENCE Proposition refs;
 - exact eligible EpistemicStateVersion refs;
-- exact KnowledgeGap / ResearchTrace refs when used;
+- KnowledgeGap / ResearchTrace refs;
+- ChannelProfileRevision / Program/governance context when material;
 - exact RunConfig;
-- exact CONTENT_INTELLIGENCE_AUDIENCE RunConfigSchemaRoleBinding;
-- proof of membership in RunConfig.schema_revision_refs;
+- exact CONTENT_INTELLIGENCE_AUDIENCE role binding;
+- exact schema_revision_refs membership proof;
 - exact SchemaDefinition revision;
-- exact immutable SchemaDefinition payload hash/binding;
-- complete AudienceSemanticProjectionSchema configuration / eligible rule set;
+- exact immutable SchemaDefinition payload identity/hash;
+- complete AudienceSemanticProjectionSchema configuration;
 - traversal/path/classification configuration;
-- uncertainty coverage schema;
-- trusted audience_knowledge_cutoff_time;
+- uncertainty-coverage configuration;
 - tenant/workspace;
-- StageExecution.canonical_input_hash.
+- trusted audience_knowledge_cutoff_time;
+- all other deterministic material pre-provider inputs.
+
+StageExecution.canonical_input_hash may appear only in the sealed envelope (PRE_PROVIDER_MANIFEST_ENVELOPE) / operational metadata after computation.
+The hash is not a member of the serialization it hashes.
 
 It MUST NOT pre-provider record or claim:
 
@@ -3498,6 +3508,13 @@ exact RunConfig
 exact tenant/workspace scope
 exact audience_knowledge_cutoff_time
 ```
+
+StageExecution.canonical_input_hash
+=
+hash(PRE_PROVIDER_MANIFEST_CORE canonical serialization)
+
+and NOT:
+hash(PRE_PROVIDER_MANIFEST_ENVELOPE containing canonical_input_hash)
 
 It MUST NOT require generated-output-dependent values such as:
 - final generated Audience factual leaf values;
@@ -3903,9 +3920,11 @@ resolve exact Audience schema role binding
 ↓
 resolve exact SchemaDefinition payload
 ↓
-construct PRE-PROVIDER derivation manifest
+construct PRE_PROVIDER_MANIFEST_CORE
 ↓
 compute/finalize StageExecution.canonical_input_hash
+↓
+seal PRE_PROVIDER_MANIFEST_ENVELOPE
 ↓
 provider/model invocation
 ↓
@@ -3937,12 +3956,13 @@ re-resolve exact:
 - schema membership;
 - SchemaDefinition revision/payload.
 
-reconstruct and verify the exact pre-provider input identity.
+reconstruct PRE_PROVIDER_MANIFEST_CORE
+↓
+recompute canonical_input_hash
+↓
+compare to the finalized StageExecution value
 
-require:
-recomputed StageExecution.canonical_input_hash
-==
-the canonical_input_hash finalized before provider invocation
+Do not hash the envelope's stored hash field.
 
 Then from the exact proposal being admitted:
 
@@ -4713,6 +4733,7 @@ even if the caller/provider supplies a later cutoff assertion.
 The provider or caller attempts to forge hash identity or assert authoritative projection decisions before trusted admission validation.
 
 **Subcases (MUST FAIL CLOSED):**
+- implementation attempts to verify canonical_input_hash by hashing an envelope containing that same hash field (INVALID IMPLEMENTATION CONTRACT)
 - forged caller/provider `canonical_input_hash` (mismatch against reconstructed pre-provider manifest)
 - forged caller/provider `audience_admission_hash` (mismatch against reconstructed trusted admission)
 - provider attempts to select projection rule (authoritative selection belongs solely to runtime)
@@ -4838,7 +4859,11 @@ For v1.0.5 this additionally requires:
 - commit-time canonical admission is fully re-resolved;
 - commit-time audience_admission_hash must equal the trusted post-provider precommit hash;
 - mismatch fails closed;
-- no hidden authority DTO can substitute for canonical reconstruction.
+- no hidden authority DTO can substitute for canonical reconstruction;
+- canonical_input_hash hashes an exact deterministic pre-provider manifest core;
+- the hash field is excluded from its own hash input;
+- the final manifest envelope may record the resulting hash only after computation;
+- self-referential/fixed-point hashing is forbidden.
 
 4.
 Audience changes create new immutable state.
@@ -5217,6 +5242,9 @@ v1.0.4 required `canonical_input_hash` to be computed *before* provider invocati
 v1.0.5 therefore closes this circular dependency with explicit two-phase hash semantics:
 1. `StageExecution.canonical_input_hash`: Strictly represents pre-provider material stage input identity.
 2. `audience_admission_hash`: Strictly represents post-provider trusted audience admission identity.
+
+The two-phase-hash patch also makes the pre-provider hash serialization mechanically non-self-referential:
+manifest core → canonical_input_hash → sealed manifest envelope.
 
 - all unrelated v1.0.4 closures remain preserved;
 - v1.0.5 supersedes ONLY the v1.0.4 clauses that require generated-leaf-specific/post-provider admission values inside the pre-provider StageExecution.canonical_input_hash;
