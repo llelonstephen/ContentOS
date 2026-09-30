@@ -123,3 +123,35 @@ Implement the creative derivation runtime specified in `ContentOS_SPEC05_Content
 - Validated `ContentCandidate` entities with complete parent lineage.
 - Fully wired, fenced, and tenant-scoped `StageExecution` leasing coordinator.
 - Cryptographically pinned generation records ready for assertion extraction and evaluation under SPEC06.
+
+---
+
+## Milestone 5: Evaluation Framework
+
+### Goal
+Implement the evaluation framework specified in `ContentOS_SPEC06_Evaluation_Framework_v1.0.2_FROZEN.md`, establishing assertion extraction, assertion mapping, assertion validation against decision-time EpistemicState, composite impression assessment loops, qualitative evaluation with hard gates, risk and uncertainty assessment, and snapshot evaluation closure.
+
+### Status
+**SPEC FROZEN / IMPLEMENTATION PENDING**
+*(M5 implementation has not started; no verified M5 tag exists yet)*
+
+### Frozen Specification & External Audit Record
+- **Authoritative Specification**: `ContentOS_SPEC06_Evaluation_Framework_v1.0.2_FROZEN.md`
+- **Frozen SHA256**: `5c8e61eb5203a33a58727ec0eb98a194326c512b01e536e5bea5ef0a093c8df5`
+- **External Specification Audit**: **PASS**
+  - External Audit Input SHA256: `bbe9cd003dd4244357f32716630891b5a3cb288b2e69c74422ede93531667204`
+  - Blockers: 0
+  - Partials: 0
+- **Locked Audit Suite**:
+  - 80 Adversarial Vectors (Vectors 01–80 locked)
+  - 34 Static Contract Preflight Checks (Checks 01–34 locked)
+  - 34 Acceptance Criteria (Criteria 1–34 locked)
+
+### Inherited Normative Boundaries (to be implemented in M5)
+- Mandatory `StageExecution` atomic claim before evaluator/model/provider execution.
+- Deterministic canonical serialization contract over non-canonical `EvaluationStageInputCore` DTO.
+- Full RunConfig identity (`run_config_id`, `runtime_parameters`, and normalized prompt, model, tool, schema, retriever, evaluator ref sets) + exact stage-utilized config member binding.
+- Commit-time trusted reconstruction and hash equality verification inside atomic transaction (§150A).
+- `EVALUATION_CLOSURE` StageExecution binding exact selected-reference package without silent rebase (§133A / §158).
+- Scope-first tenant/workspace resolution and distributed fencing preservation.
+- Architectural decision formalized in [ADR-006](adr/ADR-006-spec06-evaluation-stage-authority.md).

@@ -132,7 +132,7 @@ ContentOS is specification-driven. The codebase does not treat Markdown specific
   4. `ContentOS_SPEC03_Evidence_Proposition_Epistemic_State_v1.0.1_FROZEN.md`: Knowledge graph, epistemic scoring.
   5. `ContentOS_SPEC04_Governance_Policy_Engine_v1.0.2_FROZEN.md`: Policy DSL, conflict resolution, overrides.
   6. `ContentOS_SPEC05_Content_Intelligence_Runtime_v1.0.5_FROZEN.md`: Intelligence runtime, two-phase hashing, audience derivation.
-  7. `ContentOS_SPEC06_Evaluation_Framework_v1.0.1_FROZEN.md`: Content evaluation and gate admission.
+  7. `ContentOS_SPEC06_Evaluation_Framework_v1.0.2_FROZEN.md`: Content evaluation and gate admission.
   8. `ContentOS_SPEC07_Measurement_Experimentation_Learning_v1.0_FROZEN.md`: Post-publication learning.
   9. `ContentOS_SPEC08_Security_Privacy_Rights_v1.0.1_FROZEN.md`: RBAC, secret storage, rights enforcement.
   10. `ContentOS_SPEC09_V1A_Decision_Core_v1.0_FROZEN.md`: End-to-end V1A decision core execution.
@@ -154,11 +154,11 @@ ContentOS is specification-driven. The codebase does not treat Markdown specific
 | **M2** | Evidence, Proposition & Epistemic State Engine (76 vectors) | **VERIFIED** | `m2-v9-verified` |
 | **M3** | Governance & Policy Engine (80 vectors, Policy DSL) | **VERIFIED** | `m3-v9-verified` |
 | **M4** | Content Intelligence Runtime (SPEC05 v1.0.5, Two-Phase Hashing) | **VERIFIED** | `m4-v1-verified` |
-| **M5** | Evaluation Framework & Multi-Metric Assessment (SPEC06) | **SPEC AUDIT REQUIRED** | Audit pending before implementation |
+| **M5** | Evaluation Framework & Multi-Metric Assessment (SPEC06) | **SPEC FROZEN / IMPLEMENTATION PENDING** | SPEC06 v1.0.2 audited (PASS); implementation pending |
 | **M6** | Security, Privacy, Rights & RBAC Enforcement (SPEC08) | PENDING | — |
 | **M7** | V1A Decision Core (SPEC09) | PENDING | — |
 | **M8** | Measurement & Experimentation (SPEC07) | PENDING | — |
 | **M9** | V1B Learning Closure (SPEC10) | PENDING | — |
 | **M10**| Full System Integration & Production Audit | PENDING | — |
 
-The system currently sits at **M4 VERIFIED** (`m4-v1-verified`), with a 100% green test suite (882/882 tests) across all production databases, triggers, and runtime invariants. Development is positioned to commence **Milestone M5 specification review and independent audit**.
+The system currently sits at **M4 VERIFIED** (`m4-v1-verified`), with a 100% green test suite (882/882 tests) across all production databases, triggers, and runtime invariants. SPEC06 v1.0.2 is frozen and externally audited (PASS); development is positioned to commence **Milestone M5 implementation planning**.

@@ -12,7 +12,7 @@ Implementation of ContentOS Blueprint v2.13.1 (FROZEN).
 - [docs/SECURITY_INVARIANTS.md](docs/SECURITY_INVARIANTS.md) — Non-negotiable security, isolation, and fencing invariants
 - [docs/MILESTONES.md](docs/MILESTONES.md) — Historical milestone verification records (M0–M4)
 - [docs/DEVELOPMENT_WORKFLOW.md](docs/DEVELOPMENT_WORKFLOW.md) — Audit-driven development lifecycle and operating rules
-- [docs/adr/](docs/adr/) — Architecture Decision Records (ADR-001 through ADR-005)
+- [docs/adr/](docs/adr/) — Architecture Decision Records (ADR-001 through ADR-006)
 
 > [!NOTE]
 > `docs/CURRENT_STATUS.md` is the first file a new contributor or coding agent should read before exploring or modifying the codebase.
@@ -109,7 +109,7 @@ Domain MUST NOT import from infrastructure, API, events, providers, or workflow.
 | M2 — Evidence / Proposition / Epistemic State | EXTERNALLY CLOSED (`m2-v9-verified`) |
 | M3 — Governance / Policy Engine | EXTERNALLY CLOSED (`m3-v9-verified`) |
 | M4 — Content Intelligence Runtime | EXTERNALLY CLOSED (`m4-v1-verified`) |
-| M5 — Evaluation Framework | SPEC REVIEW & AUDIT REQUIRED |
+| M5 — Evaluation Framework | SPEC FROZEN / IMPLEMENTATION PENDING |
 | M6 — Security / Privacy / Rights | PENDING |
 | M7 — V1A Decision Core | PENDING |
 | M8 — Measurement / Experimentation / Learning | PENDING |

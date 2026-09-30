@@ -187,3 +187,43 @@ ContentOS mandates auditability without reliance on non-deterministic external L
 - **No Live LLM Replay**: Replaying a historical run never calls an external model. Instead, replay verifies historical generation outputs, their `canonical_input_hash`, and their respective stage derivation and admission records against the immutable database registry.
 - **Immutable Historical Lineage**: Every generated artifact preserves parent lineage (`supersedes_task_revision_id`, `parent_candidate_id`).
 - **Cryptographic Object Addressing**: All structured and unstructured payloads in object storage are stored by SHA256 content address (`objects/<sha256>`), guaranteeing tamper evidence.
+
+---
+
+## 9. Milestone M5 Evaluation Stage Authority (SPEC06 v1.0.2 Frozen Requirements)
+
+Milestone M5 implements the content evaluation framework specified in `ContentOS_SPEC06_Evaluation_Framework_v1.0.2_FROZEN.md`. Evaluation stages inherit and extend the StageExecution distributed leasing, fencing, and immutability architecture established in Milestone M4:
+
+### Inherited StageExecution Authority Model
+Canonical evaluation stages (`ASSERTION_EXTRACT`, `ASSERTION_MAP`, `ASSERTION_VALIDATE`, `COMPOSITE_ASSESS`, `QUALITATIVE_EVALUATE`, `RISK_ASSESS`, `UNCERTAINTY_ASSESS`, `EVALUATION_CLOSURE`) execute through SPEC01 `StageExecution`. Every stage requires a mandatory trusted atomic claim before any external evaluator, model, or provider is invoked. A losing claimant (`claimed: false`) receives zero execution authority and fails closed.
+
+### Reconstructable Stage Input Identity (`EvaluationStageInputCore`)
+Stage inputs are dynamically constructed from authoritative database rows into a non-canonical, reconstructable operational DTO (`EvaluationStageInputCore`). This DTO is never persisted as a canonical domain entity or separate truth store.
+
+### Deterministic Canonical Serialization (§127A)
+`canonical_input_hash` is computed as `SHA-256(canonical_serialize(EvaluationStageInputCore))`. Hashing enforces:
+1. Lexicographical sorting of object/member keys.
+2. Deterministic typed sorting of all set-like ref collections (RunConfig revision refs, Proposition refs, EpistemicStateVersion refs, validation result refs, subject refs).
+3. Preservation of semantically ordered sequences.
+4. Language-independent deterministic null/absent representations and canonical timestamps.
+5. Strict exclusion of `canonical_input_hash` from its own preimage.
+6. Row insertion order invariance.
+
+### Full RunConfig Identity and Stage-Utilized Config Binding
+Every stage input binds the full immutable `RunConfig` identity:
+- `run_config_id`
+- canonical `runtime_parameters`
+- complete normalized ref sets: `prompt_revision_refs`, `model_config_revision_refs`, `tool_config_revision_refs`, `schema_revision_refs`, `retriever_revision_refs`, `evaluator_revision_refs`
+AND
+- the exact stage-utilized config member revisions actually used by that stage.
+A selected config must be an exact, proven member of the pinned RunConfig closure. Selecting a different config member or altering runtime parameters produces a distinct canonical input and yields a different `canonical_input_hash`.
+
+### Commit-Time Server-Side Reconstruction & Revalidation (§150A)
+All evaluation persistence transactions enforce pre-commit revalidation inside the atomic database transaction:
+- **Category A: Evaluation Write Transactions (§151–§157)**: Re-resolve Run, DecisionCycle, and StageExecution under scope-first locks; verify fencing_token and cycle writability (cycle has not crossed `FREEZING`); reconstruct `EvaluationStageInputCore` from trusted database rows; verify byte equality between recomputed hash and `StageExecution.canonical_input_hash`; verify exact RunConfig closure; verify object-specific refs; insert ONLY the already-frozen canonical evaluation object; transition StageExecution to `COMPLETED`; write outbox events.
+- **Category B: Evaluation Closure Transaction (§158)**: Executes through the mandatory `EVALUATION_CLOSURE` StageExecution. Reconstructs the exact closure-stage `EvaluationStageInputCore` (§133A); recomputes and verifies `canonical_input_hash`; verifies full RunConfig closure; verifies all material assertion, validation, composite, qualitative, risk, and uncertainty refs; rejects closure on any discrepancy without silent rebase; transitions `EVALUATION_CLOSURE` StageExecution to `COMPLETED` atomically. Does NOT create a synthetic evaluation entity or duplicate truth store.
+
+### Scope-First Isolation, Distributed Fencing, and FREEZING Barrier
+All database queries embed `tenant_id` and null-safe `workspace_id` in their `WHERE` clauses prior to row inspection. Fencing tokens prevent stale worker commits after lease takeover. The `FREEZING` barrier strictly rejects late claims or evaluation writes after cycle freeze.
+
+*(Note: These requirements represent the frozen M5 specification baseline; M5 implementation is currently pending.)*

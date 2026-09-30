@@ -93,7 +93,7 @@ This document outlines the mandatory development protocol for ContentOS. Every e
 ## 2. Cardinal Operating Rules
 
 ### Rule 1: Never Implement Against an Unfrozen or Unaudiated Specification
-Implementation must never begin against draft, working, or unaudited specification documents. Even when an upstream specification file exists (e.g., `ContentOS_SPEC06_Evaluation_Framework_v1.0.1_FROZEN.md`), work begins only after the specification is formally audited for the current milestone, verified free of gaps and contradictions, confirmed in repository evidence, and cryptographically pinned with its SHA256 checksum recorded in `docs/CURRENT_STATUS.md`.
+Implementation must never begin against draft, working, or unaudited specification documents. Even when an upstream specification file exists (e.g., `ContentOS_SPEC06_Evaluation_Framework_v1.0.2_FROZEN.md`), work begins only after the specification is formally audited for the current milestone, verified free of gaps and contradictions, confirmed in repository evidence, and cryptographically pinned with its SHA256 checksum recorded in `docs/CURRENT_STATUS.md`.
 
 ### Rule 2: Never Modify a Frozen Specification During Implementation
 If a defect, contradiction, or gap is discovered in a frozen specification during implementation:

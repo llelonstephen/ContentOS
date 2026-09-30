@@ -152,3 +152,21 @@ This catalog documents the core security and correctness invariants enforced acr
 - **Why**: Prevents architecture drift, spec divergence, and unvetted relational sprawl.
 - **Enforced at**: Code audits and preflight verification vectors.
 - **Typical Regression/Attack**: Creating a new canonical `PreProviderManifest` database table and registering it in `immutable_entity_registry` when the specification requires it to be reconstructable in-memory.
+
+---
+
+## 17. Milestone M5 Evaluation Stage Authority and Closure Hashing (SPEC06 v1.0.2 Frozen Requirements)
+
+- **Invariant**:
+  - **Mandatory Atomic Claim**: An evaluator, model, or provider may only be invoked after successful atomic claim of a `StageExecution` with exact tenant/workspace scope, `run_id`, `decision_cycle_id`, `stage_name`, `idempotency_key`, and `canonical_input_hash`. Losing claimants receive zero execution authority.
+  - **Non-Canonical DTO**: `EvaluationStageInputCore` is a non-canonical, reconstructable operational DTO and MUST NOT become a canonical domain entity or separate truth store.
+  - **Deterministic Serialization**: Canonical hashing of stage inputs follows §127A deterministic serialization (sorted keys, typed deterministic sorting of set-like collections, canonical timestamps, preimage exclusion).
+  - **Full RunConfig & Selected Config Binding**: Every stage input binds the full immutable `RunConfig` identity (`run_config_id`, `runtime_parameters`, and normalized prompt, model, tool, schema, retriever, evaluator ref sets) AND the exact stage-utilized config member revisions actually used. Selecting an unpinned config fails closed.
+  - **Commit-Time Trusted Reconstruction**: Inside the atomic commit transaction, the worker must re-read trusted records directly from the database, reconstruct `EvaluationStageInputCore`, recompute `canonical_input_hash`, and assert byte-exact equality with `StageExecution.canonical_input_hash`. Stale workers or hash mismatches fail closed with zero silent repair or rebase (§150A).
+  - **Exact Closure Reference Package Hashing**: `EVALUATION_CLOSURE` StageExecution binds the exact closure package (§133A). Any reference change between claim and commit produces a hash mismatch and rejects closure; silent rebase is strictly prohibited (§158).
+  - **Preservation of Core Boundaries**: Stale-worker fencing, lease takeover protection, scope-first tenant isolation, and the `FREEZING` barrier apply fully to all evaluation stages.
+- **Why**: Prevents untrusted model execution outside lease authority, configuration drift, silent rebase of unvalidated evaluation artifacts into release snapshots, and cross-tenant existence leaks.
+- **Enforced at**: Future Milestone M5 evaluation stage repositories, orchestrators, and commit ports (formalized in `ContentOS_SPEC06_Evaluation_Framework_v1.0.2_FROZEN.md` and [ADR-006](adr/ADR-006-spec06-evaluation-stage-authority.md)).
+- **Typical Regression/Attack**: Calling an evaluator model before claiming a stage lease; altering selected model or evaluator revision without changing `canonical_input_hash`; or silently substituting favorable validation results during snapshot closure.
+
+*(Note: These requirements represent the frozen M5 specification baseline; M5 implementation is currently pending.)*

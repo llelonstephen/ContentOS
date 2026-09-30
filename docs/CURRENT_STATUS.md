@@ -14,12 +14,12 @@
 | **Verified Implementation Commit** | `30ab5def8e2cab540c6811a8f577a995d188e10f` |
 | **Current Working Branch** | `m5-base` |
 | **Next Milestone** | **M5 / SPEC06** |
-| **Operational State** | **SPEC06 REVIEW / EXTERNAL SPEC AUDIT REQUIRED BEFORE IMPLEMENTATION** |
+| **Operational State** | **SPEC06 v1.0.2 FROZEN AND EXTERNALLY AUDITED / M5 IMPLEMENTATION PLANNING (NOT YET IMPLEMENTED)** |
 | **Authoritative SPEC05** | `ContentOS_SPEC05_Content_Intelligence_Runtime_v1.0.5_FROZEN.md` |
 | **Frozen SPEC05 SHA256** | `c8d645700d24091a4853e83b27f1a2e7218f6f4b3b83925a1541224c84e0eeaf` |
-| **Upcoming SPEC06 File** | `ContentOS_SPEC06_Evaluation_Framework_v1.0.1_FROZEN.md` |
-| **SPEC06 SHA256** | `8a3c0420fefda8dfed367f55d86f3f81375c5c2bbc7bad4e0800247e31a9cb47` |
-| **SPEC06 Audit Status** | **NOT PROVEN (independent external specification audit required)** |
+| **Authoritative SPEC06** | `ContentOS_SPEC06_Evaluation_Framework_v1.0.2_FROZEN.md` |
+| **Frozen SPEC06 SHA256** | `5c8e61eb5203a33a58727ec0eb98a194326c512b01e536e5bea5ef0a093c8df5` |
+| **External Specification Audit** | **PASS** (Candidate SHA256: `bbe9cd003dd4244357f32716630891b5a3cb288b2e69c74422ede93531667204`, Blockers: 0, Partials: 0) |
 
 ---
 
@@ -40,6 +40,7 @@
 >    - [ADR-003](adr/ADR-003-stage-execution-fencing.md) (Stage execution claims & fencing)
 >    - [ADR-004](adr/ADR-004-runconfig-schema-role-binding.md) (RunConfig schema role bindings)
 >    - [ADR-005](adr/ADR-005-audience-two-phase-hashing.md) (Audience two-phase hashing)
+>    - [ADR-006](adr/ADR-006-spec06-evaluation-stage-authority.md) (SPEC06 evaluation stage execution and closure authority model)
 > 7. The relevant **Frozen Specification** file(s) for your assigned milestone.
 >
 > **CRITICAL CONSTRAINTS:**
@@ -144,18 +145,26 @@ The following core components have undergone multi-round external security audit
 ## 7. Known Open Work (Milestone M5 Scope)
 
 Next milestone: **M5 / SPEC06**
-State: **SPEC06 REVIEW / EXTERNAL SPEC AUDIT REQUIRED BEFORE IMPLEMENTATION**
+State: **SPEC06 v1.0.2 FROZEN AND EXTERNALLY AUDITED / M5 IMPLEMENTATION PLANNING (NOT YET IMPLEMENTED)**
 
-- **Specification**: `ContentOS_SPEC06_Evaluation_Framework_v1.0.1_FROZEN.md`
-- **SHA256**: `8a3c0420fefda8dfed367f55d86f3f81375c5c2bbc7bad4e0800247e31a9cb47`
-- **Independent Specification Audit**: **NOT PROVEN** from repository evidence. An independent external audit of SPEC06 must be completed, recorded, and verified before implementation begins.
-- **Core Milestone Scope (Pending Approved Audit)**:
+- **Authoritative Specification**: `ContentOS_SPEC06_Evaluation_Framework_v1.0.2_FROZEN.md`
+- **Frozen SHA256**: `5c8e61eb5203a33a58727ec0eb98a194326c512b01e536e5bea5ef0a093c8df5`
+- **External Specification Audit**: **PASS**
+  - External Audit Input SHA256: `bbe9cd003dd4244357f32716630891b5a3cb288b2e69c74422ede93531667204`
+  - Blockers: 0
+  - Partials: 0
+- **Locked Audit Suite**: 80 adversarial vectors, 34 static preflight checks, 34 acceptance criteria.
+- **Important Note**: Specification freeze and external audit PASS confirm normative completeness and upstream compatibility; this does **NOT** mean Milestone M5 implementation is verified. M5 implementation has not yet started.
+- **Core Milestone Scope (To Be Implemented)**:
   - Evaluation Contract modeling (`EvalContractRevision`).
-  - Assertion Extraction: Deterministic decomposition of `ContentCandidate` text into verifiable assertions.
-  - Evaluator Dispatch: Execution of deterministic rule-based evaluators, epistemic consistency checkers, metric scorers, and model-based evaluators.
-  - Evaluation Admission & Scoring: Aggregation of individual scores, confidence intervals, and threshold checks.
-  - Evaluation Gate Decision: Gate outcome formulation (`PASS`, `FAIL`, `REVIEW_REQUIRED`) for consumption by Milestone M7 (Decision Core).
-  - Persistence & Fencing: Evaluation stage execution claims, evaluation result registries, and immutability triggers.
+  - Assertion Extraction: Deterministic decomposition of `ContentCandidate` text into verifiable assertions (`ContentAssertion`).
+  - Assertion Mapping: Mapping assertions to propositions (`AssertionPropositionLink`).
+  - Assertion Validation: Validation of mapped assertions against exact decision-time EpistemicState (`AssertionValidationResult`).
+  - Composite Impression Assessment: Discovery and looping over material implied assertions until stable or review-required (`CompositeImpressionAssessment`).
+  - Qualitative Evaluation: Multi-dimensional evaluation with hard gates against exact `EvalContractRevision` (`QualitativeEvaluation`).
+  - Risk & Uncertainty Assessment: Independent risk modeling (`RiskAssessment`) and uncertainty bounding (`UncertaintyAssessment`).
+  - Snapshot Evaluation Closure: Verification of complete evaluation package closure through mandatory `EVALUATION_CLOSURE` StageExecution.
+  - Persistence & Fencing: Tenant-scoped StageExecution atomic claims, deterministic input hashing (`EvaluationStageInputCore`), commit-time reconstruction, and PostgreSQL immutability triggers.
 
 ---
 
@@ -163,11 +172,9 @@ State: **SPEC06 REVIEW / EXTERNAL SPEC AUDIT REQUIRED BEFORE IMPLEMENTATION**
 
 1. **Verify Baseline State**:
    Confirm working tree is clean at commit `30ab5def8e2cab540c6811a8f577a995d188e10f` on branch `m5-base`.
-2. **Review & Audit SPEC06**:
-   Conduct an independent external specification audit of `ContentOS_SPEC06_Evaluation_Framework_v1.0.1_FROZEN.md` (SHA256: `8a3c0420fefda8dfed367f55d86f3f81375c5c2bbc7bad4e0800247e31a9cb47`).
-3. **Verify & Freeze Status**:
-   Confirm that SPEC06 has no contradictions, underspecifications, or boundary bypasses. Record the audit PASS in repository documentation.
-4. **Draft Implementation Plan**:
-   Only after the specification audit passes, draft the Milestone M5 implementation plan delineating domain types, schema migrations, stage execution definitions, and evaluator ports.
-5. **Execute Audited Implementation**:
-   Follow [`docs/DEVELOPMENT_WORKFLOW.md`](DEVELOPMENT_WORKFLOW.md) strictly.
+2. **Authoritative Specification Established**:
+   `ContentOS_SPEC06_Evaluation_Framework_v1.0.2_FROZEN.md` (SHA256: `5c8e61eb5203a33a58727ec0eb98a194326c512b01e536e5bea5ef0a093c8df5`) is frozen following external audit PASS (0 blockers, 0 partials).
+3. **Draft Milestone M5 Implementation Plan**:
+   Draft the M5 implementation plan following the 80 adversarial vectors and 34 static preflight checks locked in SPEC06 v1.0.2, delineating domain entities, DTOs, database schema migrations, and evaluator ports.
+4. **Execute Audited Implementation**:
+   Implement M5 in accordance with [`docs/DEVELOPMENT_WORKFLOW.md`](DEVELOPMENT_WORKFLOW.md).
