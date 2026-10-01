@@ -1,5 +1,6 @@
 import { RegistryValidationError } from '../../../domain/services/registry-validator.js';
-import type { StageFencingContext } from './stage-fencing-coordinator.js';
+import { M4_CONTENT_RUNTIME_STAGES, type StageFencingContext } from './stage-fencing-coordinator.js';
+import { EVALUATION_STAGE_NAMES } from '../../../domain/evaluation/index.js';
 import type { ContentRuntimeReference } from './content-runtime-reference-loader.js';
 
 export type StageExecutionOutputRef = ContentRuntimeReference & { ordinal: number };
@@ -67,14 +68,29 @@ export async function completeContentStageExecution(
       `;
     }
   }
-  const [result] = await sqlTx`
-    SELECT public.complete_m4_stage_execution(
-      ${context.stageExecutionId}, ${scope.tenantId}, ${scope.workspaceId ?? null},
-      ${context.runId}, ${context.decisionCycleId}, ${context.cycleEpoch},
-      ${context.stageName}, ${context.leaseOwner}, ${context.fencingToken},
-      ${context.idempotencyKey}, ${context.canonicalInputHash}
-    ) AS completed
-  `;
+  let result;
+  if (M4_CONTENT_RUNTIME_STAGES.includes(context.stageName as any)) {
+    [result] = await sqlTx`
+      SELECT public.complete_m4_stage_execution(
+        ${context.stageExecutionId}, ${scope.tenantId}, ${scope.workspaceId ?? null},
+        ${context.runId}, ${context.decisionCycleId}, ${context.cycleEpoch},
+        ${context.stageName}, ${context.leaseOwner}, ${context.fencingToken},
+        ${context.idempotencyKey}, ${context.canonicalInputHash}
+      ) AS completed
+    `;
+  } else if (EVALUATION_STAGE_NAMES.includes(context.stageName as any)) {
+    [result] = await sqlTx`
+      SELECT public.complete_m5_stage_execution(
+        ${context.stageExecutionId}, ${scope.tenantId}, ${scope.workspaceId ?? null},
+        ${context.runId}, ${context.decisionCycleId}, ${context.cycleEpoch},
+        ${context.stageName}, ${context.leaseOwner}, ${context.fencingToken},
+        ${context.idempotencyKey}, ${context.canonicalInputHash}
+      ) AS completed
+    `;
+  } else {
+    throw new RegistryValidationError('STAGE_NOT_SUPPORTED', `Stage '${context.stageName}' is not supported for completion.`);
+  }
+
   if (result?.completed !== true) {
     throw new RegistryValidationError(
       'STALE_WORKER_COMMIT_REJECTED',
